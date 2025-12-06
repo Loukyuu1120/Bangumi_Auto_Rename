@@ -10,6 +10,8 @@ CONFIG_DEFAULT = {
     "movie_path": "",
     "anime_path": "",
     "anime_movie_path": "",
+    "monitor_paths": [],
+    "exclude_dirs": [],
     "mode": "链接",
     "docker_mnt": "/media",
     "ai_provider": "openai",
@@ -26,6 +28,9 @@ CONFIG_DEFAULT = {
     "openai_output_format": "function_calling",  # OpenAI输出格式选择
     "ai_auto_save": False,  # 是否自动保存AI分析结果
     "log_level": "INFO",  # 日志等级
+    "monitor_enabled": False,  # 是否启用监控
+    "monitor_paths": [],  # 监控目录列表
+    "monitor_exclude_dirs": [],  # 监控排除目录列表
 }
 
 CN_MAP = {
@@ -50,25 +55,28 @@ CN_MAP = {
     "gemini_temperature": "🔥 Gemini温度",
     "ai_auto_save": "💾 自动保存AI分析",
     "log_level": "📝 日志等级",
+    "monitor_enabled": "💡 启用监控",
+    "monitor_paths": "📁 监控目录",
+    "monitor_exclude_dirs": "🚫 监控排除目录",
 }
 
 
 class ConfigManager:
     def __init__(self) -> None:
         if not CONFIG_PATH.exists():
-            with open(CONFIG_PATH, 'w', encoding='UTF-8') as file:
+            with open(CONFIG_PATH, "w", encoding="UTF-8") as file:
                 json.dump(CONFIG_DEFAULT, file, indent=4, ensure_ascii=False)
 
         self.update_config()
 
     def write_config(self):
         # 使用缓存文件避免强行关闭造成文件损坏
-        temp_file_path = CONFIG_PATH.parent / f'{CONFIG_PATH.name}.bak'
+        temp_file_path = CONFIG_PATH.parent / f"{CONFIG_PATH.name}.bak"
 
         if temp_file_path.exists():
             temp_file_path.unlink()
 
-        with open(temp_file_path, 'w', encoding='UTF-8') as file:
+        with open(temp_file_path, "w", encoding="UTF-8") as file:
             json.dump(self.config, file, indent=4, ensure_ascii=False)
 
         CONFIG_PATH.unlink()
@@ -76,7 +84,7 @@ class ConfigManager:
 
     def update_config(self):
         # 打开config.json
-        with open(CONFIG_PATH, 'r', encoding='UTF-8') as f:
+        with open(CONFIG_PATH, "r", encoding="UTF-8") as f:
             self.config: Dict[str, Any] = json.load(f)
         # 对没有的值，添加默认值
         for key in CONFIG_DEFAULT:
@@ -101,12 +109,12 @@ class ConfigManager:
             self.update_config()
             return self.config[key]
         else:
-            return ''
+            return ""
 
     def set_config(self, key: str, value: Union[str, bool]) -> bool:
         if key in CONFIG_DEFAULT:
             # 对URL类型的配置项进行特殊处理
-            if key.endswith('_base_url') and value and isinstance(value, str):
+            if key.endswith("_base_url") and value and isinstance(value, str):
                 value = self._normalize_url(value)
 
             # 设置值
@@ -131,11 +139,11 @@ class ConfigManager:
             return url
 
         # 去除结尾的斜杠
-        url = url.rstrip('/')
+        url = url.rstrip("/")
 
         # 如果没有协议，默认添加https
-        if not url.startswith(('http://', 'https://')):
-            url = 'https://' + url
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
 
         # 验证URL格式
         try:
@@ -163,7 +171,7 @@ class ConfigManager:
 
         try:
             parsed = urlparse(url)
-            return bool(parsed.netloc and parsed.scheme in ('http', 'https'))
+            return bool(parsed.netloc and parsed.scheme in ("http", "https"))
         except Exception:
             return False
 

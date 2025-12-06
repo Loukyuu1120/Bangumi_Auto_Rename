@@ -1,16 +1,26 @@
-FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/python:3.10-slim-bullseye
+FROM python:3.10-slim-bullseye
 
-ENV TZ=Asia/Shanghai
+ENV TZ=Asia/Shanghai \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
 WORKDIR /Bangumi_Auto_Rename
 
-COPY . /Bangumi_Auto_Rename
+COPY requirements_docker.txt ./
 
-RUN echo "deb https://mirrors.aliyun.com/debian/ bullseye main non-free contrib" > /etc/apt/sources.list
-RUN apt-get update && apt-get install -y git && apt-get install -y python-is-python3
-RUN pip install --upgrade pip 
-RUN apt-get install -y libnss3 libnspr4 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libatspi2.0-0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libxkbcommon0 libasound2 libpango-1.0-0 libcairo2
-RUN pip install -r requirements_docker.txt -i https://mirrors.aliyun.com/pypi/simple/
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        git \
+        python-is-python3 \
+        libnss3 libnspr4 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
+        libdrm2 libatspi2.0-0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+        libgbm1 libxkbcommon0 libasound2 libpango-1.0-0 libcairo2 && \
+    python -m pip install --upgrade pip && \
+    pip install -r requirements_docker.txt && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY . /Bangumi_Auto_Rename
 
 EXPOSE 5999
 

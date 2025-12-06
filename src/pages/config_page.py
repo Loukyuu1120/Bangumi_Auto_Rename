@@ -61,6 +61,27 @@ class ConfigPage(ui.dialog):
             for cn in ai_configs:
                 self._create_config_row(cn)
 
+            ui.separator().style("margin: 20px 0;")
+
+            # 监控配置
+            ui.label("监控配置").style(
+                "font-size: 16px; font-weight: bold; margin-top: 10px;"
+            )
+            ui.label(
+                "说明：启用后会监控所配置目录及其子目录中新建的文件，并自动重命名。"
+            ).style("font-size: 12px; color: gray;")
+            ui.label(
+                "排除目录按名称匹配：只要路径中包含这些目录名（如 @Recycle、.Trash），就会被忽略。"
+            ).style("font-size: 12px; color: gray; margin-bottom: 5px;")
+
+            monitor_configs = [
+                "monitor_enabled",
+                "monitor_paths",
+                "monitor_exclude_dirs",
+            ]
+            for cn in monitor_configs:
+                self._create_config_row(cn)
+
             # AI功能测试按钮
             with ui.row(wrap=False).classes("w-full justify-center mt-4 gap-2"):
                 RedButton(
@@ -150,6 +171,62 @@ class ConfigPage(ui.dialog):
                         )
                         tg.style("font-size: 10px")
                         tg.classes("flex no-wrap w-full")
+                    elif cn == "monitor_enabled":
+                        tg = RedToogle(
+                            ["启用", "禁用"],
+                            value="启用" if cm.get_config(cn) else "禁用",
+                            on_change=lambda e, c=cn: self._change(
+                                c, e.value == "启用"
+                            ),
+                        )
+                        tg.style("font-size: 10px")
+                        tg.classes("flex no-wrap w-full")
+
+                    elif cn == "monitor_paths":
+                        # config.json 里是列表，这里用多行文本每行一个路径
+                        current_value = cm.get_config(cn) or []
+                        if isinstance(current_value, list):
+                            text_value = "\n".join(current_value)
+                        else:
+                            text_value = str(current_value)
+
+                        ui.textarea(
+                            value=text_value,
+                            placeholder="每行一个要监控的完整目录路径，例如：\n/media/downloads/anime\n/media/downloads/movie",
+                            on_change=lambda e, c=cn: self._change(
+                                c,
+                                [
+                                    line.strip()
+                                    for line in e.value.splitlines()
+                                    if line.strip()
+                                ],
+                            ),
+                        ).props("filled").props("rows=3").style(
+                            "flex-grow: 2"
+                        )
+
+                    elif cn == "monitor_exclude_dirs":
+                        current_value = cm.get_config(cn) or []
+                        if isinstance(current_value, list):
+                            text_value = "\n".join(current_value)
+                        else:
+                            text_value = str(current_value)
+
+                        ui.textarea(
+                            value=text_value,
+                            placeholder="每行一个要排除的目录名（按名称匹配，不是完整路径），例如：\n@Recycle\n.Trash\ntemp",
+                            on_change=lambda e, c=cn: self._change(
+                                c,
+                                [
+                                    line.strip()
+                                    for line in e.value.splitlines()
+                                    if line.strip()
+                                ],
+                            ),
+                        ).props("filled").props("rows=3").style(
+                            "flex-grow: 2"
+                        )
+
                     else:
                         ui.input(
                             value=cm.get_config(cn),
@@ -169,10 +246,10 @@ class ConfigPage(ui.dialog):
                         ui.label("").style("min-width: 60px")
 
     async def pick(self, *, key: str) -> None:
-        result = await local_file_picker('~', multiple=True)
+        result = await local_file_picker("~", multiple=True)
         if isinstance(result, Sequence):
             result = result[0]
-        logger.info(f'[配置] {key} 选择了 {result}')
+        logger.info(f"[配置] {key} 选择了 {result}")
         self._change(key, result)
 
     def _change(self, key: str, value: str) -> None:
@@ -202,7 +279,7 @@ class ConfigPage(ui.dialog):
             if "api_key" in key:
                 config_show[key] = len(str(config_show[key])) * "*"
 
-        logger.info('[配置] 配置已修改为： {}'.format(config_show))
+        logger.info("[配置] 配置已修改为： {}".format(config_show))
         ui.notify("✅ 配置保存成功", type="positive")
         # 更新运行时日志级别
         try:

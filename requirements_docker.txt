@@ -63,3 +63,4 @@ openai>=1.54.0
 hachoir>=3.3.0
 google>=3.0.0
 google-genai>=0.8.0
+watchdog>=6.0.0
