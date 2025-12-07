@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union, Any
 
 from ..logger import logger
 from .utils import VIDEO_SUFFIX
@@ -15,8 +15,77 @@ class AIProcessor:
         self.ai_client = AIClient()
         self.video_analyzer = VideoAnalyzer()
 
+    def analyze_search_metadata(self, path: Path) -> Optional[Dict[str, Any]]:
+        """
+        当常规TMDB搜索失败时，使用AI分析目录和文件名以推断元数据。
+
+        Args:
+            path: 处理任务的路径（文件或文件夹）
+
+        Returns:
+            Dict containing:
+            - name: str (推断的官方名称)
+            - year: int (年份)
+            - is_movie: bool (是否为电影)
+            - tmdb_id: Optional[str] (如果AI能确定ID)
+            - confidence: str (High/Medium/Low)
+        """
+        if not self.ai_client.is_available():
+            logger.info("[AI搜索] AI功能未启用，跳过智能分析")
+            return None
+
+        # 1. 确定上下文信息
+        # 如果是单文件，我们需要其父文件夹名称作为上下文
+        # 如果是目录，我们需要目录名称作为上下文
+        if path.is_file():
+            folder_name = path.parent.name
+            target_path = path.parent  # 用于收集同目录下其他文件辅助判断
+        else:
+            folder_name = path.name
+            target_path = path
+
+        # 2. 收集视频文件列表
+        video_files = self._collect_video_files(target_path)
+
+        if not video_files:
+            logger.warning("[AI搜索] 未找到视频文件，无法进行AI元数据分析")
+            return None
+
+        # 3. 提取文件名用于AI分析
+        # 限制文件数量，避免Token过长，取前3个和后3个通常足够识别剧集特征
+        all_file_names = [f.name for f in video_files]
+        if len(all_file_names) > 6:
+            file_names_context = all_file_names[:3] + all_file_names[-3:]
+        else:
+            file_names_context = all_file_names
+
+        # 构造给AI的上下文数据
+        context_data = {
+            "folder_name": folder_name,
+            "file_names": file_names_context,
+            "total_files": len(all_file_names)
+        }
+
+        logger.info(f"[AI搜索] 正在请求AI推断元数据: {folder_name} (参考文件数: {len(file_names_context)})")
+
+        try:
+            # 调用 AI Client 进行分析
+            result = self.ai_client.analyze_metadata(context_data)
+
+            if result:
+                name = result.get('name')
+                year = result.get('year')
+                m_type = "Movie" if result.get('is_movie') else "TV"
+                logger.info(f"[AI搜索] AI推断结果: {name} ({year}) - {m_type}")
+                return result
+
+        except Exception as e:
+            logger.error(f"[AI搜索] AI分析过程中发生错误: {e}")
+
+        return None
+
     def analyze_anime_files(
-        self, path: Path, anime_info: Dict
+            self, path: Path, anime_info: Dict
     ) -> Optional[AIAnalysisResult]:
         """
         使用AI分析动漫文件的映射关系
@@ -24,7 +93,6 @@ class AIProcessor:
         Args:
             path: 本地文件路径
             anime_info: TMDB动漫信息
-            season_info: 特定季度信息（可选）
 
         Returns:
             验证后的AI分析结果
@@ -55,10 +123,10 @@ class AIProcessor:
         return ai_result
 
     def apply_ai_mapping(
-        self,
-        ai_result: AIAnalysisResult | None,
-        base_path: Path,
-        work_path: Path,
+            self,
+            ai_result: AIAnalysisResult | None,
+            base_path: Path,
+            work_path: Path,
     ) -> Dict[Path, Path]:
         """
         应用AI分析结果生成全新的文件映射，并处理关联文件。
@@ -143,7 +211,7 @@ class AIProcessor:
                     if other_file.name.startswith(f"{video_filename}."):
                         # 提取关联文件的后缀部分（保留所有后缀，如 .lang.ass）
                         suffix_part = other_file.name[
-                            len(video_filename) :  # noqa: E203
+                            len(video_filename):  # noqa: E203
                         ]
 
                         # 构建关联文件的新文件名：新视频文件名（不含扩展名）+ 关联文件后缀
@@ -169,6 +237,12 @@ class AIProcessor:
         if path.is_file():
             if path.suffix.lower() in VIDEO_SUFFIX:
                 video_files.append(path)
+            try:
+                for item in path.parent.iterdir():
+                    if item.is_file() and item != path and item.suffix.lower() in VIDEO_SUFFIX:
+                        video_files.append(item)
+            except Exception:
+                pass
         else:
             for item in path.rglob("*"):
                 if item.is_file() and item.suffix.lower() in VIDEO_SUFFIX:

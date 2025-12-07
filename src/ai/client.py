@@ -1,5 +1,5 @@
 import json
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 from ..logger import logger
 from .models import AIAnalysisResult
@@ -27,10 +27,32 @@ class AIClient:
         """检查AI客户端是否可用"""
         return bool(self.enabled and self._client and self._client.is_available())
 
+    def analyze_metadata(self, context_data: Dict) -> Optional[Dict[str, Any]]:
+        """
+        分析文件名和上下文以推断元数据（名称、年份、类型）
+
+        Args:
+            context_data: 包含 folder_name 和 file_names 的字典
+
+        Returns:
+            Dict: 包含 name, year, is_movie, tmdb_id, confidence
+        """
+        if not self.is_available():
+            logger.warning(f"[AI搜索] AI功能未启用或{self.provider}客户端不可用")
+            return None
+
+        logger.info(f"[AI搜索] 使用 {self.provider.upper()} 进行元数据推断")
+
+        # 调用具体客户端的实现
+        # 注意：你需要确保 BaseAIClient 及其子类实现了 analyze_metadata 方法
+        result = self._client.analyze_metadata(context_data)
+
+        return result
+
     def analyze_episode_mapping(
-        self,
-        anime_info: Dict,
-        local_files: List[Dict],
+            self,
+            anime_info: Dict,
+            local_files: List[Dict],
     ) -> Optional[AIAnalysisResult]:
         """
         分析本地文件与TMDB剧集的映射关系
@@ -55,16 +77,55 @@ class AIClient:
         return result
 
     @staticmethod
+    def build_metadata_prompt(context_data: Dict) -> str:
+        """
+        构建元数据分析的提示词
+
+        Args:
+            context_data: 包含 folder_name 和 file_names
+
+        Returns:
+            提示词字符串
+        """
+        folder_name = context_data.get("folder_name", "Unknown")
+        file_names = context_data.get("file_names", [])
+        total_files = context_data.get("total_files", len(file_names))
+
+        files_str = "\n".join([f"- {name}" for name in file_names])
+
+        prompt = f"""
+请分析以下文件路径信息，推断该媒体对应的官方名称（Official Name）、发行年份和类型（TV或Movie）。
+
+目录名称: 
+{folder_name}
+
+包含的文件 (共 {total_files} 个，仅列出部分示例):
+{files_str}
+
+要求：
+1. 请提取最准确的官方名称（优先英文名，其次原名）。
+2. 如果可以确定，请提供发行年份。
+3. 根据文件名特征（如S01E01表示TV，年份+文件名表示Movie）判断是剧集还是电影。
+4. 如果文件名中包含明显的TMDB ID信息，请提取。
+5. 请给出你对这次推断的置信度 (High/Medium/Low)。
+
+"""
+        return prompt
+
+    @staticmethod
+    def get_metadata_system_prompt() -> str:
+        """
+        获取元数据分析的系统提示词
+        """
+        return (
+            "你是一个媒体文件元数据专家。你的任务是根据混乱的文件名和目录名，"
+            "精准识别出电影或剧集的标准名称和年份。你只输出JSON格式的结果。"
+        )
+
+    @staticmethod
     def build_common_prompt(anime_info: Dict, local_files: List[Dict]) -> str:
         """
         构建通用的分析提示词，不包含JSON格式要求
-
-        Args:
-            anime_info: TMDB动漫信息
-            local_files: 本地文件信息列表，包含文件名、路径、时长等
-
-        Returns:
-            通用的分析提示词
         """
         # 构建TMDB信息
         tmdb_info = f"""
@@ -111,11 +172,8 @@ class AIClient:
     def get_system_prompt() -> str:
         """
         获取通用的系统提示词
-
-        Returns:
-            系统提示词
         """
         return (
-            "你是一个专业的动漫文件重命名助手。你需要分析本地动漫文件与TMDB数据库中剧集信息的对应关系，特别关注动漫BD发布与官方分季的差异。"
-            + "请你只输出匹配到的季度和剧集信息，不要输出其他未匹配到tmdb信息的内容。"
+                "你是一个专业的动漫文件重命名助手。你需要分析本地动漫文件与TMDB数据库中剧集信息的对应关系，特别关注动漫BD发布与官方分季的差异。"
+                + "请你只输出匹配到的季度和剧集信息，不要输出其他未匹配到tmdb信息的内容。"
         )

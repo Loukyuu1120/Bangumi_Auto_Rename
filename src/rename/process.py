@@ -466,6 +466,8 @@ class Rename:
             return self.error_reply(_uuid, '你还没有配置TMDB的Key！...', path, _is_anime, _is_movie)
 
         enable_scrape = cm.get_config('scrape_metadata')
+        global_use_ai = bool(cm.get_config('use_ai'))
+        effective_use_ai = use_ai if use_ai is not None else global_use_ai
 
         logger.info(f'[处理任务] 开始处理{path.name}')
 
@@ -513,12 +515,40 @@ class Rename:
             # 正常自动识别流程
             task_type = self.check_task_type(_uuid, rtpath_name, year, path, _is_anime, _is_movie)
             if isinstance(task_type, str):
+                if effective_use_ai and self.ai_processor.ai_client.is_available():
+                    logger.info(f"[处理任务] 常规识别失败: {task_type}，尝试使用AI分析元数据...")
+
+                    # 调用刚才在 ai_processor 中添加的方法
+                    ai_meta = self.ai_processor.analyze_search_metadata(path)
+
+                    if ai_meta:
+                        ai_name = ai_meta.get('name')
+                        ai_tmdb_id = ai_meta.get('tmdb_id')
+                        ai_is_movie = ai_meta.get('is_movie', False)
+
+                        logger.info(f"[处理任务] AI推断成功: Name={ai_name}, TMDB_ID={ai_tmdb_id}, Movie={ai_is_movie}")
+
+                        # 使用 AI 提供的更准确的信息递归重新处理
+                        # 这样可以利用 process 方法开头的 cus_tmdb_id 或 cus_name 逻辑
+                        return self.process(
+                            path,
+                            _is_anime=_is_anime,  # 保持原有的倾向（如果有）
+                            _is_movie=ai_is_movie,  # AI 判断的类型
+                            _tuuid=_tuuid,  # 保持同一个 UUID
+                            cus_name=ai_name,  # AI 提供的清洗后的名称
+                            cus_tmdb_id=ai_tmdb_id,  # 如果 AI 直接找到了 ID，这是最稳的
+                            cus_offset=cus_offset,
+                            cus_season_id=cus_season_id,
+                            use_ai=use_ai
+                        )
+                    else:
+                        logger.warning("[处理任务] AI未能推断出有效元数据")
+
+                # 如果 AI 没开启，或者 AI 也失败了，则返回原始错误
                 return self.error_reply(_uuid, task_type, path, _is_anime, _is_movie)
             name, info, is_anime, is_movie = task_type
         # =======================================================
 
-        global_use_ai = bool(cm.get_config('use_ai'))
-        effective_use_ai = use_ai if use_ai is not None else global_use_ai
         ai_available = self.ai_processor.ai_client.is_available()
         if is_movie:
             if not name:

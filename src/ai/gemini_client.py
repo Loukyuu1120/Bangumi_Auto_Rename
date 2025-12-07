@@ -1,5 +1,5 @@
 import json
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 from google import genai
 from pydantic import ValidationError
@@ -51,6 +51,63 @@ class GeminiClient(BaseAIClient):
     def is_available(self) -> bool:
         """检查Gemini客户端是否可用"""
         return bool(self.enabled and self.client and self.api_key)
+
+    def analyze_metadata(self, context_data: Dict) -> Optional[Dict[str, Any]]:
+        """
+        使用Gemini分析元数据
+        """
+        if not self.is_available():
+            return None
+
+        try:
+            from .client import AIClient
+
+            system_prompt = AIClient.get_metadata_system_prompt()
+            base_prompt = AIClient.build_metadata_prompt(context_data)
+
+            # 定义简单的元数据 Schema
+            # Gemini Python SDK 接受字典形式的 Schema
+            meta_schema = {
+                "type": "OBJECT",
+                "properties": {
+                    "name": {"type": "STRING"},
+                    "year": {"type": "INTEGER"},
+                    "is_movie": {"type": "BOOLEAN"},
+                    "tmdb_id": {"type": "STRING", "nullable": True},
+                    "confidence": {"type": "STRING", "enum": ["High", "Medium", "Low"]}
+                },
+                "required": ["name", "is_movie", "confidence"]
+            }
+
+            request_config = GenerateContentConfig(
+                system_instruction=system_prompt,
+                response_mime_type="application/json",
+                response_schema=meta_schema,
+                temperature=0.1,
+            )
+
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=base_prompt,
+                config=request_config,
+            )
+
+            if hasattr(response, 'parsed') and response.parsed:
+                # response.parsed 可能是 dict 或 object，视 SDK 版本而定，通常转换为 dict 使用
+                if isinstance(response.parsed, dict):
+                    return response.parsed
+                # 尝试转 dict
+                try:
+                    return response.parsed.model_dump()
+                except:
+                    return json.loads(response.text)
+
+            # 回退到文本解析
+            return json.loads(response.text)
+
+        except Exception as e:
+            logger.error(f"[Gemini元数据] 分析失败: {e}")
+            return None
 
     def analyze_episode_mapping(
         self,

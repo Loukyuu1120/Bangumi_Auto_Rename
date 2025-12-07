@@ -1,6 +1,6 @@
 import re
 import json
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 from openai import OpenAI
 from pydantic import ValidationError
@@ -32,6 +32,49 @@ class OpenAIClient(BaseAIClient):
     def is_available(self) -> bool:
         """检查OpenAI客户端是否可用"""
         return bool(self.enabled and self.client and self.api_key)
+
+    def analyze_metadata(self, context_data: Dict) -> Optional[Dict[str, Any]]:
+        """
+        使用OpenAI分析元数据（名称、年份、类型）
+        """
+        if not self.is_available():
+            return None
+
+        try:
+            # 局部导入避免循环引用
+            from .client import AIClient
+
+            system_prompt = AIClient.get_metadata_system_prompt()
+            user_prompt = AIClient.build_metadata_prompt(context_data)
+
+            # 强制要求返回 JSON
+            user_prompt += "\n请务必返回合法的JSON对象，包含 keys: name, year, is_movie, tmdb_id, confidence"
+
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+
+            request_params = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": 0.1,
+                # 强制使用 JSON Object 模式，这比 function calling 更适合这种简单任务
+                "response_format": {"type": "json_object"}
+            }
+
+            logger.debug(f"[OpenAI元数据] Requesting metadata analysis...")
+            response = self.client.chat.completions.create(**request_params)
+
+            content = response.choices[0].message.content
+            if not content:
+                return None
+
+            return json.loads(content)
+
+        except Exception as e:
+            logger.error(f"[OpenAI元数据] 分析失败: {e}")
+            return None
 
     def analyze_episode_mapping(
         self,

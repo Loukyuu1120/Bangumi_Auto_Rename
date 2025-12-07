@@ -2,7 +2,7 @@ import json
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 from ..config.config_manager import cm
 from ..logger import logger
@@ -43,6 +43,13 @@ class BaseAIClient(ABC):
     @abstractmethod
     def is_available(self) -> bool:
         """检查AI客户端是否可用"""
+        raise NotImplementedError
+
+    @abstractmethod
+    def analyze_metadata(self, context_data: Dict) -> Optional[Dict[str, Any]]:
+        """
+        分析元数据 (名称, 年份, 类型)
+        """
         raise NotImplementedError
 
     def _save_analysis_data(
