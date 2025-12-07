@@ -269,48 +269,64 @@ class Rename:
                 cus_season_id, cus_tmdb_id, cus_offset, use_ai
             )
 
-        if path.is_dir():
-            has_video_files = False
-            for sub_path in path.iterdir():
-                if sub_path.is_file() and sub_path.suffix.lower() in VIDEO_SUFFIX:
-                    has_video_files = True
-                    break
+        stack = [(path, _tuuid)]
+        final_result = True
 
-            if has_video_files:
-                current_uuid = _tuuid if _tuuid else str(uuid.uuid4())
-                result = self._process(
-                    path, _is_anime, _is_movie, current_uuid, cus_name,
-                    cus_season_id, cus_tmdb_id, cus_offset, use_ai
-                )
+        while stack:
+            curr_path, curr_uuid = stack.pop()
 
-                if result is True:
-                    return True
+            if curr_path.name.startswith(('.', '@', '$RECYCLE')):
+                continue
 
-                logger.warning(f"[降级处理] 目录 [{path.name}] 整体识别失败，转为尝试单独识别内部文件...")
-
-                error_task_file = TASK_PATH / f"{current_uuid}.json"
-                if error_task_file.exists():
-                    try:
-                        error_task_file.unlink()
-                    except Exception:
-                        pass
-
-            all_success = True
-            logger.info(f"[递归扫描] 进入目录: {path}")
-
-            for sub_path in path.iterdir():
-                if sub_path.name.startswith(('.', '@', '$RECYCLE')):
-                    continue
-
-                if sub_path.is_dir() or (sub_path.is_file() and sub_path.suffix.lower() in VIDEO_SUFFIX):
-                    sub_result = self.process(
-                        sub_path, _is_anime, _is_movie, None, cus_name,
+            if curr_path.is_file():
+                if curr_path.suffix.lower() in VIDEO_SUFFIX:
+                    res = self._process(
+                        curr_path, _is_anime, _is_movie, curr_uuid, cus_name,
                         cus_season_id, cus_tmdb_id, cus_offset, use_ai
                     )
-                    if isinstance(sub_result, str):
-                        all_success = sub_result
+                    if isinstance(res, str):
+                        final_result = res
+                continue
 
-            return True if all_success is True else all_success
+            if curr_path.is_dir():
+                has_video_files = False
+                for sub_path in curr_path.iterdir():
+                    if sub_path.is_file() and sub_path.suffix.lower() in VIDEO_SUFFIX:
+                        has_video_files = True
+                        break
+
+                dir_processed_successfully = False
+
+                if has_video_files:
+                    use_uuid = curr_uuid if curr_uuid else str(uuid.uuid4())
+                    res = self._process(
+                        curr_path, _is_anime, _is_movie, use_uuid, cus_name,
+                        cus_season_id, cus_tmdb_id, cus_offset, use_ai
+                    )
+
+                    if res is True:
+                        dir_processed_successfully = True
+                    else:
+                        logger.warning(f"[降级处理] 目录 [{curr_path.name}] 整体识别失败，转为尝试单独识别内部文件...")
+                        error_task_file = TASK_PATH / f"{use_uuid}.json"
+                        if error_task_file.exists():
+                            try:
+                                error_task_file.unlink()
+                            except Exception:
+                                pass
+
+                if not dir_processed_successfully:
+                    logger.info(f"[循环扫描] 进入子目录: {curr_path}")
+                    try:
+                        children = []
+                        for sub_path in curr_path.iterdir():
+                            if sub_path.is_dir() or (sub_path.is_file() and sub_path.suffix.lower() in VIDEO_SUFFIX):
+                                children.append((sub_path, None))
+                        stack.extend(children)
+                    except Exception as e:
+                        logger.error(f"遍历目录出错 {curr_path}: {e}")
+
+        return final_result
 
     def check_task_type(
             self,
