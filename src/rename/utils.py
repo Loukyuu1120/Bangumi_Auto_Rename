@@ -34,6 +34,7 @@ S0_TAG = [
     r'Chaos no Kakera',
 ]
 VIDEO_SUFFIX = [
+    '.strm',
     '.mp4',
     # '.mka',   # 一般来说无需单独分析外挂音轨
     '.mkv',

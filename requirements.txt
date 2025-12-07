@@ -1506,3 +1506,5 @@ yarl==1.20.1 ; python_version >= "3.9" and python_version < "4.0" \
     --hash=sha256:f6342d643bf9a1de97e512e45e4b9560a043347e779a173250824f8b254bd5ce \
     --hash=sha256:fe41919b9d899661c5c28a8b4b0acf704510b88f27f0934ac7a7bebdd8938d5e \
     --hash=sha256:ff70f32aa316393eaf8222d518ce9118148eddb8a53073c2403863b41033eed5
+watchdog>=6.0.0
+tmdbv3api>=1.9.0

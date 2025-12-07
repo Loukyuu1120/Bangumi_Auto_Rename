@@ -15,6 +15,8 @@ TASK_MAP = {
     'season_id': '季度',
     'is_movie': '是否为电影',
     'use_ai': '使用AI识别',
+    'episode_offset': '集数偏移(Offset)',
+    'tmdb_id': '指定 TMDB ID',
 }
 
 
@@ -49,9 +51,13 @@ class EditPage(ui.dialog):
         if task_data is None:
             return notify('任务数据不存在！')
 
-        # 添加use_ai字段的默认值
+        # 初始化默认值
         if 'use_ai' not in task_data:
             task_data['use_ai'] = True
+        if 'episode_offset' not in task_data:
+            task_data['episode_offset'] = 0
+        if 'tmdb_id' not in task_data:
+            task_data['tmdb_id'] = ''
 
         self.data = SimpleNamespace(**task_data)
         with self, ui.card().style(_s).classes('flex'):
@@ -62,10 +68,12 @@ class EditPage(ui.dialog):
             ui.label('基本信息').style(
                 'font-size: 16px; font-weight: bold; margin-top: 10px;'
             )
-            basic_fields = ['is_anime', 'name', 'season_id', 'is_movie']
+            # 在这里添加了 tmdb_id 和 episode_offset
+            basic_fields = ['is_anime', 'name', 'season_id', 'tmdb_id', 'episode_offset', 'is_movie']
+
             for key in basic_fields:
-                if key in task_data:
-                    self._create_field_row(key, task_data[key])
+                # 即使 JSON 里没有，我们也显示输入框（因为上面已经做了默认值初始化）
+                self._create_field_row(key, getattr(self.data, key, None))
 
             ui.separator().style('margin: 20px 0;')
 
@@ -109,19 +117,42 @@ class EditPage(ui.dialog):
                         tg.style('font-size: 10px')
                         tg.classes('flex no-wrap w-full')
                     else:
+                        # 处理输入框类型
+                        input_props = 'filled dense'
+                        val = getattr(self.data, key)
+
+                        # 数字类型处理
+                        if key in ['episode_offset', 'season_id']:
+                            input_type = 'number'
+                        else:
+                            input_type = 'text'
+
                         ui.input(
-                            value=getattr(self.data, key),
+                            value=val,
                             on_change=lambda e, c=key: self._change(c, e.value),
-                        ).props('filled').props('dense').style(
+                        ).props(f'{input_props}').props(f'type={input_type}').style(
                             'flex-grow: 2'
                         ).bind_value(
                             self.data, key
                         )
 
     def _change(self, key: str, value) -> None:
+        # 类型转换
+        if key == 'episode_offset':
+            try:
+                value = int(value) if value else 0
+            except ValueError:
+                value = 0
+        elif key == 'season_id':
+            try:
+                value = int(value) if value else 1
+            except ValueError:
+                value = 1
+
         setattr(self.data, key, value)
 
     def _handle_ok(self):
+        # 保存所有字段到 JSON
         write_task(self.uuid, self.data.__dict__)
         logger.info(f'[任务] 任务{self.uuid}已修改为： {self.data.__dict__}')
         notify('修改成功！重新开始识别！')
@@ -130,24 +161,36 @@ class EditPage(ui.dialog):
         # 根据use_ai设置决定是否使用AI
         use_ai = getattr(self.data, 'use_ai', True)
         if not use_ai:
-            # 临时禁用AI
             from ..config.config_manager import cm
-
             original_ai_enabled = cm.get_config('ai_enabled')
             cm.set_config('ai_enabled', False)
 
         try:
+            # 获取新增的参数
+            tmdb_id = getattr(self.data, 'tmdb_id', None)
+            offset = getattr(self.data, 'episode_offset', 0)
+
+            # 处理空字符串的情况
+            if not tmdb_id: tmdb_id = None
+            if not offset:
+                offset = 0
+            else:
+                offset = int(offset)
+
+            # 调用 Rename 进程
             Rename().process(
                 Path(getattr(self.data, 'path')),
-                text_to_value(getattr(self.data, 'is_anime')),
-                text_to_value(getattr(self.data, 'is_movie')),
-                getattr(self.data, 'uuid'),
-                getattr(self.data, 'name'),
-                getattr(self.data, 'season_id'),
+                _is_anime=text_to_value(getattr(self.data, 'is_anime')),
+                _is_movie=text_to_value(getattr(self.data, 'is_movie')),
+                _tuuid=getattr(self.data, 'uuid'),
+                cus_name=getattr(self.data, 'name'),
+                cus_season_id=getattr(self.data, 'season_id'),
+                # 新增参数传递
+                cus_tmdb_id=tmdb_id,
+                cus_offset=offset
             )
         finally:
             if not use_ai:
-                # 恢复AI设置
                 cm.set_config('ai_enabled', original_ai_enabled)
 
 

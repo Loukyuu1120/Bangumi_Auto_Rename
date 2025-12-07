@@ -94,7 +94,7 @@ def remove_tag(title: str, skip=False):
             s = re.sub(pattern, '', s)
 
     remove_tag_s = s.strip()
-    logger.info(f'[移除标签工具] {remove_tag_s}')
+    logger.debug(f'[移除标签工具] {remove_tag_s}')
     if not remove_tag_s:
         s = _clean_title_case_insensitive(title)
 

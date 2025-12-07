@@ -105,3 +105,55 @@ class RedToogle(ui.toggle):
         self._props['no-wrap'] = True
         self._props['stack'] = True
         self._props['spread'] = False
+
+
+class RedInput(ui.input):
+    def __init__(
+        self,
+        label: Optional[str] = None,
+        *,
+        placeholder: Optional[str] = None,
+        value: str = '',
+        password: bool = False,
+        password_toggle_button: bool = False,
+        on_change: Optional[Handler[ValueChangeEventArguments]] = None,
+        autocomplete: Optional[List[str]] = None,
+        validation: Dict[str, Any] = {},
+    ):
+        super().__init__(
+            label=label,
+            placeholder=placeholder,
+            value=value,
+            password=password,
+            password_toggle_button=password_toggle_button,
+            on_change=on_change,
+            autocomplete=autocomplete,
+            validation=validation,
+        )
+        self.props(f'color={MAINC}')  # 统一使用主题色
+        self.props('rounded outlined dense')  # 默认圆角、边框、紧凑模式
+
+
+class RedSelect(ui.select):
+    def __init__(
+        self,
+        options: Union[List, Dict],
+        *,
+        label: Optional[str] = None,
+        value: Any = None,
+        on_change: Optional[Handler[ValueChangeEventArguments]] = None,
+        with_input: bool = False,
+        multiple: bool = False,
+        clearable: bool = False,
+    ):
+        super().__init__(
+            options=options,
+            label=label,
+            value=value,
+            on_change=on_change,
+            with_input=with_input,
+            multiple=multiple,
+            clearable=clearable,
+        )
+        self.props(f'color={MAINC}')
+        self.props('rounded outlined dense options-dense')

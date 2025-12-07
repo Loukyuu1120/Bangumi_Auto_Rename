@@ -7,6 +7,7 @@ from ..logger import logger, update_log_level_from_config
 from ..config.config_manager import CN_MAP, cm
 from ..element.red import RedButton, RedToogle
 from ..component.local_file_picker import local_file_picker
+from ..monitor.monitor_manager import monitor_manager
 
 
 class ConfigPage(ui.dialog):
@@ -31,10 +32,32 @@ class ConfigPage(ui.dialog):
                 "anime_path",
                 "anime_movie_path",
                 "mode",
+                "scrape_metadata",
                 "docker_mnt",
                 "log_level",
             ]
             for cn in basic_configs:
+                self._create_config_row(cn)
+
+            ui.separator().style("margin: 20px 0;")
+
+            # 监控配置
+            ui.label("监控配置").style(
+                "font-size: 16px; font-weight: bold; margin-top: 10px;"
+            )
+            ui.label(
+                "说明：启用后会监控所配置目录及其子目录中新建的文件，并自动重命名。"
+            ).style("font-size: 12px; color: gray;")
+            ui.label(
+                "排除目录按名称匹配：只要路径中包含这些目录名（如 @Recycle、.Trash），就会被忽略。"
+            ).style("font-size: 12px; color: gray; margin-bottom: 5px;")
+
+            monitor_configs = [
+                "monitor_enabled",
+                "monitor_paths",
+                "monitor_exclude_dirs",
+            ]
+            for cn in monitor_configs:
                 self._create_config_row(cn)
 
             ui.separator().style("margin: 20px 0;")
@@ -59,27 +82,6 @@ class ConfigPage(ui.dialog):
                 "gemini_temperature",
             ]
             for cn in ai_configs:
-                self._create_config_row(cn)
-
-            ui.separator().style("margin: 20px 0;")
-
-            # 监控配置
-            ui.label("监控配置").style(
-                "font-size: 16px; font-weight: bold; margin-top: 10px;"
-            )
-            ui.label(
-                "说明：启用后会监控所配置目录及其子目录中新建的文件，并自动重命名。"
-            ).style("font-size: 12px; color: gray;")
-            ui.label(
-                "排除目录按名称匹配：只要路径中包含这些目录名（如 @Recycle、.Trash），就会被忽略。"
-            ).style("font-size: 12px; color: gray; margin-bottom: 5px;")
-
-            monitor_configs = [
-                "monitor_enabled",
-                "monitor_paths",
-                "monitor_exclude_dirs",
-            ]
-            for cn in monitor_configs:
                 self._create_config_row(cn)
 
             # AI功能测试按钮
@@ -111,6 +113,16 @@ class ConfigPage(ui.dialog):
                             ["链接", "复制", "剪切"],
                             value=cm.get_config(cn),
                             on_change=lambda e, c=cn: self._change(c, e.value),
+                        )
+                        tg.style("font-size: 10px")
+                        tg.classes("flex no-wrap w-full")
+                    elif cn == "scrape_metadata":
+                        tg = RedToogle(
+                            ["启用", "禁用"],
+                            value="启用" if cm.get_config(cn) else "禁用",
+                            on_change=lambda e, c=cn: self._change(
+                                c, e.value == "启用"
+                            ),
                         )
                         tg.style("font-size: 10px")
                         tg.classes("flex no-wrap w-full")
@@ -287,6 +299,13 @@ class ConfigPage(ui.dialog):
             logger.info(f"[配置] 运行时日志级别已更新为 {cm.get_config('log_level')}")
         except Exception as e:
             logger.error(f"[配置] 更新运行时日志级别失败: {e}")
+        # 根据新配置重启监控
+        try:
+            monitor_manager.restart_from_config()
+            logger.info("[配置] 已根据新配置重启目录监控")
+        except Exception as e:
+            logger.error(f"[配置] 重启目录监控失败: {e}")
+            ui.notify(f"⚠️ 重启目录监控失败: {e}", type="warning")
         self.close()
 
     def _get_current_ui_config(self) -> dict:

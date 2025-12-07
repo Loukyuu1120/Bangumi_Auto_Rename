@@ -6,6 +6,7 @@ from difflib import SequenceMatcher
 from typing import Dict, List, Tuple, Union, Optional
 
 from jikanpy import Jikan
+from tmdbv3api import TV, Movie, TMDb
 
 from .trans import Trans
 from ..logger import logger
@@ -15,6 +16,7 @@ from .ai_processor import AIProcessor
 from ..config.config_manager import cm
 from ..ai.models import AIAnalysisResult
 from .utils import S0_TAG, EXTRA_TAG, IGNORE_DIR, VIDEO_SUFFIX, IGNORE_SUFFIX
+from .scraper import Scraper
 from .cleaner import (
     remove_tag,
     to_sim_max,
@@ -46,87 +48,80 @@ class Rename:
         self.BANGUMI_PATH.mkdir(parents=True, exist_ok=True)
         self.search = Search()
         self.ai_processor = AIProcessor()
+        self.scraper = Scraper()
 
         self.R = {}
+        self.scraped_seasons = set()
 
     def get_season_id(
-        self,
-        tv_info: Dict,
-        work_path: Path,
-        path: Path,
-        titles: Optional[List[Dict]],
+            self,
+            tv_info: Dict,
+            work_path: Path,
+            path: Path,
+            titles: Optional[List[Dict]],
     ):
         season_id = 1
         path_name = path.name
         all_similaritys: List[Dict] = []
 
+        # 提前提取文件名中的季号 (例如 "S02")
+        int_rtpath_name = extract_season(path_name)
+        logger.info(f'[处理任务] 提取标题季号:{int_rtpath_name}')
+
+        matched_via_tmdb = False
+
         for season in tv_info['seasons']:
             info_season_id = season['season_number']
-            target_fold = work_path / f'Season{info_season_id}'
-            target_fold.mkdir(parents=True, exist_ok=True)
 
-            sname: str = season['name']
-            logger.info(f'[处理任务] Season{info_season_id} 季度名: {sname}')
-
-            '''
-            int_season = extract_season(sname)
-            logger.info(f'[处理任务] 提取信息季号:{int_season}')
-            '''
-
-            int_rtpath_name = extract_season(path_name)
-            logger.info(f'[处理任务] 提取标题季号:{int_rtpath_name}')
             if info_season_id == int_rtpath_name:
                 season_id = int_rtpath_name
+                matched_via_tmdb = True
                 break
 
-            # 如果不是Season1的情况下，sname处于路径之中，则直接跳过
+            sname: str = season['name']
+
             if not (sname.strip().startswith('Season') and '1' in sname):
                 if sname in path.name:
                     sname_list = sname.split(' ')
                     path_name_list = path.stem.split(' ')
                     if len(sname_list) == len(path_name_list):
-                        logger.info(f'[处理任务] 季度名称处于标题中：{sname}')
                         season_id = info_season_id
+                        matched_via_tmdb = True
                         break
-                    else:
-                        logger.info(f'[处理任务] 季度名称与路径名称长度不同：{sname}')
 
                 if titles:
-                    # 或者计算相似度
                     for title in titles:
                         similaritys = {}
-                        if title['type'] in [
-                            'Default',
-                            'Synonym',
-                            'English',
-                            'French',
-                        ]:
+                        if title['type'] in ['Default', 'Synonym', 'English', 'French']:
                             ename = title['title']
-                            path_name = path_name.replace(ename, '')
+                            clean_path_name = path_name.replace(ename, '')
                             similarity = SequenceMatcher(
-                                None,
-                                sname,
-                                remove_tag(path_name),
+                                None, sname, remove_tag(clean_path_name)
                             ).ratio()
-
-                            # logger.debug(f'相似度{tindex}：{similarity}')
-                            similaritys[similarity] = season_id
+                            similaritys[similarity] = info_season_id
                         all_similaritys.append(similaritys)
-        else:
-            if all_similaritys:
-                logger.info(f'[处理任务] 相似度：{all_similaritys}')
+
+        if not matched_via_tmdb:
+            if int_rtpath_name > 0:
+                logger.info(f'[处理任务] TMDB未包含S{int_rtpath_name}，但文件名明确标识，强制使用文件名季号。')
+                season_id = int_rtpath_name
+            elif all_similaritys:
                 season_id = to_sim_max(all_similaritys)
 
-        logger.info(f'[处理任务] 识别季号：{season_id}')
+        logger.info(f'[处理任务] 最终识别季号：{season_id}')
+
         return season_id
 
     def process_sub(
-        self,
-        itme_path_main_name: str,
-        item_repeat: Optional[List[str]],
-        item_path: Path,
-        work_path: Path,
-        season_id: int,
+            self,
+            itme_path_main_name: str,
+            item_repeat: Optional[List[str]],
+            item_path: Path,
+            work_path: Path,
+            season_id: int,
+            info: Optional[Dict] = None,
+            cus_offset: Optional[int] = None,
+            cus_season_id: Optional[int] = None,
     ):
         item_name = item_path.name
         if item_repeat:
@@ -138,46 +133,31 @@ class Rename:
         item_suffix = item_path.suffix.lower()
 
         n_item_name_l = item_name.replace(itme_path_main_name, '').lower()
-        logger.info(f'[处理任务] 移去主要内容后的文件名Lower：{n_item_name_l}')
+
+        enable_scrape = cm.get_config('scrape_metadata')
 
         for ignore_dir in IGNORE_DIR:
             if ignore_dir in item_path.name:
-                logger.info(f'[处理任务] 忽略文件夹：{item_path.name}')
                 break
         else:
             for ignore_tag in IGNORE_SUFFIX:
                 if ignore_tag in item_suffix:
-                    logger.info(f'[处理任务] 忽略文件：{item_path.name}')
                     break
             else:
                 p = r'[a-zA-Z\u4e00-\u9fa5]'
                 for ex in EXTRA_TAG:
-                    if re.search(
-                        rf'(?<!{p}){ex.lower()}(?!{p})',
-                        n_item_name_l,
-                    ):
+                    if re.search(rf'(?<!{p}){ex.lower()}(?!{p})', n_item_name_l):
                         t = work_path / 'extra'
                         self.R[item_path] = t / item_name
-                        logger.info(
-                            f'[处理任务] 识别{n_item_name_l},'
-                            f'移动到extra文件夹：{item_path.name}'
-                        )
                         break
                 else:
                     for s0 in S0_TAG:
                         if re.search(rf'{s0.lower()}[\d]{{0,3}}', item_name_l):
                             t = work_path / 'Season0'
                             self.R[item_path] = t / item_name
-                            logger.info(
-                                f'[处理任务] 识别{n_item_name_l},'
-                                f'移动到Season0文件夹：{item_path.name}'
-                            )
                             break
                     else:
                         _item_name = remove_code(remove_season(item_name_l))
-                        logger.info(
-                            f'[处理任务] 开始对{_item_name}处理, 寻找集数中...")'
-                        )
                         epp = extract_base_num(_item_name)
                         if epp is None:
                             ep = extract_number(_item_name)
@@ -188,33 +168,117 @@ class Rename:
                             if _item_name.isdigit():
                                 ep = int(_item_name)
                             else:
-                                season_id = 0
                                 ep = 0
                         else:
                             ep = int(ep)
 
                         _idata = match_and_extract(item_name)
                         if _idata:
-                            season_id, ep = _idata[0], _idata[1]
+                            if cus_season_id is None:
+                                season_id = _idata[0]
+                            ep = _idata[1]
+
+                        # =================【Offset 逻辑优先级处理】=================
+                        # 1. 优先使用手动指定的偏移量
+                        if cus_offset is not None and cus_offset != 0:
+                            logger.info(f"[手动偏移] 使用指定的集数偏移量: {cus_offset}")
+                            ep = ep + cus_offset
+                            # 手动指定了 offset，通常意味着也希望修正季号(比如 S2->S1)，这里假设用户只在合并时用
+                            # 如果需要更复杂的S2->S1配合offset，通常由用户在UI指定season_id为1，offset为12来实现
+
+                        # 2. 如果没有手动偏移，尝试智能合并逻辑
+                        elif info and 'seasons' in info:
+                            current_season_data = next((s for s in info['seasons'] if s['season_number'] == season_id),
+                                                       None)
+                            prev_season_data = next(
+                                (s for s in info['seasons'] if s['season_number'] == (season_id - 1)), None)
+
+                            is_current_season_valid = False
+                            if current_season_data and current_season_data.get('episode_count', 0) > 0:
+                                is_current_season_valid = True
+
+                            if season_id == 2 and not is_current_season_valid:
+                                prev_count_tmdb = 24
+                                if prev_season_data:
+                                    prev_count_tmdb = prev_season_data.get('episode_count', 24)
+
+                                if prev_count_tmdb > 10:
+                                    prev_sid = season_id - 1
+                                    local_s1_count = 0
+
+                                    target_s1_dir = work_path / f'Season{prev_sid}'
+                                    if target_s1_dir.exists():
+                                        local_s1_count += len([
+                                            f for f in target_s1_dir.iterdir()
+                                            if f.is_file() and f.suffix.lower() in VIDEO_SUFFIX
+                                        ])
+
+                                    for target_p in self.R.values():
+                                        if target_p.parent.name == f'Season{prev_sid}':
+                                            local_s1_count += 1
+
+                                    if local_s1_count > 5:
+                                        offset = local_s1_count
+                                        logger.info(
+                                            f"[智能适配] 检测到本地 S{prev_sid} 共有 {local_s1_count} 集，使用本地数量作为偏移量")
+                                    else:
+                                        offset = prev_count_tmdb // 2
+                                        if prev_count_tmdb == 25: offset = 13
+                                        logger.warning(
+                                            f"[智能适配] 未检测到本地 S{prev_sid} 文件，使用 TMDB 估算偏移量: {offset}")
+
+                                    new_ep = ep + offset
+                                    logger.warning(
+                                        f"[智能适配] 强制合并 S{season_id} -> S{prev_sid}。 "
+                                        f"原:S{season_id}E{ep} -> 现:S{prev_sid}E{new_ep} (偏移+{offset})"
+                                    )
+                                    season_id = prev_sid
+                                    ep = new_ep
+                        # ==========================================================
 
                         t = work_path / f'Season{season_id}'
 
-                        ep = f'0{ep}' if ep < 10 else ep
+                        if enable_scrape and info:
+                            if season_id not in self.scraped_seasons:
+                                try:
+                                    self.scraper.scrape_season(work_path, season_id, info)
+                                except Exception as e:
+                                    logger.warning(f"[刮削警告] 无法获取第 {season_id} 季元数据: {e}")
+                                finally:
+                                    self.scraped_seasons.add(season_id)
+
+                        ep_str = f'0{ep}' if ep < 10 else ep
                         s = f'0{int(season_id)}'
                         ss = s if season_id < 10 else int(season_id)
                         t.mkdir(parents=True, exist_ok=True)
-                        ft = f'S{ss}E{ep}'
-                        self.R[item_path] = t / f'{ft} - {item_name}'
+                        ft = f'S{ss}E{ep_str}'
+                        target_file = t / f'{ft} - {item_name}'
+                        self.R[item_path] = target_file
+
+                        if enable_scrape and info and ep > 0:
+                            try:
+                                self.scraper.scrape_episode(
+                                    t / f'{ft} - {item_name}',
+                                    info,
+                                    int(season_id),
+                                    int(ep)
+                                )
+                            except Exception as e:
+                                logger.debug(f"[刮削微不足道错误] 单集NFO生成失败 S{season_id}E{ep}: {e}")
+
         logger.info(f'[处理任务] 处理完成{item_name}')
 
     def process(
-        self,
-        path: Path,
-        _is_anime: Optional[bool] = None,
-        _is_movie: Optional[bool] = None,
-        _tuuid: Optional[str] = None,
-        cus_name: Optional[str] = None,
-        cus_season_id: Optional[int] = None,
+            self,
+            path: Path,
+            _is_anime: Optional[bool] = None,
+            _is_movie: Optional[bool] = None,
+            _tuuid: Optional[str] = None,
+            cus_name: Optional[str] = None,
+            cus_season_id: Optional[int] = None,
+            cus_tmdb_id: Optional[str] = None,
+            cus_offset: Optional[int] = None,
+            use_ai: Optional[bool] = None,
     ):
         if path.is_dir():
             is_video = False
@@ -223,13 +287,16 @@ class Rename:
                     is_video = True
 
             if is_video:
-                self._process(
+                return self._process(
                     path,
                     _is_anime,
                     _is_movie,
                     _tuuid,
                     cus_name,
                     cus_season_id,
+                    cus_tmdb_id,
+                    cus_offset,
+                    use_ai,
                 )
             else:
                 for sub_path in path.iterdir():
@@ -240,26 +307,36 @@ class Rename:
                         _tuuid,
                         cus_name,
                         cus_season_id,
+                        cus_tmdb_id,
+                        cus_offset,
+                        use_ai,
                     )
+                return True
         else:
-            self._process(
+            return self._process(
                 path,
                 _is_anime,
                 _is_movie,
                 _tuuid,
                 cus_name,
                 cus_season_id,
+                cus_tmdb_id,
+                cus_offset,
+                use_ai,
             )
 
     def check_task_type(
-        self,
-        _uuid: str,
-        rtpath_name: str,
-        year: int,
-        path: Path,
-        is_anime: Optional[bool] = None,
-        is_movie: Optional[bool] = None,
+            self,
+            _uuid: str,
+            rtpath_name: str,
+            year: int,
+            path: Path,
+            is_anime: Optional[bool] = None,
+            is_movie: Optional[bool] = None,
     ) -> Union[Tuple[str, Dict, bool, bool], str]:
+        # ... (check_task_type 逻辑保持原样，主要用于自动识别) ...
+        # 注意：如果有 cus_tmdb_id，其实这个函数在 _process 里会被跳过或覆盖结果
+
         season_id = 1
         pos = 0
         logger.info('[处理任务] 未传入任务类型，开始判断该文件是否为电影！')
@@ -287,18 +364,50 @@ class Rename:
         elif s2_name:
             pos -= 1
 
+        filename = path.name
+        if re.search(r"S\d{1,2}E\d{1,3}", filename, re.IGNORECASE):
+            pos += 2
+
+        for parent in path.parents:
+            pname = parent.name.lower()
+            if re.search(r"season\s*\d+", pname) or re.match(r"s\d{1,2}", pname):
+                pos += 1
+                break
+
+        try:
+            dir_to_check = path.parent if path.is_file() else path
+            if dir_to_check.is_dir():
+                video_files = [p for p in dir_to_check.iterdir() if p.is_file() and p.suffix.lower() in VIDEO_SUFFIX]
+                if len(video_files) >= 3:
+                    processed_names = []
+                    for vf in video_files:
+                        base = vf.stem.lower()
+                        base = remove_tag(base)
+                        base = remove_episode(base)
+                        base = remove_season(base)
+                        processed_names.append((vf.name, base))
+                    similar_pairs = 0
+                    n = len(processed_names)
+                    for i in range(n):
+                        for j in range(i + 1, n):
+                            name_i, base_i = processed_names[i]
+                            name_j, base_j = processed_names[j]
+                            if not base_i or not base_j: continue
+                            ratio = SequenceMatcher(None, base_i, base_j).ratio()
+                            if 0.8 < ratio < 0.999: similar_pairs += 1
+                    if similar_pairs >= 3:
+                        pos += 1
+        except Exception as e:
+            logger.warning(f"[处理任务] 检查相似视频文件时出错: {e}")
+
         if season_id == -1:
             pos -= 0.6
-            if path.is_file():
-                pos -= 0.5
+            if path.is_file(): pos -= 0.5
         else:
             pos += 0.6
-            if path.is_file():
-                pos += 0.5
-
+            if path.is_file(): pos += 0.5
         if path.is_dir():
-            path_file_num = len([i for i in path.iterdir() if i.is_file()])
-            if path_file_num > 6:
+            if len([i for i in path.iterdir() if i.is_file()]) > 6:
                 pos += 0.4
             else:
                 pos -= 0.4
@@ -308,14 +417,10 @@ class Rename:
             is_movie = False
             info = s1_info
             name = s1_name
-
-            if not info:
-                logger.warning(f'[处理任务] 未搜索到电视剧信息, 跳过{rtpath_name}')
-                return f'[TMDB] 未搜索到电视剧信息, 跳过{rtpath_name}'
-
+            if not info: return f'[TMDB] 未搜索到电视剧信息, 跳过{rtpath_name}'
             if is_anime is None:
                 for g in info['genres']:
-                    if g['name'].lower() == 'animation' or g['name'].lower() == 'anime':
+                    if g['name'].lower() in ['animation', 'anime']:
                         is_anime = True
                         break
                 else:
@@ -325,19 +430,10 @@ class Rename:
             is_movie = True
             info = s2_info
             name = s2_name
-
-            if not info:
-                logger.warning(f'[处理任务] 未搜索到电影信息, 跳过{rtpath_name}')
-                return self.error_reply(
-                    _uuid,
-                    f'[TMDB] 未搜索到电影信息, 跳过{rtpath_name}',
-                    path,
-                    is_anime,
-                )
-
+            if not info: return self.error_reply(_uuid, f'[TMDB] 未搜索到电影信息, 跳过{rtpath_name}', path, is_anime)
             if is_anime is None:
                 for g in info['genres']:
-                    if g['name'].lower() == 'animation' or g['name'].lower() == 'anime':
+                    if g['name'].lower() in ['animation', 'anime']:
                         is_anime = True
                         break
                 else:
@@ -345,142 +441,156 @@ class Rename:
         return name, info, is_anime, is_movie
 
     def _process(
-        self,
-        path: Path,
-        _is_anime: Optional[bool] = None,
-        _is_movie: Optional[bool] = None,
-        _tuuid: Optional[str] = None,
-        cus_name: Optional[str] = None,
-        cus_season_id: Optional[int] = None,
+            self,
+            path: Path,
+            _is_anime: Optional[bool] = None,
+            _is_movie: Optional[bool] = None,
+            _tuuid: Optional[str] = None,
+            cus_name: Optional[str] = None,
+            cus_season_id: Optional[int] = None,
+            cus_tmdb_id: Optional[str] = None,
+            cus_offset: Optional[int] = None,
+            use_ai: Optional[bool] = None,
     ):
         if _tuuid:
             _uuid = _tuuid
         else:
             _uuid = str(uuid.uuid4())
 
-        if not self.search.TMDB_KEY:
-            return self.error_reply(
-                _uuid,
-                '你还没有配置TMDB的Key！任务失败！请先前往配置界面！',
-                path,
-                _is_anime,
-                _is_movie,
-            )
+        self.scraped_seasons = set()
 
-        # 【Step.0】 开始处理
+        if not self.search.TMDB_KEY:
+            return self.error_reply(_uuid, '你还没有配置TMDB的Key！...', path, _is_anime, _is_movie)
+
+        enable_scrape = cm.get_config('scrape_metadata')
+
         logger.info(f'[处理任务] 开始处理{path.name}')
 
-        # 【Step.1】
-        # 先移除无用的标签, 方便之后搜索
         year = 0
         rtpath_name = remove_tag(path.name)
-        # 如果标签移除后啥都没有, 说明文件名也是标签的一部分
-        if not rtpath_name:
-            rtpath_name = remove_tag(path.name, True)
-        # 按照空白、换行符或者连字符（-）分割成列表
+        if not rtpath_name: rtpath_name = remove_tag(path.name, True)
         path_atri = re.split(r'[\s-]+', rtpath_name)
-        # 如果该列表大于3, 不额外处理
-        if len(path_atri) > 3:
-            # path_atri.pop(0)
-            rtpath_name = ' '.join(path_atri)
-        # 如果该列表中有多个点, 则认为是一种规范命名的文件
-        # 先用.分割之后, 按照年份分割后按照季度分割
+        if len(path_atri) > 3: rtpath_name = ' '.join(path_atri)
         if rtpath_name.count('.') >= 3:
             rtpath_name = ' '.join(rtpath_name.split('.'))
             rtpath_name, year = divide_by_year(rtpath_name)
-
         rtpath_name = remove_season(rtpath_name)
         rtpath_name = remove_episode(rtpath_name)
         rtpath_name = rtpath_name.strip('!')
-        logger.info(f'[处理任务] 去除标签后: {rtpath_name}')
 
-        # 如果该路径不是一个视频文件或者不是一个文件夹, 则跳过
         if path.is_file() and path.suffix.lower() not in VIDEO_SUFFIX:
-            logger.info(f'[处理任务] {path.name} 不是一个视频文件, 跳过')
             return
 
-        # 【特殊改】
-        if cus_name:
-            rtpath_name = cus_name
+        if cus_name: rtpath_name = cus_name
 
-        # 【Step.1.5】
-        # 判断类型是否为电影
-        task_type = self.check_task_type(
-            _uuid,
-            rtpath_name,
-            year,
-            path,
-            _is_anime,
-            _is_movie,
-        )
-        if isinstance(task_type, str):
-            return self.error_reply(
-                _uuid,
-                task_type,
-                path,
-                _is_anime,
-                _is_movie,
-            )
+        # =================【指定 TMDB ID 逻辑】=================
+        if cus_tmdb_id:
+            logger.info(f"[处理任务] 检测到指定TMDB ID: {cus_tmdb_id}，跳过搜索")
+            try:
+                # 1. 确保 TMDB 配置已加载 (这是最可能导致"沉默"失败的原因)
+                tmdb = TMDb()
+                # 尝试从 search 实例中复用配置，或者重新读取配置
+                if hasattr(self.search, 'tmdb') and self.search.tmdb:
+                    tmdb.api_key = self.search.tmdb.api_key
+                    tmdb.language = self.search.tmdb.language
+                    tmdb.proxies = self.search.tmdb.proxies
+                elif hasattr(self.search, 'TMDB_KEY'):
+                    tmdb.api_key = self.search.TMDB_KEY
+                    tmdb.language = 'zh-CN'  # 默认中文，防止未设置
 
-        name, info, is_anime, is_movie = (
-            task_type[0],
-            task_type[1],
-            task_type[2],
-            task_type[3],
-        )
+                # 尝试强制转换为 int
+                tid = int(cus_tmdb_id)
 
-        # 【Step.2】
-        # 如果是电影
+                if _is_movie:
+                    movie_api = Movie()
+                    tmdb_info = movie_api.details(tid).__dict__
+                    real_is_movie = True
+                else:
+                    # 默认优先当作 TV
+                    tv_api = TV()
+                    try:
+                        # 注意：tmdbv3api 网络请求失败通常会直接抛出异常
+                        tmdb_info = tv_api.details(tid).__dict__
+                        real_is_movie = False
+                    except Exception as e_tv:
+                        logger.warning(f"[处理任务] 指定ID当做TV查询失败: {e_tv}，尝试当做电影查询...")
+                        # TV 查不到，试试电影
+                        movie_api = Movie()
+                        try:
+                            tmdb_info = movie_api.details(tid).__dict__
+                            real_is_movie = True
+                        except Exception as e_movie:
+                            raise Exception(f"TV查询失败({e_tv}) 且 电影查询失败({e_movie})")
+
+                name = tmdb_info.get('name') if not real_is_movie else tmdb_info.get('title')
+                info = tmdb_info
+                is_movie = real_is_movie
+
+                # 重新判断 anime
+                is_anime = False
+                for g in info.get('genres', []):
+                    if g['name'].lower() in ['animation', 'anime']:
+                        is_anime = True
+                        break
+
+                if _is_anime is not None: is_anime = _is_anime  # 强制覆盖
+
+                logger.info(f"[处理任务] 指定ID获取成功: {name} ({'电影' if is_movie else '剧集'})")
+
+            except Exception as e:
+                import traceback
+                error_str = f'指定TMDB ID查询失败: {e}'
+                logger.error(error_str)  # 【关键】打印错误日志到控制台
+                logger.error(traceback.format_exc())  # 【关键】打印详细堆栈
+                return self.error_reply(_uuid, error_str, path, _is_anime, _is_movie)
+        else:
+            # 正常自动识别流程
+            task_type = self.check_task_type(_uuid, rtpath_name, year, path, _is_anime, _is_movie)
+            if isinstance(task_type, str):
+                return self.error_reply(_uuid, task_type, path, _is_anime, _is_movie)
+            name, info, is_anime, is_movie = task_type
+        # =======================================================
+
+        global_use_ai = bool(cm.get_config('use_ai'))
+        effective_use_ai = use_ai if use_ai is not None else global_use_ai
+        ai_available = self.ai_processor.ai_client.is_available()
         if is_movie:
             if not name:
-                logger.warning(f'[处理任务] 未搜索到电影信息, 跳过{rtpath_name}')
-                return self.error_reply(
-                    _uuid,
-                    f'[TMDB] 未搜索到电影信息, 跳过{rtpath_name}',
-                    path,
-                    is_anime,
-                    is_movie,
-                )
+                return self.error_reply(_uuid, f'[TMDB] 未搜索到电影信息, 跳过{rtpath_name}', path, is_anime, is_movie)
 
             if is_anime:
                 _WORK_PATH = self.ANIME_MOVIE_PATH
             else:
                 _WORK_PATH = self.MOVIE_PATH
 
-            first_data = info['release_date']
+            first_data = info.get('release_date', '0000-00-00')
             first_year = first_data.split('-')[0]
             work_path = _WORK_PATH / f'{name} ({first_year})'
             work_path.mkdir(parents=True, exist_ok=True)
             if path.is_file():
-                self.R[path] = work_path / f'{name} - {path.name}'
+                target_file = work_path / f'{name} - {path.name}'
+                self.R[path] = target_file
+                if enable_scrape:
+                    self.scraper.scrape_movie(target_file, info)
             else:
                 for item_path in path.iterdir():
                     item_name = item_path.name
-                    self.R[item_path] = work_path / f'{name} - {item_name}'
+                    target_file = work_path / f'{name} - {item_name}'
+                    self.R[item_path] = target_file
+                    if enable_scrape and item_path.suffix.lower() in VIDEO_SUFFIX:
+                        self.scraper.scrape_movie(target_file, info)
             season_id = 0
-        # 如果是剧集类型
         else:
             if is_anime:
                 if not name:
                     logger.info('[处理任务] TMDB未搜索到!转为MyAnimeList搜索！')
-                    search_result = jikan.search(
-                        'anime',
-                        rtpath_name,
-                        page=1,
-                    )
-                    for i in search_result['data']:
-                        if i['type'] == 'Anime':
-                            data = i
-                            break
-                    else:
-                        for i in search_result['data']:
-                            if i['type'] == 'TV':
-                                data = i
-                                break
-                        else:
-                            data = search_result['data'][0]
-                    titles = data['titles']
-                    logger.info((f'[处理任务] MyAnimeList识别结果: {titles}'))
+                    try:
+                        search_result = jikan.search('anime', rtpath_name, page=1)
+                        data = search_result['data'][0]  # 简化逻辑
+                        titles = data['titles']
+                        logger.info((f'[处理任务] MyAnimeList识别结果: {titles}'))
+                    except:
+                        titles = None
                 else:
                     titles = None
                 _WORK_PATH = self.ANIME_PATH
@@ -489,107 +599,106 @@ class Rename:
                 _WORK_PATH = self.BANGUMI_PATH
 
             if not name:
-                logger.warning(f'[处理任务] 未搜索到剧集信息, 跳过{rtpath_name}')
-                return self.error_reply(
-                    _uuid,
-                    f'[TMDB] 未搜索到剧集信息, 跳过{rtpath_name}',
-                    path,
-                    is_anime,
-                    is_movie,
-                )
+                return self.error_reply(_uuid, f'[TMDB] 未搜索到剧集信息, 跳过{rtpath_name}', path, is_anime, is_movie)
 
-            first_data: str = info['first_air_date']
+            if enable_scrape:
+                logger.info("[处理任务] 正在补全季度信息以进行刮削...")
+                info = self.search.fill_season_info(info)
+
+            first_data = info.get('first_air_date', '0000-00-00')
             first_year = first_data.split('-')[0]
             work_path = _WORK_PATH / f'{name} ({first_year})'
 
-            season_id = self.get_season_id(
-                info,
-                work_path,
-                path,
-                titles,
-            )
+            initial_season_id = self.get_season_id(info, work_path, path, titles)
+            season_id = initial_season_id
+
+            if cus_season_id:
+                season_id = int(cus_season_id)
+                logger.info(f"[处理任务] 强制使用用户指定季号: {season_id} (自动识别为: {initial_season_id}，已忽略)")
 
             if cus_season_id:
                 season_id = int(cus_season_id)
 
-            # 【AI增强处理】
-            # 如果是动漫且启用了AI，使用AI分析文件映射
-            if is_anime and self.ai_processor.ai_client.is_available():
-                logger.info("[处理任务] 启用AI分析动漫文件映射")
-                logger.info("[处理任务] 填充详细季信息")
-                tv_info = self.search.fill_season_info(info)
-                ai_result: AIAnalysisResult | None = (
-                    self.ai_processor.analyze_anime_files(path, tv_info)
-                )
+            if enable_scrape:
+                self.scraper.scrape_tv_show(work_path, info)
 
-                # 检查AI置信度阈值
+            if is_anime and effective_use_ai and ai_available:
+                logger.info("[处理任务] 启用AI分析动漫文件映射")
+                tv_info = self.search.fill_season_info(info)
+                ai_result = self.ai_processor.analyze_anime_files(path, tv_info)
+
                 confidence_threshold = cm.get_config("ai_confidence_threshold")
                 should_use_ai = False
-
                 if ai_result:
-                    if (
-                        confidence_threshold == "High"
-                        and ai_result.confidence == "High"
-                    ):
+                    if confidence_threshold == "High" and ai_result.confidence == "High":
                         should_use_ai = True
-                    elif confidence_threshold == "Medium" and ai_result.confidence in [
-                        "High",
-                        "Medium",
-                    ]:
+                    elif confidence_threshold == "Medium" and ai_result.confidence in ["High", "Medium"]:
                         should_use_ai = True
                     elif confidence_threshold == "Low":
                         should_use_ai = True
 
                 if should_use_ai and ai_result:
                     logger.info("[处理任务] 使用AI分析结果进行文件映射")
-                    # AI流程独立生成映射，不再需要传统方法预处理
                     self.R = self.ai_processor.apply_ai_mapping(
-                        ai_result=ai_result, base_path=path, work_path=work_path
+                        ai_result=ai_result,
+                        base_path=path,
+                        work_path=work_path,
                     )
-                    # 如果AI没有返回任何有效映射，则回退到传统方法
                     if not self.R:
-                        logger.warning(
-                            "[处理任务] AI未返回有效映射，回退到传统方法处理"
-                        )
+                        logger.warning("[处理任务] AI未返回有效映射，回退到传统方法处理")
                         self._process_traditional(
-                            path, rtpath_name, work_path, season_id
+                            path, rtpath_name, work_path, season_id, info, cus_offset, cus_season_id
                         )
                 else:
                     logger.info("[处理任务] AI置信度不足或AI结果无效，使用传统方法处理")
-                    self._process_traditional(path, rtpath_name, work_path, season_id)
+                    self._process_traditional(
+                        path, rtpath_name, work_path, season_id, info, cus_offset, cus_season_id
+                    )
             else:
-                # 传统处理方式
-                self._process_traditional(path, rtpath_name, work_path, season_id)
+                if is_anime and not ai_available:
+                    logger.info("[处理任务] AI客户端不可用，使用传统方法处理")
+                elif is_anime and not effective_use_ai:
+                    logger.info("[处理任务] 已显式禁用AI，使用传统方法处理")
+                self._process_traditional(
+                    path, rtpath_name, work_path, season_id, info, cus_offset, cus_season_id
+                )
 
+        final_tmdb_id = cus_tmdb_id
+        if not final_tmdb_id and info and 'id' in info:
+            final_tmdb_id = info['id']
+        if self.R:
+            try:
+                first_dest = list(self.R.values())[0]
+                display_target_path = str(first_dest)
+            except:
+                display_target_path = str(work_path)
+        else:
+            display_target_path = str(work_path)
         task_path = TASK_PATH / f"{_uuid}.json"
         task_data = {
             "path": str(path),
+            "target_path": display_target_path,
             "is_anime": is_anime,
             "is_movie": is_movie,
             "name": name,
             "season_id": season_id,
             "uuid": str(_uuid),
             "error": None,
-            "use_ai": is_anime and self.ai_processor.ai_client.is_available(),
+            "use_ai": bool(is_anime and effective_use_ai and ai_available),
+            "tmdb_id": final_tmdb_id,
+            "episode_offset": cus_offset,
         }
         trans_result = Trans(self.R, _uuid).trans_file()
         self.R = {}
         if isinstance(trans_result, str):
-            return self.error_reply(
-                _uuid,
-                trans_result,
-                path,
-                is_anime,
-                is_movie,
-                name,
-                season_id,
-            )
+            return self.error_reply(_uuid, trans_result, path, is_anime, is_movie, name, season_id)
         with open(task_path, "w", encoding="UTF-8") as file:
             json.dump(task_data, file, indent=4, ensure_ascii=False)
         return True
 
     def _process_traditional(
-        self, path: Path, rtpath_name: str, work_path: Path, season_id: int
+            self, path: Path, rtpath_name: str, work_path: Path, season_id: int, info: Optional[Dict] = None,
+            cus_offset: Optional[int] = None, cus_season_id: Optional[int] = None,
     ):
         """传统处理方式"""
         if path.is_file():
@@ -600,12 +709,14 @@ class Rename:
                 path,
                 work_path,
                 season_id,
+                info,
+                cus_offset,
+                cus_season_id,
             )
         else:
             logger.info(f"[处理任务] 开始对 [文件夹] {path.name}处理")
             repeat = find_unique_parts_in_videos(path)
             for item_path in path.iterdir():
-                logger.info(f"[处理任务] 处理嵌套文件夹 {item_path.name}")
                 if item_path.is_dir():
                     repeat_2 = find_unique_parts_in_videos(item_path)
                     for sub_item in item_path.iterdir():
@@ -615,6 +726,9 @@ class Rename:
                             sub_item,
                             work_path,
                             season_id,
+                            info,
+                            cus_offset,
+                            cus_season_id,
                         )
                 else:
                     self.process_sub(
@@ -623,17 +737,20 @@ class Rename:
                         item_path,
                         work_path,
                         season_id,
+                        info,
+                        cus_offset,
+                        cus_season_id,
                     )
 
     def error_reply(
-        self,
-        _uuid: str,
-        error: str,
-        path: Path,
-        is_anime: Optional[bool] = None,
-        is_movie: Optional[bool] = None,
-        name: Optional[str] = None,
-        season_id: Optional[int] = None,
+            self,
+            _uuid: str,
+            error: str,
+            path: Path,
+            is_anime: Optional[bool] = None,
+            is_movie: Optional[bool] = None,
+            name: Optional[str] = None,
+            season_id: Optional[int] = None,
     ):
         task_path = TASK_PATH / f'{_uuid}.json'
         task_data = {

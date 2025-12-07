@@ -1,11 +1,10 @@
 import time
-import logging
 from pathlib import Path
+from threading import Event
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from ..rename.process import Rename
-
-logger = logging.getLogger(__name__)
+from ..logger import logger
 
 
 class MonitorEventHandler(FileSystemEventHandler):
@@ -27,15 +26,34 @@ class MonitorEventHandler(FileSystemEventHandler):
         self.rename_processor.process(Path(event.src_path))
 
 
-def start_monitoring(path_to_monitor: Path, exclude_dirs: list[str]):
+def start_monitoring(
+    path_to_monitor: Path,
+    exclude_dirs: list[str],
+    stop_event: Event | None = None,
+):
+    """
+    启动目录监控
+
+    Args:
+        path_to_monitor: 要监控的目录
+        exclude_dirs: 需要排除的目录名列表
+        stop_event: 可选的停止事件，如果设置，在外部调用 stop_event.set() 即可停止监控线程
+    """
+    if stop_event is None:
+        stop_event = Event()
+
     event_handler = MonitorEventHandler(Rename(), exclude_dirs)
     observer = Observer()
     observer.schedule(event_handler, path_to_monitor, recursive=True)
     observer.start()
     logger.info(f"[监控] 开始监控目录: {path_to_monitor}, 排除目录: {exclude_dirs}")
     try:
-        while True:
+        # 用 stop_event 控制循环，而不是 while True + KeyboardInterrupt
+        while not stop_event.is_set():
             time.sleep(1)
-    except KeyboardInterrupt:
+    except Exception as e:
+        logger.error(f"[监控] 监控目录 {path_to_monitor} 时发生异常: {e}")
+    finally:
         observer.stop()
-    observer.join()
+        observer.join()
+        logger.info(f"[监控] 已停止监控目录: {path_to_monitor}")
