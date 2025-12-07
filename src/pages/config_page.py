@@ -32,6 +32,7 @@ class ConfigPage(ui.dialog):
                 "anime_path",
                 "anime_movie_path",
                 "mode",
+                "overwrite_mode",
                 "scrape_metadata",
                 "docker_mnt",
                 "log_level",
@@ -116,6 +117,16 @@ class ConfigPage(ui.dialog):
                         )
                         tg.style("font-size: 10px")
                         tg.classes("flex no-wrap w-full")
+
+                    elif cn == "overwrite_mode":
+                        tg = RedToogle(
+                            ["从不覆盖", "总是覆盖", "保留最新"],
+                            value=cm.get_config(cn),
+                            on_change=lambda e, c=cn: self._change(c, e.value),
+                        )
+                        tg.style("font-size: 10px")
+                        tg.classes("flex no-wrap w-full")
+
                     elif cn == "scrape_metadata":
                         tg = RedToogle(
                             ["启用", "禁用"],

@@ -166,7 +166,6 @@ class EditPage(ui.dialog):
             cm.set_config('ai_enabled', False)
 
         try:
-            # 获取新增的参数
             tmdb_id = getattr(self.data, 'tmdb_id', None)
             offset = getattr(self.data, 'episode_offset', 0)
 
@@ -185,7 +184,6 @@ class EditPage(ui.dialog):
                 _tuuid=getattr(self.data, 'uuid'),
                 cus_name=getattr(self.data, 'name'),
                 cus_season_id=getattr(self.data, 'season_id'),
-                # 新增参数传递
                 cus_tmdb_id=tmdb_id,
                 cus_offset=offset
             )

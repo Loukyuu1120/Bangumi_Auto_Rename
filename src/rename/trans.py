@@ -12,15 +12,16 @@ from ..config.config_manager import cm
 class Trans:
     def __init__(self, R: Dict[Path, Path], uuid: str) -> None:
         self.mode = cm.get_config('mode')
+        self.overwrite_mode = cm.get_config('overwrite_mode')
         self.R = R
         self.uuid = uuid
 
     def _cleanup_old_targets_with_prefix(self) -> None:
         """根据上一轮记录，删除旧目标文件及同前缀的相关文件，
         额外：
-          - 删除所在 Season 目录里的 season.nfo
-          - 如果 Season 目录删除为空，则删掉；
-          - 如果是 Season 目录，且上级目录下没有非空子目录/文件，则删掉上级目录。
+        - 删除所在 Season 目录里的 season.nfo
+        - 如果 Season 目录删除为空，则删掉；
+        - 如果是 Season 目录，且上级目录下没有非空子目录/文件，则删掉上级目录。
         """
         record_file = RECORD_PATH / f'{self.uuid}.json'
         if not record_file.exists():
@@ -36,6 +37,10 @@ class Trans:
         if not old_map:
             return
 
+        # --- 获取当前任务的所有目标路径和目标目录，用于防误删 ---
+        current_target_paths = set(self.R.values())
+        current_target_dirs = set(p.parent for p in current_target_paths)
+
         dirs_to_check: set[Path] = set()
         possible_show_roots: set[Path] = set()
 
@@ -43,6 +48,10 @@ class Trans:
             try:
                 t = Path(target_str)
             except TypeError:
+                continue
+
+            # --- 如果旧目标路径存在于当前新任务中，说明是同一文件重做，跳过清理 ---
+            if t in current_target_paths:
                 continue
 
             parent = t.parent
@@ -67,16 +76,18 @@ class Trans:
                             child.unlink()
                         except Exception as e:
                             logger.warning(f'[处理迁移] 删除文件失败 {child}: {e}')
-                            continue
+                        continue
 
                     # 2) 删除同目录的 season.nfo（不论前缀）
                     elif child.name.lower() == 'season.nfo':
+                        if parent in current_target_dirs:
+                            continue
                         try:
                             logger.info(f'[处理迁移] 删除 season.nfo: {child}')
                             child.unlink()
                         except Exception as e:
                             logger.warning(f'[处理迁移] 删除 season.nfo 失败 {child}: {e}')
-                            continue
+                        continue
 
                 dirs_to_check.add(parent)
             except Exception as e:
@@ -85,6 +96,8 @@ class Trans:
         # 3) 从深到浅尝试删除已经变成空的 Season 目录等
         all_dirs = sorted(dirs_to_check, key=lambda p: len(p.parts), reverse=True)
         for d in all_dirs:
+            if d in current_target_dirs:
+                continue
             try:
                 if d.exists() and d.is_dir() and not any(d.iterdir()):
                     logger.info(f'[处理迁移] 删除空目录: {d}')
@@ -149,6 +162,27 @@ class Trans:
                     continue
                 if not target_path.parent.exists():
                     target_path.parent.mkdir(parents=True)
+                if target_path.exists():
+                    if self.overwrite_mode == '从不覆盖':
+                        logger.warning(f'[处理迁移] 跳过已存在文件: {target_path.name}')
+                        continue
+
+                    elif self.overwrite_mode == '总是覆盖':
+                        logger.info(f'[处理迁移] 覆盖已存在文件: {target_path.name}')
+                        target_path.unlink()  # 删除旧文件以便重新生成
+
+                    elif self.overwrite_mode == '保留最新':
+                        try:
+                            src_mtime = source_path.stat().st_mtime
+                            dst_mtime = target_path.stat().st_mtime
+                            if src_mtime > dst_mtime:
+                                logger.info(f'[处理迁移] 源文件较新，覆盖: {target_path.name}')
+                                target_path.unlink()
+                            else:
+                                logger.warning(f'[处理迁移] 目标文件较新，跳过: {target_path.name}')
+                                continue
+                        except Exception:
+                            continue
                 if self.mode == '剪切':
                     shutil.move(source_path, target_path)
                 elif self.mode == '复制':

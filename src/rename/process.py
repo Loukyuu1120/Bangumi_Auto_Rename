@@ -6,7 +6,6 @@ from difflib import SequenceMatcher
 from typing import Dict, List, Tuple, Union, Optional
 
 from jikanpy import Jikan
-from tmdbv3api import TV, Movie, TMDb
 
 from .trans import Trans
 from ..logger import logger
@@ -187,53 +186,6 @@ class Rename:
                             # 如果需要更复杂的S2->S1配合offset，通常由用户在UI指定season_id为1，offset为12来实现
 
                         # 2. 如果没有手动偏移，尝试智能合并逻辑
-                        elif info and 'seasons' in info:
-                            current_season_data = next((s for s in info['seasons'] if s['season_number'] == season_id),
-                                                       None)
-                            prev_season_data = next(
-                                (s for s in info['seasons'] if s['season_number'] == (season_id - 1)), None)
-
-                            is_current_season_valid = False
-                            if current_season_data and current_season_data.get('episode_count', 0) > 0:
-                                is_current_season_valid = True
-
-                            if season_id == 2 and not is_current_season_valid:
-                                prev_count_tmdb = 24
-                                if prev_season_data:
-                                    prev_count_tmdb = prev_season_data.get('episode_count', 24)
-
-                                if prev_count_tmdb > 10:
-                                    prev_sid = season_id - 1
-                                    local_s1_count = 0
-
-                                    target_s1_dir = work_path / f'Season{prev_sid}'
-                                    if target_s1_dir.exists():
-                                        local_s1_count += len([
-                                            f for f in target_s1_dir.iterdir()
-                                            if f.is_file() and f.suffix.lower() in VIDEO_SUFFIX
-                                        ])
-
-                                    for target_p in self.R.values():
-                                        if target_p.parent.name == f'Season{prev_sid}':
-                                            local_s1_count += 1
-
-                                    if local_s1_count > 5:
-                                        offset = local_s1_count
-                                        logger.info(
-                                            f"[智能适配] 检测到本地 S{prev_sid} 共有 {local_s1_count} 集，使用本地数量作为偏移量")
-                                    else:
-                                        offset = prev_count_tmdb // 2
-                                        if prev_count_tmdb == 25: offset = 13
-                                        logger.warning(
-                                            f"[智能适配] 未检测到本地 S{prev_sid} 文件，使用 TMDB 估算偏移量: {offset}")
-
-                                    new_ep = ep + offset
-                                    logger.warning(
-                                        f"[智能适配] 强制合并 S{season_id} -> S{prev_sid}。 "
-                                        f"原:S{season_id}E{ep} -> 现:S{prev_sid}E{new_ep} (偏移+{offset})"
-                                    )
-                                    season_id = prev_sid
-                                    ep = new_ep
                         # ==========================================================
 
                         t = work_path / f'Season{season_id}'
@@ -483,65 +435,28 @@ class Rename:
 
         if cus_name: rtpath_name = cus_name
 
-        # =================【指定 TMDB ID 逻辑】=================
         if cus_tmdb_id:
             logger.info(f"[处理任务] 检测到指定TMDB ID: {cus_tmdb_id}，跳过搜索")
             try:
-                # 1. 确保 TMDB 配置已加载 (这是最可能导致"沉默"失败的原因)
-                tmdb = TMDb()
-                # 尝试从 search 实例中复用配置，或者重新读取配置
-                if hasattr(self.search, 'tmdb') and self.search.tmdb:
-                    tmdb.api_key = self.search.tmdb.api_key
-                    tmdb.language = self.search.tmdb.language
-                    tmdb.proxies = self.search.tmdb.proxies
-                elif hasattr(self.search, 'TMDB_KEY'):
-                    tmdb.api_key = self.search.TMDB_KEY
-                    tmdb.language = 'zh-CN'  # 默认中文，防止未设置
+                # 这里完全交给 Search 来处理 TMDB
+                name, info, is_anime, is_movie = self.search.get_info_by_tmdb_id(
+                    tmdb_id=int(cus_tmdb_id),
+                    is_movie_hint=_is_movie,  # 可以带上调用方的「倾向」
+                )
 
-                # 尝试强制转换为 int
-                tid = int(cus_tmdb_id)
-
-                if _is_movie:
-                    movie_api = Movie()
-                    tmdb_info = movie_api.details(tid).__dict__
-                    real_is_movie = True
-                else:
-                    # 默认优先当作 TV
-                    tv_api = TV()
-                    try:
-                        # 注意：tmdbv3api 网络请求失败通常会直接抛出异常
-                        tmdb_info = tv_api.details(tid).__dict__
-                        real_is_movie = False
-                    except Exception as e_tv:
-                        logger.warning(f"[处理任务] 指定ID当做TV查询失败: {e_tv}，尝试当做电影查询...")
-                        # TV 查不到，试试电影
-                        movie_api = Movie()
-                        try:
-                            tmdb_info = movie_api.details(tid).__dict__
-                            real_is_movie = True
-                        except Exception as e_movie:
-                            raise Exception(f"TV查询失败({e_tv}) 且 电影查询失败({e_movie})")
-
-                name = tmdb_info.get('name') if not real_is_movie else tmdb_info.get('title')
-                info = tmdb_info
-                is_movie = real_is_movie
-
-                # 重新判断 anime
-                is_anime = False
-                for g in info.get('genres', []):
-                    if g['name'].lower() in ['animation', 'anime']:
-                        is_anime = True
-                        break
-
-                if _is_anime is not None: is_anime = _is_anime  # 强制覆盖
+                # 如果外部显式指定 is_anime / is_movie，就覆盖掉自动判断
+                if _is_anime is not None:
+                    is_anime = _is_anime
+                if _is_movie is not None:
+                    is_movie = _is_movie
 
                 logger.info(f"[处理任务] 指定ID获取成功: {name} ({'电影' if is_movie else '剧集'})")
 
             except Exception as e:
                 import traceback
                 error_str = f'指定TMDB ID查询失败: {e}'
-                logger.error(error_str)  # 【关键】打印错误日志到控制台
-                logger.error(traceback.format_exc())  # 【关键】打印详细堆栈
+                logger.error(error_str)
+                logger.error(traceback.format_exc())
                 return self.error_reply(_uuid, error_str, path, _is_anime, _is_movie)
         else:
             # 正常自动识别流程

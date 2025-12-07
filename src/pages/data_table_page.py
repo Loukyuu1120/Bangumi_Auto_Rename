@@ -98,15 +98,17 @@ class TableManager:
         self.all_rows = []
         self.filter_text = ''
         self.filter_status = '全部'
-        self.filter_season = ''
+        self.filter_season = None
         self.table = None
-        # 【修改点1】手动维护一个选中列表，比依赖 table.selected 更可靠
         self.current_selection = []
 
     def load_data(self):
+        """加载数据并应用当前的过滤器"""
         rows = []
         if not TASK_PATH.exists():
-            return []
+            self.all_rows = []
+            self.filter_data()
+            return
 
         sorted_files = sorted(
             TASK_PATH.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True
@@ -150,18 +152,29 @@ class TableManager:
                 )
             except Exception as e:
                 logger.error(f"Error loading task {i}: {e}")
+
         self.all_rows = rows
         self.filter_data()
 
     def filter_data(self):
+        """执行筛选逻辑并更新表格"""
         if not self.table:
+            # logger.debug("Table not initialized yet, skipping filter")
             return
 
         filtered_rows = []
 
+        # 1. 预处理筛选条件
         txt_target = self.filter_text.lower().strip() if self.filter_text else ''
         status_target = self.filter_status if self.filter_status else '全部'
-        season_target = str(self.filter_season).strip() if self.filter_season else ''
+
+        season_target = ''
+        if self.filter_season is not None:
+            s_temp = str(self.filter_season).strip()
+            if s_temp != '':
+                season_target = s_temp
+
+        # logger.info(f"Filtering: Text='{txt_target}', Season='{season_target}', Status='{status_target}'")
 
         for row in self.all_rows:
             # 1) 文本过滤
@@ -178,35 +191,37 @@ class TableManager:
                     continue
 
             # 3) 季度过滤
-            if season_target:
+            if season_target != '':
                 r_season = str(row.get('season') or '').strip()
                 if r_season != season_target:
                     continue
 
             filtered_rows.append(row)
 
+        # 更新表格数据
         self.table.rows = filtered_rows
-        # 刷新数据时，清空当前选中，避免数据不一致
+
+        # 清空选中状态
         self.current_selection = []
         if self.table.selected:
             self.table.selected.clear()
+
         self.table.update()
 
-    # 【修改点2】增加选择事件处理函数
+    def do_refresh(self):
+        """点击刷新按钮 -> 重绘整个表格区域"""
+        create_table.refresh()
+
     def handle_selection(self, e):
         """当表格勾选发生变化时触发"""
-        # e.args['rows'] 包含了所有当前被选中的行数据
         self.current_selection = e.args.get('rows', [])
 
     def batch_retry_click(self):
         """点击批量重试按钮 -> 打开弹窗"""
-        # 【修改点3】使用手动维护的 current_selection
         rows = self.current_selection
-
         if not rows:
             notify('请先勾选需要重试的任务')
             return
-
         BatchEditDialog(rows, self.execute_batch_process).open()
 
     def execute_batch_process(self, rows: List[Dict], settings: Dict):
@@ -280,14 +295,11 @@ class TableManager:
             count += 1
 
         notify(f'处理完成: 成功 {success_count}/{count}')
-        # 延迟刷新以等待UI响应
-        ui.timer(1.0, self.refresh_table, once=True)
+        ui.timer(1.0, self.do_refresh, once=True)
 
     def batch_delete(self):
         """批量删除"""
-        # 【修改点3】使用手动维护的 current_selection
         rows = self.current_selection
-
         if not rows:
             notify('请先勾选需要删除的任务')
             return
@@ -305,13 +317,12 @@ class TableManager:
             count += 1
 
         notify(f'已删除 {count} 个任务记录')
-        self.refresh_table()
+        self.do_refresh()
 
     def refresh_table(self):
         self.current_selection = []
         if self.table and self.table.selected is not None:
             self.table.selected.clear()
-            self.table.update()
         self.load_data()
 
 
@@ -320,33 +331,39 @@ manager = TableManager()
 
 @ui.refreshable
 def create_table():
+    # --- 事件处理函数 ---
+    # 使用 args 获取 Quasar 的 raw value
     def on_text_change(e):
-        manager.filter_text = e.value
+        manager.filter_text = e.args
         manager.filter_data()
 
     def on_season_change(e):
-        manager.filter_season = e.value
+        manager.filter_season = e.args
         manager.filter_data()
 
     def on_status_change(e):
-        manager.filter_status = e.value
+        manager.filter_status = e.value  # Select 组件通常还是标准的 on_change
         manager.filter_data()
 
+    # --- UI 布局 ---
     with ui.row().classes('w-full items-center q-mb-md justify-between'):
         with ui.row().classes('items-center'):
             # 搜索框
-            RedInput(
+            search_input = RedInput(
                 label='搜索 剧名/路径',
                 value=manager.filter_text,
-                on_change=on_text_change,
             ).props('dense outlined clearable debounce=300').classes('w-64 q-mr-md')
 
+            # 强制监听 Quasar 原生更新事件，确保打字时触发
+            search_input.on('update:model-value', on_text_change)
+
             # 季号框
-            RedInput(
+            season_input = RedInput(
                 label='季号',
                 value=manager.filter_season,
-                on_change=on_season_change,
             ).props('dense outlined clearable type=number debounce=300').classes('w-24')
+
+            season_input.on('update:model-value', on_season_change)
 
             # 状态选择
             RedSelect(
@@ -357,9 +374,7 @@ def create_table():
             ).props('dense outlined').classes('w-32')
 
         with ui.row().classes('items-center'):
-            RedButton('刷新', on_click=manager.refresh_table).props(
-                'outline icon=refresh'
-            ).classes('q-mr-sm')
+            RedButton('刷新', on_click=manager.do_refresh).props('outline icon=refresh').classes('q-mr-sm')
             ui.separator().props('vertical').classes('q-mx-sm')
             RedButton('批量重试', on_click=manager.batch_retry_click).props(
                 'color=green-6 icon=replay'
@@ -384,9 +399,9 @@ def create_table():
         .style('max-height: 80vh; border-radius: 10px; separator: cell')
     )
 
-    # 【修改点4】绑定选择事件，确保后端能实时获取选中状态
     manager.table.on('selection', manager.handle_selection)
 
+    # ... (槽位 slot 代码保持不变) ...
     manager.table.add_slot(
         'body-cell-name',
         '''
@@ -445,6 +460,7 @@ def create_table():
     manager.table.on('edit', lambda ev: handle_edit(ev))
     manager.table.on('del', lambda ev: handle_delete(ev))
 
+    # 初始化加载数据
     manager.load_data()
 
 
