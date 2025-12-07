@@ -233,36 +233,40 @@ class Rename:
             use_ai: Optional[bool] = None,
     ):
         if path.is_dir():
-            is_video = False
+            # 检查当前目录下是否直接包含视频文件
+            has_video_files = False
             for sub_path in path.iterdir():
-                if not sub_path.is_dir() and sub_path.suffix in VIDEO_SUFFIX:
-                    is_video = True
+                if sub_path.is_file() and sub_path.suffix.lower() in VIDEO_SUFFIX:
+                    has_video_files = True
+                    break
 
-            if is_video:
+            if has_video_files:
+                # A情况：当前就是包含视频的底层目录（如 "Season 1" 或 "MovieName"）
+                # 作为一个整体单元进行处理（这样AI才能拿到全季列表）
                 return self._process(
-                    path,
-                    _is_anime,
-                    _is_movie,
-                    _tuuid,
-                    cus_name,
-                    cus_season_id,
-                    cus_tmdb_id,
-                    cus_offset,
-                    use_ai,
+                    path, _is_anime, _is_movie, _tuuid, cus_name,
+                    cus_season_id, cus_tmdb_id, cus_offset, use_ai
                 )
             else:
+                # B情况：当前是父级目录（如 "Anime_Downloads"），里面只有子文件夹
+                # 递归：遍历子目录，再次调用 self.process (注意不是 _process)
+                logger.info(f"[递归扫描] 进入子目录: {path}")
                 for sub_path in path.iterdir():
-                    self._process(
-                        sub_path,
-                        _is_anime,
-                        _is_movie,
-                        _tuuid,
-                        cus_name,
-                        cus_season_id,
-                        cus_tmdb_id,
-                        cus_offset,
-                        use_ai,
-                    )
+                    # 跳过系统隐藏目录
+                    if sub_path.name.startswith(('.', '@', '$RECYCLE')):
+                        continue
+
+                    if sub_path.is_dir():
+                        self.process(
+                            sub_path, _is_anime, _is_movie, _tuuid, cus_name,
+                            cus_season_id, cus_tmdb_id, cus_offset, use_ai
+                        )
+                    # 如果父级目录里混着单个视频文件，也可以在这里处理
+                    elif sub_path.is_file() and sub_path.suffix.lower() in VIDEO_SUFFIX:
+                        self._process(
+                            sub_path, _is_anime, _is_movie, _tuuid, cus_name,
+                            cus_season_id, cus_tmdb_id, cus_offset, use_ai
+                        )
                 return True
         else:
             return self._process(
