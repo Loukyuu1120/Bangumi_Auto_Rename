@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Optional
 from types import SimpleNamespace
 
-from nicegui import ui
+from nicegui import ui, run
 
 from ..logger import logger
 from ..rename.process import Rename
@@ -51,13 +51,20 @@ class EditPage(ui.dialog):
         if task_data is None:
             return notify('任务数据不存在！')
 
-        # 初始化默认值
-        if 'use_ai' not in task_data:
-            task_data['use_ai'] = True
+        if 'use_ai' not in task_data or task_data['use_ai'] is None:
+            task_data['use_ai'] = False  # 默认关闭，由用户决定
         if 'episode_offset' not in task_data:
             task_data['episode_offset'] = 0
-        if 'tmdb_id' not in task_data:
+        if 'tmdb_id' not in task_data or task_data['tmdb_id'] == '':
             task_data['tmdb_id'] = ''
+        if 'season_id' in task_data:
+            if task_data['season_id'] is False or task_data['season_id'] == '':
+                task_data['season_id'] = None  # 空值设为 None
+            elif task_data['season_id'] is not None:
+                try:
+                    task_data['season_id'] = int(task_data['season_id'])
+                except:
+                    task_data['season_id'] = None
 
         self.data = SimpleNamespace(**task_data)
         with self, ui.card().style(_s).classes('flex'):
@@ -68,11 +75,9 @@ class EditPage(ui.dialog):
             ui.label('基本信息').style(
                 'font-size: 16px; font-weight: bold; margin-top: 10px;'
             )
-            # 在这里添加了 tmdb_id 和 episode_offset
             basic_fields = ['is_anime', 'name', 'season_id', 'tmdb_id', 'episode_offset', 'is_movie']
 
             for key in basic_fields:
-                # 即使 JSON 里没有，我们也显示输入框（因为上面已经做了默认值初始化）
                 self._create_field_row(key, getattr(self.data, key, None))
 
             ui.separator().style('margin: 20px 0;')
@@ -81,7 +86,7 @@ class EditPage(ui.dialog):
             ui.label('AI设置').style(
                 'font-size: 16px; font-weight: bold; margin-top: 10px;'
             )
-            self._create_field_row('use_ai', task_data.get('use_ai', True))
+            self._create_field_row('use_ai', task_data.get('use_ai', False))
 
             ui.separator()
 
@@ -94,7 +99,6 @@ class EditPage(ui.dialog):
             with ui.row(wrap=False).classes('flex justify-space-between w-full'):
                 with ui.row(wrap=False, align_items='baseline') as row:
                     row.classes('flex w-full')
-                    # 配置标签
                     label = TASK_MAP.get(key, key)
                     ui.label(label).style('min-width: 120px')
 
@@ -117,27 +121,31 @@ class EditPage(ui.dialog):
                         tg.style('font-size: 10px')
                         tg.classes('flex no-wrap w-full')
                     else:
-                        # 处理输入框类型
-                        input_props = 'filled dense'
                         val = getattr(self.data, key)
 
-                        # 数字类型处理
+                        if key == 'season_id':
+                            # 如果是 None 或空，显示空字符串而不是 "None"
+                            display_val = '' if val is None else str(val)
+                        elif key == 'episode_offset':
+                            display_val = str(val) if val is not None else '0'
+                        else:
+                            display_val = val if val is not None else ''
+
+                        input_props = 'filled dense'
                         if key in ['episode_offset', 'season_id']:
                             input_type = 'number'
                         else:
                             input_type = 'text'
 
                         ui.input(
-                            value=val,
+                            value=display_val,
                             on_change=lambda e, c=key: self._change(c, e.value),
-                        ).props(f'{input_props}').props(f'type={input_type}').style(
+                        ).props(f'{input_props} type={input_type}').style(
                             'flex-grow: 2'
-                        ).bind_value(
-                            self.data, key
                         )
 
     def _change(self, key: str, value) -> None:
-        # 类型转换
+        """处理字段变化"""
         if key == 'episode_offset':
             try:
                 value = int(value) if value else 0
@@ -145,51 +153,95 @@ class EditPage(ui.dialog):
                 value = 0
         elif key == 'season_id':
             try:
-                value = int(value) if value else 1
+                # 空值保持为 None，不要转为 1
+                value = int(value) if value and str(value).strip() else None
             except ValueError:
-                value = 1
+                value = None
+        elif key == 'tmdb_id':
+            # 保持字符串，但清理空值
+            value = str(value).strip() if value else None
+        elif key == 'name':
+            # 保持字符串，但清理空值
+            value = str(value).strip() if value else None
+        elif key in ['is_anime', 'is_movie']:
+            # 通过 toggle 传来的是文本
+            value = text_to_value(value)
+        elif key == 'use_ai':
+            # 已经是布尔值
+            pass
 
         setattr(self.data, key, value)
 
-    def _handle_ok(self):
-        # 保存所有字段到 JSON
-        write_task(self.uuid, self.data.__dict__)
-        logger.info(f'[任务] 任务{self.uuid}已修改为： {self.data.__dict__}')
+    async def _handle_ok(self):
+        """保存并重新处理"""
+        save_data = self.data.__dict__.copy()
+
+        # 清理空字符串
+        if save_data.get('tmdb_id') == '':
+            save_data['tmdb_id'] = None
+        if save_data.get('name') == '':
+            save_data['name'] = None
+
+        # 确保数字类型正确
+        if 'episode_offset' in save_data and save_data['episode_offset'] is None:
+            save_data['episode_offset'] = 0
+
+        # 确保 use_ai 是布尔值
+        if 'use_ai' in save_data:
+            save_data['use_ai'] = bool(save_data['use_ai'])
+
+        # 保存到文件
+        write_task(self.uuid, save_data)
+        logger.info(f'[任务] 任务{self.uuid}已修改为： {save_data}')
         notify('修改成功！重新开始识别！')
         self.close()
+        path = Path(save_data.get('path'))
+        is_anime = text_to_value(save_data.get('is_anime'))
+        is_movie = text_to_value(save_data.get('is_movie'))
+        uuid = save_data.get('uuid')
+        name = save_data.get('name')
+        season_id = save_data.get('season_id')
+        tmdb_id = save_data.get('tmdb_id')
+        offset = save_data.get('episode_offset', 0)
+        use_ai = save_data.get('use_ai', False)  # ← 关键：读取 use_ai
 
-        # 根据use_ai设置决定是否使用AI
-        use_ai = getattr(self.data, 'use_ai', True)
-        if not use_ai:
-            from ..config.config_manager import cm
-            original_ai_enabled = cm.get_config('ai_enabled')
-            cm.set_config('ai_enabled', False)
+        # 类型转换
+        if offset is None:
+            offset = 0
+        else:
+            offset = int(offset)
+
+        if season_id is not None:
+            try:
+                season_id = int(season_id)
+            except:
+                season_id = None
 
         try:
-            tmdb_id = getattr(self.data, 'tmdb_id', None)
-            offset = getattr(self.data, 'episode_offset', 0)
-
-            # 处理空字符串的情况
-            if not tmdb_id: tmdb_id = None
-            if not offset:
-                offset = 0
-            else:
-                offset = int(offset)
-
-            # 调用 Rename 进程
-            Rename().process(
-                Path(getattr(self.data, 'path')),
-                _is_anime=text_to_value(getattr(self.data, 'is_anime')),
-                _is_movie=text_to_value(getattr(self.data, 'is_movie')),
-                _tuuid=getattr(self.data, 'uuid'),
-                cus_name=getattr(self.data, 'name'),
-                cus_season_id=getattr(self.data, 'season_id'),
+            result = await run.io_bound(
+                Rename().process,
+                path,
+                _is_anime=is_anime,
+                _is_movie=is_movie,
+                _tuuid=uuid,
+                cus_name=name,
+                cus_season_id=season_id,
                 cus_tmdb_id=tmdb_id,
-                cus_offset=offset
+                cus_offset=offset,
+                use_ai=use_ai,
             )
-        finally:
-            if not use_ai:
-                cm.set_config('ai_enabled', original_ai_enabled)
+
+            if result is True:
+                notify('处理成功！')
+            else:
+                notify(f'处理失败: {result}')
+
+        except Exception as e:
+            import traceback
+            error_msg = f'处理失败: {str(e)}'
+            logger.error(error_msg)
+            traceback.print_exc()
+            notify(error_msg)
 
 
 async def edit_page(uuid: str) -> None:

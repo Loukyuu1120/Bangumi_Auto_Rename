@@ -218,11 +218,7 @@ class ConfigPage(ui.dialog):
                             placeholder="每行一个要监控的完整目录路径，例如：\n/media/downloads/anime\n/media/downloads/movie",
                             on_change=lambda e, c=cn: self._change(
                                 c,
-                                [
-                                    line.strip()
-                                    for line in e.value.splitlines()
-                                    if line.strip()
-                                ],
+                                [line.strip() for line in (e.value or "").splitlines() if line.strip()],
                             ),
                         ).props("filled").props("rows=3").style(
                             "flex-grow: 2"
@@ -237,18 +233,17 @@ class ConfigPage(ui.dialog):
 
                         ui.textarea(
                             value=text_value,
-                            placeholder="每行一个要排除的目录名（按名称匹配，不是完整路径），例如：\n@Recycle\n.Trash\ntemp",
+                            placeholder=(
+                                "每行一个要排除的目录名（按名称匹配，支持正则，不是完整路径），例如：\n"
+                                "短剧 -> 只要路径里有“短剧”就忽略\n"
+                                "S00 -> 忽略包含 S00 的路径（特典）\n"
+                                "\\.m4a$ -> 忽略所有以 .m4a 结尾的文件"
+                            ),
                             on_change=lambda e, c=cn: self._change(
                                 c,
-                                [
-                                    line.strip()
-                                    for line in e.value.splitlines()
-                                    if line.strip()
-                                ],
-                            ),
-                        ).props("filled").props("rows=3").style(
-                            "flex-grow: 2"
-                        )
+                                [line.strip() for line in (e.value or "").splitlines() if line.strip()],
+                            )
+                        ).props("filled").style("flex-grow:2")
 
                     else:
                         ui.input(

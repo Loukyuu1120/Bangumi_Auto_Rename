@@ -34,38 +34,33 @@ class AIProcessor:
             logger.info("[AI搜索] AI功能未启用，跳过智能分析")
             return None
 
-        # 1. 确定上下文信息
-        # 如果是单文件，我们需要其父文件夹名称作为上下文
-        # 如果是目录，我们需要目录名称作为上下文
+        # 优化上下文获取逻辑
         if path.is_file():
-            folder_name = path.parent.name
-            target_path = path.parent  # 用于收集同目录下其他文件辅助判断
+            # 如果是单文件，强制使用【文件名】作为核心上下文
+            # 并且只分析该文件本身，不再扫描父目录下的其他文件
+            # 这样可以彻底避免“电影合集”目录名干扰单部电影的识别
+            folder_name = path.stem
+            video_files = [path]
         else:
+            # 如果是目录，则保持原有逻辑：使用目录名和内部所有视频
             folder_name = path.name
-            target_path = path
-
-        # 2. 收集视频文件列表
-        video_files = self._collect_video_files(target_path)
+            video_files = self._collect_video_files(path)
 
         if not video_files:
             logger.warning("[AI搜索] 未找到视频文件，无法进行AI元数据分析")
             return None
 
         # 3. 提取文件名用于AI分析
-        # 限制文件数量，避免Token过长，取前3个和后3个通常足够识别剧集特征
-        all_file_names = [f.name for f in video_files]
-        if len(all_file_names) > 6:
-            file_names_context = all_file_names[:3] + all_file_names[-3:]
-        else:
-            file_names_context = all_file_names
+        file_names_context = self._get_file_names_context(video_files)
 
         # 构造给AI的上下文数据
         context_data = {
             "folder_name": folder_name,
             "file_names": file_names_context,
-            "total_files": len(all_file_names)
+            "total_files": len(video_files)
         }
 
+        # 日志提示会变化，现在单文件会显示文件名
         logger.info(f"[AI搜索] 正在请求AI推断元数据: {folder_name} (参考文件数: {len(file_names_context)})")
 
         try:
@@ -235,6 +230,7 @@ class AIProcessor:
         video_files = []
 
         if path.is_file():
+            # 兼容旧逻辑，如果是文件，收集该文件及其同级目录下的视频
             if path.suffix.lower() in VIDEO_SUFFIX:
                 video_files.append(path)
             try:
@@ -249,6 +245,14 @@ class AIProcessor:
                     video_files.append(item)
 
         return sorted(video_files)
+
+    def _get_file_names_context(self, video_files: List[Path], limit: int = 6) -> List[str]:
+        """提取文件名上下文，如果过多则截断"""
+        all_file_names = [f.name for f in video_files]
+        if len(all_file_names) > limit:
+            half = limit // 2
+            return all_file_names[:half] + all_file_names[-half:]
+        return all_file_names
 
     def _log_low_confidence_result(self, path: Path, ai_result: AIAnalysisResult):
         """记录低置信度结果到单独日志"""

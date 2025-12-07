@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from nicegui import ui
+from nicegui import ui, run
 from nicegui.events import GenericEventArguments
 
 from ..element.red import notify, RedButton, RedInput, RedSelect, RedToogle
@@ -83,14 +83,14 @@ class BatchEditDialog(ui.dialog):
                 RedButton('取消', on_click=self.close).props('outline color=grey')
                 RedButton('确认并重试', on_click=self._handle_confirm).classes('q-ml-sm')
 
-    def _handle_confirm(self):
+    async def _handle_confirm(self):
         self.close()
         final_settings = {
             k: v
             for k, v in self.settings.items()
             if v is not None and v != '保持原样' and v != ''
         }
-        self.callback(self.selected_rows, final_settings)
+        await self.callback(self.selected_rows, final_settings)
 
 
 class TableManager:
@@ -100,7 +100,7 @@ class TableManager:
         self.filter_status = '全部'
         self.filter_season = None
         self.table = None
-        self.current_selection = []
+        self.selected_rows = []
 
     def load_data(self):
         """加载数据并应用当前的过滤器"""
@@ -159,7 +159,6 @@ class TableManager:
     def filter_data(self):
         """执行筛选逻辑并更新表格"""
         if not self.table:
-            # logger.debug("Table not initialized yet, skipping filter")
             return
 
         filtered_rows = []
@@ -173,8 +172,6 @@ class TableManager:
             s_temp = str(self.filter_season).strip()
             if s_temp != '':
                 season_target = s_temp
-
-        # logger.info(f"Filtering: Text='{txt_target}', Season='{season_target}', Status='{status_target}'")
 
         for row in self.all_rows:
             # 1) 文本过滤
@@ -201,30 +198,52 @@ class TableManager:
         # 更新表格数据
         self.table.rows = filtered_rows
 
-        # 清空选中状态
-        self.current_selection = []
+        # 筛选后清空选中，防止逻辑错乱
+        self.selected_rows = []
         if self.table.selected:
             self.table.selected.clear()
 
         self.table.update()
 
+    def handle_selection(self, e):
+        """处理 Quasar 的选择逻辑"""
+        args = e.args
+
+        # 情况1: Quasar 增量更新 (大多数情况)
+        if isinstance(args, dict) and 'rows' in args:
+            changed_rows = args['rows']
+            is_added = args.get('added', True)
+            existing_uuids = set(r['uuid'] for r in self.selected_rows)
+
+            if is_added:
+                for row in changed_rows:
+                    if row['uuid'] not in existing_uuids:
+                        self.selected_rows.append(row)
+                        existing_uuids.add(row['uuid'])
+            else:
+                uuids_to_remove = set(r['uuid'] for r in changed_rows)
+                self.selected_rows = [
+                    r for r in self.selected_rows
+                    if r['uuid'] not in uuids_to_remove
+                ]
+
+        # 情况2: 全量更新
+        elif isinstance(args, list):
+            self.selected_rows = args
+
     def do_refresh(self):
         """点击刷新按钮 -> 重绘整个表格区域"""
         create_table.refresh()
 
-    def handle_selection(self, e):
-        """当表格勾选发生变化时触发"""
-        self.current_selection = e.args.get('rows', [])
-
     def batch_retry_click(self):
         """点击批量重试按钮 -> 打开弹窗"""
-        rows = self.current_selection
-        if not rows:
+        if not self.selected_rows:
             notify('请先勾选需要重试的任务')
             return
-        BatchEditDialog(rows, self.execute_batch_process).open()
+        BatchEditDialog(self.selected_rows, self.execute_batch_process).open()
 
-    def execute_batch_process(self, rows: List[Dict], settings: Dict):
+    async def execute_batch_process(self, rows: List[Dict], settings: Dict):
+        """异步执行批量处理，防止界面卡死"""
         if not rows:
             notify("没有需要处理的任务")
             return
@@ -244,33 +263,57 @@ class TableManager:
         batch_is_movie_text = settings.get('is_movie')
         batch_use_ai_text = settings.get('use_ai')
 
+        notify('正在后台进行批量处理，请稍候...')
+
         for row in rows:
             try:
                 path = Path(row['path'])
                 uuid = row['uuid']
-                name = row.get('name')
 
-                tmdb_id = batch_tmdb_id if batch_tmdb_id is not None else row.get('tmdb_id')
-                season_id = int(batch_season_id) if batch_season_id else row.get('season')
-                offset = int(batch_offset) if batch_offset else row.get('episode_offset')
+                # 读取最新配置，防止覆盖
+                task_data = get_task(uuid)
+                if task_data:
+                    name = task_data.get('name')
+                    # 如果批量设置没填，就用任务原本的；如果任务原本没有，就是None
+                    is_anime_orig = task_data.get('is_anime')
+                    is_movie_orig = task_data.get('is_movie')
+                    ai_used_orig = task_data.get('use_ai')
+                    tmdb_id_orig = task_data.get('tmdb_id')
+                    season_id_orig = task_data.get('season_id')
+                    offset_orig = task_data.get('episode_offset')
+                else:
+                    # 兜底
+                    name = row.get('name')
+                    is_anime_orig = row.get('is_anime')
+                    is_movie_orig = row.get('is_movie')
+                    ai_used_orig = row.get('ai_used')
+                    tmdb_id_orig = row.get('tmdb_id')
+                    season_id_orig = row.get('season')
+                    offset_orig = row.get('episode_offset')
+
+                # 逻辑：批量设置 > 原始设置
+                tmdb_id = batch_tmdb_id if batch_tmdb_id is not None else tmdb_id_orig
+                season_id = int(batch_season_id) if batch_season_id else season_id_orig
+                offset = int(batch_offset) if batch_offset else offset_orig
                 if offset is None: offset = 0
 
                 if batch_is_anime_text:
                     is_anime = get_bool_from_text(batch_is_anime_text)
                 else:
-                    is_anime = row.get('is_anime')
+                    is_anime = is_anime_orig
 
                 if batch_is_movie_text:
                     is_movie = get_bool_from_text(batch_is_movie_text)
                 else:
-                    is_movie = row.get('is_movie')
+                    is_movie = is_movie_orig
 
                 if batch_use_ai_text:
                     use_ai = get_bool_from_text(batch_use_ai_text)
                 else:
-                    use_ai = row.get('ai_used')
+                    use_ai = ai_used_orig
 
-                result = Rename().process(
+                result = await run.io_bound(
+                    Rename().process,
                     path,
                     _is_anime=is_anime,
                     _is_movie=is_movie,
@@ -279,7 +322,7 @@ class TableManager:
                     cus_season_id=season_id,
                     cus_tmdb_id=tmdb_id,
                     cus_offset=offset,
-                    use_ai=use_ai,
+                    use_ai=use_ai
                 )
 
                 if result is True:
@@ -289,17 +332,18 @@ class TableManager:
 
             except Exception as e:
                 import traceback
-                logger.error(f"Batch process error for {row['uuid']}: {e}")
+                logger.error(f"Batch process error for {row.get('uuid')}: {e}")
                 traceback.print_exc()
 
             count += 1
 
         notify(f'处理完成: 成功 {success_count}/{count}')
+        self.selected_rows = []
         ui.timer(1.0, self.do_refresh, once=True)
 
     def batch_delete(self):
         """批量删除"""
-        rows = self.current_selection
+        rows = list(self.selected_rows)
         if not rows:
             notify('请先勾选需要删除的任务')
             return
@@ -317,11 +361,12 @@ class TableManager:
             count += 1
 
         notify(f'已删除 {count} 个任务记录')
+        self.selected_rows = []
         self.do_refresh()
 
     def refresh_table(self):
-        self.current_selection = []
-        if self.table and self.table.selected is not None:
+        self.selected_rows = []
+        if self.table and self.table.selected:
             self.table.selected.clear()
         self.load_data()
 
@@ -332,7 +377,6 @@ manager = TableManager()
 @ui.refreshable
 def create_table():
     # --- 事件处理函数 ---
-    # 使用 args 获取 Quasar 的 raw value
     def on_text_change(e):
         manager.filter_text = e.args
         manager.filter_data()
@@ -342,7 +386,7 @@ def create_table():
         manager.filter_data()
 
     def on_status_change(e):
-        manager.filter_status = e.value  # Select 组件通常还是标准的 on_change
+        manager.filter_status = e.value
         manager.filter_data()
 
     # --- UI 布局 ---
@@ -354,7 +398,6 @@ def create_table():
                 value=manager.filter_text,
             ).props('dense outlined clearable debounce=300').classes('w-64 q-mr-md')
 
-            # 强制监听 Quasar 原生更新事件，确保打字时触发
             search_input.on('update:model-value', on_text_change)
 
             # 季号框
@@ -401,7 +444,6 @@ def create_table():
 
     manager.table.on('selection', manager.handle_selection)
 
-    # ... (槽位 slot 代码保持不变) ...
     manager.table.add_slot(
         'body-cell-name',
         '''
@@ -460,7 +502,6 @@ def create_table():
     manager.table.on('edit', lambda ev: handle_edit(ev))
     manager.table.on('del', lambda ev: handle_delete(ev))
 
-    # 初始化加载数据
     manager.load_data()
 
 
@@ -471,19 +512,29 @@ async def handle_edit(ev: GenericEventArguments):
     manager.refresh_table()
 
 
-def handle_retry(ev: GenericEventArguments, is_batch: bool = False):
+async def handle_retry(ev: GenericEventArguments, is_batch: bool = False):
+    """
+    单个任务重试逻辑
+    1. 强制读取最新的 JSON 配置文件，不再使用 UI 上过期的参数。
+    2. 使用 run.io_bound 异步执行，防止阻塞 UI。
+    """
     arg = ev.args
     row_data = arg['row']
-    path = row_data['path']
-    is_anime = row_data['is_anime']
-    is_movie = row_data['is_movie']
     uuid = row_data['uuid']
-    name = row_data.get('name')
-    season_id = row_data.get('season')
 
-    tmdb_id = row_data.get('tmdb_id')
-    offset = row_data.get('episode_offset')
-    use_ai = row_data.get('ai_used')
+    task_data = get_task(uuid)
+
+    if not task_data:
+        task_data = row_data
+
+    path = task_data.get('path')
+    name = task_data.get('name')
+    is_anime = task_data.get('is_anime')
+    is_movie = task_data.get('is_movie')
+    season_id = task_data.get('season_id')
+    tmdb_id = task_data.get('tmdb_id')
+    offset = task_data.get('episode_offset')
+    use_ai = task_data.get('use_ai')
 
     if not tmdb_id: tmdb_id = None
     if not offset:
@@ -492,7 +543,11 @@ def handle_retry(ev: GenericEventArguments, is_batch: bool = False):
         offset = int(offset)
 
     try:
-        Rename().process(
+        if not is_batch:
+            notify('正在后台重试任务...')
+
+        await run.io_bound(
+            Rename().process,
             Path(path),
             _is_anime=is_anime,
             _is_movie=is_movie,
@@ -504,9 +559,14 @@ def handle_retry(ev: GenericEventArguments, is_batch: bool = False):
             use_ai=use_ai,
         )
         if not is_batch:
-            notify('任务已重新提交')
+            notify('任务处理完成')
     except Exception as e:
-        notify(f'重试失败: {str(e)}')
+        import traceback
+        error_msg = f'重试失败: {str(e)}'
+        logger.error(error_msg)
+        traceback.print_exc()
+        if not is_batch:
+            notify(error_msg)
 
     if not is_batch:
         manager.refresh_table()
