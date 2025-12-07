@@ -137,86 +137,117 @@ class Rename:
 
         for ignore_dir in IGNORE_DIR:
             if ignore_dir in item_path.name:
-                break
+                return
+
+        for ignore_tag in IGNORE_SUFFIX:
+            if ignore_tag in item_suffix:
+                return
+
+        _idata = match_and_extract(item_name)
+        if _idata:
+            if cus_season_id is None:
+                season_id = _idata[0]
+            ep = _idata[1]
+
+            if cus_offset is not None and cus_offset != 0:
+                ep = ep + cus_offset
+
+            t = work_path / f'Season{season_id}'
+
+            if enable_scrape and info:
+                if season_id not in self.scraped_seasons:
+                    try:
+                        self.scraper.scrape_season(work_path, season_id, info)
+                    except Exception as e:
+                        logger.warning(f"[刮削警告] 无法获取第 {season_id} 季元数据: {e}")
+                    finally:
+                        self.scraped_seasons.add(season_id)
+
+            ep_str = f'0{ep}' if ep < 10 else ep
+            s = f'0{int(season_id)}'
+            ss = s if season_id < 10 else int(season_id)
+            t.mkdir(parents=True, exist_ok=True)
+            ft = f'S{ss}E{ep_str}'
+            target_file = t / f'{ft} - {item_name}'
+            self.R[item_path] = target_file
+
+            if enable_scrape and info and ep > 0:
+                try:
+                    self.scraper.scrape_episode(
+                        t / f'{ft} - {item_name}',
+                        info,
+                        int(season_id),
+                        int(ep)
+                    )
+                except Exception:
+                    pass
+
+            logger.info(f'[处理任务] 处理完成{item_name}')
+            return
+
+        p = r'[a-zA-Z0-9]'
+        for ex in EXTRA_TAG:
+            if re.search(rf'(?<!{p}){ex.lower()}(?!{p})', n_item_name_l):
+                t = work_path / 'extra'
+                self.R[item_path] = t / item_name
+                logger.info(f'[处理任务] 处理完成{item_name}')
+                return
+
+        for s0 in S0_TAG:
+            if re.search(rf'(?<!{p}){s0.lower()}(?!{p})', item_name_l) or \
+                    re.search(rf'(?<!{p}){s0.lower()}[\d]{{1,3}}(?!{p})', item_name_l):
+                t = work_path / 'Season0'
+                self.R[item_path] = t / item_name
+                logger.info(f'[处理任务] 处理完成{item_name}')
+                return
+
+        _item_name = remove_code(remove_season(item_name_l))
+        epp = extract_base_num(_item_name)
+        if epp is None:
+            ep = extract_number(_item_name)
         else:
-            for ignore_tag in IGNORE_SUFFIX:
-                if ignore_tag in item_suffix:
-                    break
+            ep = int(epp)
+
+        if ep is None:
+            if _item_name.isdigit():
+                ep = int(_item_name)
             else:
-                p = r'[a-zA-Z\u4e00-\u9fa5]'
-                for ex in EXTRA_TAG:
-                    if re.search(rf'(?<!{p}){ex.lower()}(?!{p})', n_item_name_l):
-                        t = work_path / 'extra'
-                        self.R[item_path] = t / item_name
-                        break
-                else:
-                    for s0 in S0_TAG:
-                        if re.search(rf'{s0.lower()}[\d]{{0,3}}', item_name_l):
-                            t = work_path / 'Season0'
-                            self.R[item_path] = t / item_name
-                            break
-                    else:
-                        _item_name = remove_code(remove_season(item_name_l))
-                        epp = extract_base_num(_item_name)
-                        if epp is None:
-                            ep = extract_number(_item_name)
-                        else:
-                            ep = int(epp)
+                ep = 0
+        else:
+            ep = int(ep)
 
-                        if ep is None:
-                            if _item_name.isdigit():
-                                ep = int(_item_name)
-                            else:
-                                ep = 0
-                        else:
-                            ep = int(ep)
+        if cus_offset is not None and cus_offset != 0:
+            ep = ep + cus_offset
 
-                        _idata = match_and_extract(item_name)
-                        if _idata:
-                            if cus_season_id is None:
-                                season_id = _idata[0]
-                            ep = _idata[1]
+        t = work_path / f'Season{season_id}'
 
-                        # =================【Offset 逻辑优先级处理】=================
-                        # 1. 优先使用手动指定的偏移量
-                        if cus_offset is not None and cus_offset != 0:
-                            logger.info(f"[手动偏移] 使用指定的集数偏移量: {cus_offset}")
-                            ep = ep + cus_offset
-                            # 手动指定了 offset，通常意味着也希望修正季号(比如 S2->S1)，这里假设用户只在合并时用
-                            # 如果需要更复杂的S2->S1配合offset，通常由用户在UI指定season_id为1，offset为12来实现
+        if enable_scrape and info:
+            if season_id not in self.scraped_seasons:
+                try:
+                    self.scraper.scrape_season(work_path, season_id, info)
+                except Exception as e:
+                    logger.warning(f"[刮削警告] 无法获取第 {season_id} 季元数据: {e}")
+                finally:
+                    self.scraped_seasons.add(season_id)
 
-                        # 2. 如果没有手动偏移，尝试智能合并逻辑
-                        # ==========================================================
+        ep_str = f'0{ep}' if ep < 10 else ep
+        s = f'0{int(season_id)}'
+        ss = s if season_id < 10 else int(season_id)
+        t.mkdir(parents=True, exist_ok=True)
+        ft = f'S{ss}E{ep_str}'
+        target_file = t / f'{ft} - {item_name}'
+        self.R[item_path] = target_file
 
-                        t = work_path / f'Season{season_id}'
-
-                        if enable_scrape and info:
-                            if season_id not in self.scraped_seasons:
-                                try:
-                                    self.scraper.scrape_season(work_path, season_id, info)
-                                except Exception as e:
-                                    logger.warning(f"[刮削警告] 无法获取第 {season_id} 季元数据: {e}")
-                                finally:
-                                    self.scraped_seasons.add(season_id)
-
-                        ep_str = f'0{ep}' if ep < 10 else ep
-                        s = f'0{int(season_id)}'
-                        ss = s if season_id < 10 else int(season_id)
-                        t.mkdir(parents=True, exist_ok=True)
-                        ft = f'S{ss}E{ep_str}'
-                        target_file = t / f'{ft} - {item_name}'
-                        self.R[item_path] = target_file
-
-                        if enable_scrape and info and ep > 0:
-                            try:
-                                self.scraper.scrape_episode(
-                                    t / f'{ft} - {item_name}',
-                                    info,
-                                    int(season_id),
-                                    int(ep)
-                                )
-                            except Exception as e:
-                                logger.debug(f"[刮削微不足道错误] 单集NFO生成失败 S{season_id}E{ep}: {e}")
+        if enable_scrape and info and ep > 0:
+            try:
+                self.scraper.scrape_episode(
+                    t / f'{ft} - {item_name}',
+                    info,
+                    int(season_id),
+                    int(ep)
+                )
+            except Exception:
+                pass
 
         logger.info(f'[处理任务] 处理完成{item_name}')
 
@@ -232,8 +263,13 @@ class Rename:
             cus_offset: Optional[int] = None,
             use_ai: Optional[bool] = None,
     ):
+        if path.is_file():
+            return self._process(
+                path, _is_anime, _is_movie, _tuuid, cus_name,
+                cus_season_id, cus_tmdb_id, cus_offset, use_ai
+            )
+
         if path.is_dir():
-            # 检查当前目录下是否直接包含视频文件
             has_video_files = False
             for sub_path in path.iterdir():
                 if sub_path.is_file() and sub_path.suffix.lower() in VIDEO_SUFFIX:
@@ -241,45 +277,40 @@ class Rename:
                     break
 
             if has_video_files:
-                # A情况：当前就是包含视频的底层目录（如 "Season 1" 或 "MovieName"）
-                # 作为一个整体单元进行处理（这样AI才能拿到全季列表）
-                return self._process(
-                    path, _is_anime, _is_movie, _tuuid, cus_name,
+                current_uuid = _tuuid if _tuuid else str(uuid.uuid4())
+                result = self._process(
+                    path, _is_anime, _is_movie, current_uuid, cus_name,
                     cus_season_id, cus_tmdb_id, cus_offset, use_ai
                 )
-            else:
-                # B情况：当前是父级目录（如 "Anime_Downloads"），里面只有子文件夹
-                # 递归：遍历子目录，再次调用 self.process (注意不是 _process)
-                logger.info(f"[递归扫描] 进入子目录: {path}")
-                for sub_path in path.iterdir():
-                    # 跳过系统隐藏目录
-                    if sub_path.name.startswith(('.', '@', '$RECYCLE')):
-                        continue
 
-                    if sub_path.is_dir():
-                        self.process(
-                            sub_path, _is_anime, _is_movie, _tuuid, cus_name,
-                            cus_season_id, cus_tmdb_id, cus_offset, use_ai
-                        )
-                    # 如果父级目录里混着单个视频文件，也可以在这里处理
-                    elif sub_path.is_file() and sub_path.suffix.lower() in VIDEO_SUFFIX:
-                        self._process(
-                            sub_path, _is_anime, _is_movie, _tuuid, cus_name,
-                            cus_season_id, cus_tmdb_id, cus_offset, use_ai
-                        )
-                return True
-        else:
-            return self._process(
-                path,
-                _is_anime,
-                _is_movie,
-                _tuuid,
-                cus_name,
-                cus_season_id,
-                cus_tmdb_id,
-                cus_offset,
-                use_ai,
-            )
+                if result is True:
+                    return True
+
+                logger.warning(f"[降级处理] 目录 [{path.name}] 整体识别失败，转为尝试单独识别内部文件...")
+
+                error_task_file = TASK_PATH / f"{current_uuid}.json"
+                if error_task_file.exists():
+                    try:
+                        error_task_file.unlink()
+                    except Exception:
+                        pass
+
+            all_success = True
+            logger.info(f"[递归扫描] 进入目录: {path}")
+
+            for sub_path in path.iterdir():
+                if sub_path.name.startswith(('.', '@', '$RECYCLE')):
+                    continue
+
+                if sub_path.is_dir() or (sub_path.is_file() and sub_path.suffix.lower() in VIDEO_SUFFIX):
+                    sub_result = self.process(
+                        sub_path, _is_anime, _is_movie, None, cus_name,
+                        cus_season_id, cus_tmdb_id, cus_offset, use_ai
+                    )
+                    if isinstance(sub_result, str):
+                        all_success = sub_result
+
+            return True if all_success is True else all_success
 
     def check_task_type(
             self,
