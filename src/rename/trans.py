@@ -8,6 +8,7 @@ from ..logger import logger
 from ..utils.path import RECORD_PATH
 from ..config.config_manager import cm
 
+from src.rename.utils import VIDEO_SUFFIX
 
 class Trans:
     def __init__(self, R: Dict[Path, Path], uuid: str) -> None:
@@ -20,8 +21,8 @@ class Trans:
         """根据上一轮记录，删除旧目标文件及同前缀的相关文件，
         额外：
         - 删除所在 Season 目录里的 season.nfo
-        - 如果 Season 目录删除为空，则删掉；
-        - 如果是 Season 目录，且上级目录下没有非空子目录/文件，则删掉上级目录。
+        - 如果 Season 目录没有视频文件，则强行清空并删除；
+        - 如果是 Season 目录，且上级目录下没有包含视频文件的子目录，则强行清空并删除上级目录。
         """
         record_file = RECORD_PATH / f'{self.uuid}.json'
         if not record_file.exists():
@@ -58,7 +59,7 @@ class Trans:
             if not parent.exists() or not parent.is_dir():
                 continue
 
-            # 如果是 Season 目录，记录一下上级目录，后面用于“整部剧目录是否全空”的判断
+            # 如果是 Season 目录，记录一下上级目录，后面用于“整部剧目录是否残留视频”的判断
             if parent.name.lower().startswith('season'):
                 possible_show_roots.add(parent.parent)
 
@@ -93,52 +94,52 @@ class Trans:
             except Exception as e:
                 logger.warning(f'[处理迁移] 枚举目录失败 {parent}: {e}')
 
-        # 3) 从深到浅尝试删除已经变成空的 Season 目录等
+        # 辅助函数：判断目录是否包含视频文件（递归）
+        def has_video_files(directory: Path) -> bool:
+            try:
+                for item in directory.rglob('*'): # 递归扫描所有子文件
+                    if item.is_file() and item.suffix.lower() in VIDEO_SUFFIX:
+                        return True
+            except Exception:
+                pass
+            return False
+
+        # 辅助函数：强制清理目录（删除里面剩余的 nfo/图片等垃圾文件，然后删目录）
+        def force_cleanup_dir(directory: Path):
+            try:
+                for item in directory.iterdir():
+                    if item.is_file():
+                        item.unlink()
+                    elif item.is_dir():
+                        # 递归清理子目录
+                        force_cleanup_dir(item)
+                directory.rmdir()
+                logger.info(f'[处理迁移] 已清理无视频目录: {directory}')
+            except Exception as e:
+                logger.warning(f'[处理迁移] 清理目录失败 {directory}: {e}')
+
+        # 3) 从深到浅尝试删除已经没有视频文件的 Season 目录
         all_dirs = sorted(dirs_to_check, key=lambda p: len(p.parts), reverse=True)
         for d in all_dirs:
             if d in current_target_dirs:
                 continue
             try:
-                if d.exists() and d.is_dir() and not any(d.iterdir()):
-                    logger.info(f'[处理迁移] 删除空目录: {d}')
-                    d.rmdir()
+                if d.exists() and d.is_dir():
+                    if not has_video_files(d):
+                        logger.info(f'[处理迁移] 目录 {d.name} 内已无视频文件，执行清理...')
+                        force_cleanup_dir(d)
             except Exception:
-                # 非空或无权限就忽略
                 pass
 
-        # 4) 对可能的 show 根目录：如果下面已经没有任何“非空子目录/文件”，则删除整部剧目录
+        # 4) 对可能的 show 根目录：如果下面已经没有任何“视频文件”，则删除整部剧目录
         for show_root in possible_show_roots:
             try:
                 if not show_root.exists() or not show_root.is_dir():
                     continue
 
-                children = list(show_root.iterdir())
-                if not children:
-                    # 完全空，直接删
-                    logger.info(f'[处理迁移] 删除空剧集根目录: {show_root}')
-                    show_root.rmdir()
-                    continue
-
-                # 有子项：如果全部是“空目录”，就可以删整根
-                all_empty = True
-                for c in children:
-                    if c.is_file():
-                        all_empty = False
-                        break
-                    if c.is_dir() and any(c.iterdir()):  # 子目录非空
-                        all_empty = False
-                        break
-
-                if all_empty:
-                    logger.info(f'[处理迁移] 删除仅含空子目录的剧集根目录: {show_root}')
-                    # 用 rmdir 一层层删，确保不是误删嵌套结构
-                    for c in children:
-                        try:
-                            if c.is_dir():
-                                c.rmdir()
-                        except Exception:
-                            pass
-                    show_root.rmdir()
+                if not has_video_files(show_root):
+                    logger.info(f'[处理迁移] 剧集根目录 {show_root.name} 内已无视频文件，执行清理...')
+                    force_cleanup_dir(show_root)
 
             except Exception as e:
                 logger.warning(f'[处理迁移] 检查/删除剧集根目录失败 {show_root}: {e}')
@@ -146,7 +147,7 @@ class Trans:
     def trans_file(self):
         path = RECORD_PATH / f'{self.uuid}.json'
 
-        # 在 复制 / 链接 模式下，先按“同前缀 + season.nfo + 空目录”清理上一轮生成的内容
+        # 在 复制 / 链接 模式下，先清理上一轮生成的旧内容
         if self.mode in ('复制', '链接'):
             self._cleanup_old_targets_with_prefix()
 

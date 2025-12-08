@@ -29,6 +29,7 @@ from .cleaner import (
     match_and_extract,
     remove_similar_part,
     find_unique_parts_in_videos,
+    clean_noise,
 )
 
 jikan = Jikan()
@@ -51,6 +52,86 @@ class Rename:
 
         self.R = {}
         self.scraped_seasons = set()
+
+    def _get_category_folder(self, info: Dict, is_movie: bool, is_anime: bool) -> str:
+        """
+        根据元数据判断二级分类文件夹名称
+        规则：
+        - 电影：动画电影、华语电影、外语电影
+        - 剧集：儿童、纪录片、综艺、国漫、日漫、国产剧、日韩剧、欧美剧、未分类
+        """
+        if not info:
+            return "未分类"
+
+        # 1. 提取基础数据
+        genres = info.get('genres', [])
+        genre_ids = [g.get('id') for g in genres]
+        original_language = info.get('original_language', '').lower()
+
+        # 提取国家代码 (电影和剧集的字段不同)
+        countries = []
+        if 'origin_country' in info:
+            # 剧集通常是 ['US', 'GB']
+            countries = info.get('origin_country', [])
+        elif 'production_countries' in info:
+            # 电影通常是 [{'iso_3166_1': 'US', ...}]
+            countries = [c.get('iso_3166_1') for c in info.get('production_countries', [])]
+
+        # 辅助判断函数
+        def is_chinese_region():
+            return original_language in ['zh', 'cn', 'bo', 'za'] or \
+                any(c in ['CN', 'HK', 'TW'] for c in countries)
+
+        def is_jap_kor_region():
+            return original_language in ['ja', 'ko'] or \
+                any(c in ['JP', 'KR'] for c in countries)
+
+        # ================= 电影分类逻辑 =================
+        if is_movie:
+            # 1. 动画电影 (Genre ID 16 = Animation)
+            if 16 in genre_ids or is_anime:
+                return "动画电影"
+
+            # 2. 华语电影
+            if is_chinese_region():
+                return "华语电影"
+
+            # 3. 外语电影 (其余所有)
+            return "外语电影"
+
+        # ================= 剧集分类逻辑 =================
+
+        # 1. 儿童 (Genre ID 10762 = Kids)
+        if 10762 in genre_ids:
+            return "儿童"
+
+        # 2. 纪录片 (Genre ID 99 = Documentary)
+        if 99 in genre_ids:
+            return "纪录片"
+
+        # 3. 综艺 (Genre ID 10764 = Reality, 10767 = Talk)
+        if 10764 in genre_ids or 10767 in genre_ids:
+            return "综艺"
+
+        # 4. 动漫 (国漫/日漫)
+        # 注意：这里假设所有非国漫的动漫都归入“日漫”或者你需要更细分。
+        # 按照你的需求列表，只有“国漫”和“日漫”。
+        if is_anime or 16 in genre_ids:
+            if is_chinese_region():
+                return "国漫"
+            # 默认其他动漫都归为日漫（包含欧美动漫，除非你想把欧美动漫归入欧美剧或者单开）
+            # 如果需要严格区分日本动漫，可以加 is_jap_kor_region() 判断
+            return "日漫"
+
+            # 5. 真人剧集 (国产/日韩/欧美)
+        if is_chinese_region():
+            return "国产剧"
+
+        if is_jap_kor_region():
+            return "日韩剧"
+
+        # 默认为欧美剧 (包括美国、英国、欧洲、拉美等)
+        return "欧美剧"
 
     def get_season_id(
             self,
@@ -146,13 +227,13 @@ class Rename:
         _idata = match_and_extract(item_name)
         if _idata:
             if cus_season_id is None:
-                season_id = _idata[0]
+                season_id = int(_idata[0])
             ep = _idata[1]
 
             if cus_offset is not None and cus_offset != 0:
                 ep = ep + cus_offset
 
-            t = work_path / f'Season{season_id}'
+            t = work_path / f'Season{int(season_id)}'
 
             if enable_scrape and info:
                 if season_id not in self.scraped_seasons:
@@ -384,6 +465,16 @@ class Rename:
 
             # 第1次尝试：标准搜索
             s2_name, s2_info = self.search.get_movie_info(rtpath_name, year)
+            if s2_name and s2_info and year > 0:
+                release_date = s2_info.get('release_date', '')
+                tmdb_year = int(release_date.split('-')[0]) if release_date else 0
+                if abs(tmdb_year - year) > 1: # 年份差异大于1年
+                    from difflib import SequenceMatcher
+                    ratio = SequenceMatcher(None, rtpath_name.lower(), s2_name.lower()).ratio()
+                    ratio_origin = SequenceMatcher(None, rtpath_name.lower(), s2_info.get('original_title', '').lower()).ratio()
+                    if ratio < 0.5 and ratio_origin < 0.5:
+                         logger.warning(f"[搜索校验] TMDB结果 '{s2_name}'({tmdb_year}) 与文件名 '{rtpath_name}'({year}) 差异过大，丢弃。")
+                         s2_name, s2_info = None, None
 
             # 第2次尝试：如果带年份没搜到，去掉年份
             if not s2_name and year != 0:
@@ -396,11 +487,15 @@ class Rename:
                 for sep in separators:
                     if sep in rtpath_name:
                         parts = rtpath_name.split(sep)
-                        if len(parts) > 1 and len(parts[-1]) > 2:
+                        if len(parts) > 1:
                             sub_name = parts[-1].strip()
-                            logger.info(f"[搜索重试] 尝试使用副标题搜索: {sub_name}")
-                            s2_name, s2_info = self.search.get_movie_info(sub_name, year)
-                            if s2_name: break
+                            sub_name = clean_noise(sub_name)
+                            if re.match(r'^[\(\[\{]?\d{4}[\)\]\}]?$', sub_name):
+                                logger.debug(f"[搜索安全] 忽略纯年份/数字搜索词: {sub_name}")
+                            elif len(sub_name) > 1:
+                                logger.info(f"[搜索重试] 尝试使用副标题搜索: {sub_name}")
+                                s2_name, s2_info = self.search.get_movie_info(sub_name, year)
+                                if s2_name: break
                         if not s2_name and len(parts) > 0 and len(parts[0]) > 2:
                             sub_name = parts[0].strip()
                             logger.info(f"[搜索重试] 尝试使用主标题搜索: {sub_name}")
@@ -562,6 +657,17 @@ class Rename:
 
             if ai_meta:
                 ai_name = ai_meta.get('name')
+                detected_year = None
+                if ai_name:
+                    year_match = re.search(r'[\(\[\s](\d{4})[\)\]]?$', ai_name)
+                    if year_match:
+                        extracted_year = int(year_match.group(1))
+                        if 1900 < extracted_year < 2100:
+                            detected_year = extracted_year
+                            ai_name = ai_name[:year_match.start()].strip()
+                            logger.info(f"[AI处理] 从名称中分离年份: Name='{ai_name}', Year={detected_year}")
+                if detected_year and ai_name:
+                     ai_name = f"{ai_name} ({detected_year})"
                 ai_tmdb_id = ai_meta.get('tmdb_id')
                 ai_is_movie = ai_meta.get('is_movie', False)
                 logger.info(
@@ -642,7 +748,14 @@ class Rename:
         _is_anime = is_anime
         _is_movie = is_movie
 
-        if cus_name: rtpath_name = cus_name
+        if cus_name:
+            rtpath_name = cus_name
+            # 重新提取年份，确保 cus_name 中的年份能被识别
+            new_name, new_year = divide_by_year(rtpath_name)
+            if new_year > 0:
+                rtpath_name = new_name
+                year = new_year
+                logger.info(f"[处理任务] 从自定义/AI名称中提取年份: {year}, 名称: {rtpath_name}")
 
         if cus_tmdb_id:
             logger.info(f"[处理任务] 检测到指定TMDB ID: {cus_tmdb_id}，跳过搜索")
@@ -713,7 +826,7 @@ class Rename:
             logger.info(f"[处理任务] 识别成功: {name} (电影: {is_movie}, 动漫: {is_anime})")
 
         # =======================================================
-
+        enable_secondary = cm.get_config('secondary_classification')
         ai_available = self.ai_processor.ai_client.is_available()
         if is_movie:
             if not name:
@@ -738,7 +851,11 @@ class Rename:
 
             first_data = info.get('release_date', '0000-00-00')
             first_year = first_data.split('-')[0]
-            work_path = _WORK_PATH / f'{name} ({first_year})'
+            if enable_secondary:
+                category = self._get_category_folder(info, True, is_anime)
+                work_path = _WORK_PATH / category / f'{name} ({first_year})'
+            else:
+                work_path = _WORK_PATH / f'{name} ({first_year})'
             work_path.mkdir(parents=True, exist_ok=True)
             if path.is_file():
                 target_file = work_path / f'{name} - {path.name}'
@@ -790,7 +907,12 @@ class Rename:
 
             first_data = info.get('first_air_date', '0000-00-00')
             first_year = first_data.split('-')[0]
-            work_path = _WORK_PATH / f'{name} ({first_year})'
+            if enable_secondary:
+                # 传入 is_anime 标记，因为有些动漫在 TMDB 只有 Animation 标签
+                category = self._get_category_folder(info, False, is_anime)
+                work_path = _WORK_PATH / category / f'{name} ({first_year})'
+            else:
+                work_path = _WORK_PATH / f'{name} ({first_year})'
 
             initial_season_id = self.get_season_id(info, work_path, path, titles)
             season_id = initial_season_id

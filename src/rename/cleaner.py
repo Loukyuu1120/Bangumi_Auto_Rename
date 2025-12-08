@@ -53,6 +53,28 @@ def chinese_to_number(chinese_numeral):
     return None
 
 
+def clean_noise(text: str) -> str:
+    """
+    清洗文件名中的常见垃圾词（分辨率、编码、扩展名等）
+    """
+    # 1. 去除扩展名
+    text = re.sub(r'\.(strm|mp4|mkv|avi|mov|iso|ts)$', '', text, flags=re.IGNORECASE)
+
+    # 2. 去除分辨率、编码等关键词 (基于 keywords 列表，或者手动补充)
+    noise_patterns = [
+        r'1080[pP]', r'720[pP]', r'2160[pP]', r'4[kK]',
+        r'WebRip', r'BluRay', r'HEVC', r'AVC', r'AAC', r'H\.?26[45]',
+        r'AC3', r'DTS', r'TrueHD', r'Atmos', r'HDR', r'Remux',
+        r'-',  # 孤立的连字符
+    ]
+
+    for pat in noise_patterns:
+        text = re.sub(pat, ' ', text, flags=re.IGNORECASE)
+
+    # 3. 清理多余空格
+    return re.sub(r'\s+', ' ', text).strip()
+
+
 def remove_tag(title: str, skip=False):
     '''
     该步骤将带括号的文件名中，包含【指定关键词】的【任意括号】内容删除。
@@ -111,13 +133,25 @@ def divide_by_year(filename: str) -> Tuple[str, int]:
 
     Shangri / 香格里拉.
     '''
-    match = re.findall(r'\d+', filename)
-    for i in match:
-        if 2035 >= float(i) >= 1901:
-            name = filename.split(i)
-            return name[0], int(i)
-    else:
-        return filename, 0
+    year_pattern = re.compile(r'(?:[\(\[\.\s]|^)(19\d{2}|20[0-3]\d)(?:[\)\]\.\s]|$)', re.IGNORECASE)
+
+    match = year_pattern.search(filename)
+    if match:
+        year_str = match.group(1)
+        year = int(year_str)
+        start, end = match.span()
+        title_part = filename[:start]
+
+        # 清理标题末尾的残留符号 (如 "(", "[", ".", " -")
+        clean_title = re.sub(r'[\(\[\.\s\-]+$', '', title_part).strip()
+
+        if not clean_title:
+             rest = filename[end:]
+             clean_title = re.sub(r'^[\)\]\.\s\-]+', '', rest).strip()
+
+        return clean_title, year
+
+    return filename, 0
 
 
 def remove_season(s: str):

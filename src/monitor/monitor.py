@@ -6,6 +6,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from ..rename.process import Rename
 from ..logger import logger
+from ..config.config_manager import cm
 
 
 class MonitorEventHandler(FileSystemEventHandler):
@@ -27,18 +28,22 @@ class MonitorEventHandler(FileSystemEventHandler):
         if event.is_directory:
             return
 
-        # 将路径转换为统一格式的字符串 (将反斜杠 \ 转换为正斜杠 /)
-        # 这样做是为了方便写正则，不用担心 Windows 下的双反斜杠问题
+        # 将路径转换为统一格式的字符串
         src_path_str = Path(event.src_path).as_posix()
 
         # 遍历正则进行匹配
         for pattern in self.exclude_patterns:
-            # 使用 search 而不是 match，search 可以在路径的任意位置匹配
             if pattern.search(src_path_str):
                 logger.info(f"[监控] 忽略创建事件：{event.src_path} (匹配排除规则: '{pattern.pattern}')")
                 return
         logger.info(f"[监控] 检测到新文件创建: {event.src_path}")
-        self.rename_processor.process(Path(event.src_path))
+
+        # [新增] 获取当前配置是否启用了 AI
+        # 注意：这里实时获取配置，确保用户在前端开关 AI 后，监控能立即生效
+        use_ai = bool(cm.get_config("ai_enabled"))
+
+        # [修改] 将 use_ai 参数传递给 process
+        self.rename_processor.process(Path(event.src_path), use_ai=use_ai)
 
 
 def start_monitoring(

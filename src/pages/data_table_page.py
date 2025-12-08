@@ -156,49 +156,47 @@ class TableManager:
         self.all_rows = rows
         self.filter_data()
 
+    def get_filtered_rows(self):
+        """纯计算：根据当前条件返回过滤后的数据列表"""
+        filtered = []
+
+        # 预处理条件
+        txt = str(self.filter_text).lower().strip() if self.filter_text else ''
+        status = self.filter_status
+        season = str(self.filter_season).strip() if (
+                    self.filter_season is not None and str(self.filter_season).strip()) else ''
+
+
+        for row in self.all_rows:
+            # 1. 文本
+            if txt:
+                r_name = str(row.get('name') or '').lower()
+                r_path = str(row.get('path') or '').lower()
+                if txt not in r_name and txt not in r_path:
+                    continue
+
+            # 2. 状态
+            if status != '全部' and row.get('status') != status:
+                continue
+
+            # 3. 季号
+            if season:
+                r_season = str(row.get('season')).strip() if row.get('season') is not None else ''
+                if r_season != season:
+                    continue
+
+            filtered.append(row)
+        return filtered
+
     def filter_data(self):
-        """执行筛选逻辑并更新表格"""
         if not self.table:
             return
 
-        filtered_rows = []
-
-        # 1. 预处理筛选条件
-        txt_target = self.filter_text.lower().strip() if self.filter_text else ''
-        status_target = self.filter_status if self.filter_status else '全部'
-
-        season_target = ''
-        if self.filter_season is not None:
-            s_temp = str(self.filter_season).strip()
-            if s_temp != '':
-                season_target = s_temp
-
-        for row in self.all_rows:
-            # 1) 文本过滤
-            if txt_target:
-                r_name = str(row.get('name') or '').lower()
-                r_path = str(row.get('path') or '').lower()
-                if txt_target not in r_name and txt_target not in r_path:
-                    continue
-
-            # 2) 状态过滤
-            if status_target != '全部':
-                r_status = row.get('status')
-                if r_status != status_target:
-                    continue
-
-            # 3) 季度过滤
-            if season_target != '':
-                r_season = str(row.get('season') or '').strip()
-                if r_season != season_target:
-                    continue
-
-            filtered_rows.append(row)
-
-        # 更新表格数据
+        # 重新计算筛选结果
+        filtered_rows = self.get_filtered_rows()
         self.table.rows = filtered_rows
 
-        # 筛选后清空选中，防止逻辑错乱
+        # 清空选中项，避免操作到隐藏的行
         self.selected_rows = []
         if self.table.selected:
             self.table.selected.clear()
@@ -375,56 +373,9 @@ manager = TableManager()
 
 
 @ui.refreshable
-def create_table():
-    # --- 事件处理函数 ---
-    def on_text_change(e):
-        manager.filter_text = e.args
-        manager.filter_data()
-
-    def on_season_change(e):
-        manager.filter_season = e.args
-        manager.filter_data()
-
-    def on_status_change(e):
-        manager.filter_status = e.value
-        manager.filter_data()
-
-    # --- UI 布局 ---
-    with ui.row().classes('w-full items-center q-mb-md justify-between'):
-        with ui.row().classes('items-center'):
-            # 搜索框
-            search_input = RedInput(
-                label='搜索 剧名/路径',
-                value=manager.filter_text,
-            ).props('dense outlined clearable debounce=300').classes('w-64 q-mr-md')
-
-            search_input.on('update:model-value', on_text_change)
-
-            # 季号框
-            season_input = RedInput(
-                label='季号',
-                value=manager.filter_season,
-            ).props('dense outlined clearable type=number debounce=300').classes('w-24')
-
-            season_input.on('update:model-value', on_season_change)
-
-            # 状态选择
-            RedSelect(
-                options=['全部', '成功', '失败'],
-                value=manager.filter_status,
-                label='状态',
-                on_change=on_status_change,
-            ).props('dense outlined').classes('w-32')
-
-        with ui.row().classes('items-center'):
-            RedButton('刷新', on_click=manager.do_refresh).props('outline icon=refresh').classes('q-mr-sm')
-            ui.separator().props('vertical').classes('q-mx-sm')
-            RedButton('批量重试', on_click=manager.batch_retry_click).props(
-                'color=green-6 icon=replay'
-            ).classes('q-mr-sm')
-            RedButton('批量删除', on_click=manager.batch_delete).props(
-                'color=red-6 icon=delete'
-            )
+def refresh_table_view():
+    # 每次刷新都重新获取筛选后的数据
+    rows = manager.get_filtered_rows()
 
     columns: List[Dict[str, Any]] = [
         {'name': 'name', 'label': '剧集信息 / 原文件路径', 'field': 'name', 'sortable': True, 'align': 'left'},
@@ -437,7 +388,7 @@ def create_table():
     ]
 
     manager.table = (
-        ui.table(columns=columns, rows=[], selection='multiple', row_key='uuid')
+        ui.table(columns=columns, rows=rows, selection='multiple', row_key='uuid')
         .classes('w-full h-full rounded')
         .style('max-height: 80vh; border-radius: 10px; separator: cell')
     )
@@ -460,9 +411,8 @@ def create_table():
                 </div>
             </div>
         </q-td>
-        ''',
+        '''
     )
-
     manager.table.add_slot(
         'body-cell-status',
         '''
@@ -476,9 +426,8 @@ def create_table():
                 <q-tooltip v-if="props.row.error_msg" content-style="font-size: 14px">{{ props.row.error_msg }}</q-tooltip>
             </div>
         </q-td>
-        ''',
+        '''
     )
-
     manager.table.add_slot(
         'body-cell-value',
         """
@@ -495,14 +444,66 @@ def create_table():
                 </q-btn>
             </div>
         </q-td>
-        """,
+        """
     )
 
     manager.table.on('retry', lambda ev: handle_retry(ev))
     manager.table.on('edit', lambda ev: handle_edit(ev))
     manager.table.on('del', lambda ev: handle_delete(ev))
 
-    manager.load_data()
+
+def create_table():
+    # --- 事件处理：更新变量后直接刷新表格视图 ---
+    def on_text_change(e):
+        manager.filter_text = e.value
+        refresh_table_view.refresh()  # 强制刷新表格区域
+
+    def on_season_change(e):
+        manager.filter_season = e.value
+        refresh_table_view.refresh()
+
+    def on_status_change(e):
+        manager.filter_status = e.value
+        refresh_table_view.refresh()
+
+    # --- 顶部工具栏 (输入框区域) ---
+    with ui.row().classes('w-full items-center q-mb-md justify-between'):
+        with ui.row().classes('items-center'):
+            # 搜索框
+            RedInput(
+                label='搜索 剧名/路径',
+                value=manager.filter_text,
+                on_change=on_text_change
+            ).props('dense outlined clearable debounce=300').classes('w-64 q-mr-md')
+
+            # 季号框
+            RedInput(
+                label='季号',
+                value=manager.filter_season,
+                on_change=on_season_change
+            ).props('dense outlined clearable type=number debounce=300').classes('w-24')
+
+            # 状态选择
+            RedSelect(
+                options=['全部', '成功', '失败'],
+                value=manager.filter_status,
+                label='状态',
+                on_change=on_status_change,
+            ).props('dense outlined').classes('w-32')
+
+        with ui.row().classes('items-center'):
+            RedButton('刷新', on_click=manager.do_refresh).props('outline icon=refresh').classes('q-mr-sm')
+            ui.separator().props('vertical').classes('q-mx-sm')
+            RedButton('批量重试', on_click=manager.batch_retry_click).props('color=green-6 icon=replay').classes(
+                'q-mr-sm')
+            RedButton('批量删除', on_click=manager.batch_delete).props('color=red-6 icon=delete')
+
+    refresh_table_view()
+
+    # 首次加载数据
+    # 注意：如果 create_table 会被多次调用，这里要判断一下避免重复加载，或者 load_data 内部处理
+    if not manager.all_rows:
+        manager.load_data()
 
 
 async def handle_edit(ev: GenericEventArguments):

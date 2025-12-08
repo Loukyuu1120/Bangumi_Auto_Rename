@@ -34,6 +34,8 @@ class ConfigPage(ui.dialog):
                 "mode",
                 "overwrite_mode",
                 "scrape_metadata",
+                "scrape_image_types",
+                "secondary_classification",
                 "docker_mnt",
                 "log_level",
             ]
@@ -137,6 +139,36 @@ class ConfigPage(ui.dialog):
                         )
                         tg.style("font-size: 10px")
                         tg.classes("flex no-wrap w-full")
+
+                    elif cn == "scrape_image_types":
+                        options = [
+                            "poster", "backdrop", "background",
+                            "banner", "logo", "clearart", "thumb", "disc(暂不支持)"
+                        ]
+                        # 确保获取到的是列表，防止配置为空时报错
+                        current_val = cm.get_config(cn)
+                        if not isinstance(current_val, list):
+                            current_val = []
+
+                        ui.select(
+                            options=options,
+                            multiple=True,  # 开启多选
+                            value=current_val,
+                            label="选择要下载的图片类型",
+                            on_change=lambda e, c=cn: self._change(c, e.value),
+                        ).props("use-chips filled").style("flex-grow: 2")
+
+                    elif cn == "secondary_classification":
+                        tg = RedToogle(
+                            ["启用", "禁用"],
+                            value="启用" if cm.get_config(cn) else "禁用",
+                            on_change=lambda e, c=cn: self._change(
+                                c, e.value == "启用"
+                            ),
+                        )
+                        tg.style("font-size: 10px")
+                        tg.classes("flex no-wrap w-full")
+
                     elif cn == "ai_enabled":
                         tg = RedToogle(
                             ["启用", "禁用"],

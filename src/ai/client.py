@@ -94,16 +94,16 @@ class AIClient:
         files_str = "\n".join([f"- {name}" for name in file_names])
 
         prompt = f"""
-请分析以下文件路径信息，推断该媒体对应的官方名称（Official Name）、发行年份和类型（TV或Movie）。
+请分析以下文件路径信息，请重视()里面的年份信息，推断该媒体对应的官方名称（Official Name）、发行年份和类型（TV或Movie）。
 
 目录名称: 
 {folder_name}
 
-包含的文件 (共 {total_files} 个，仅列出部分示例):
+包含的文件 (共 {total_files} 个，仅列出部分):
 {files_str}
 
 要求：
-1. 请提取最准确的官方名称（优先英文名，其次原名）。
+1. 请提取最准确的官方名称（优先中文名，其次原名）。
 2. 如果可以确定，请提供发行年份。
 3. 根据文件名特征（如S01E01表示TV，年份+文件名表示Movie）判断是剧集还是电影。
 4. 如果文件名中包含明显的TMDB ID信息，请提取。
