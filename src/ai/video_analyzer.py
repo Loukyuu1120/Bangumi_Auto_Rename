@@ -24,7 +24,7 @@ class VideoAnalyzer:
         try:
             parser = createParser(str(file_path))
             if not parser:
-                logger.warning(f"[视频分析] 无法创建解析器: {file_path.name}")
+                logger.debug(f"[视频分析] 无法创建解析器: {file_path.name}")
                 return None
 
             metadata = extractMetadata(parser)

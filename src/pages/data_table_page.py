@@ -231,7 +231,7 @@ class TableManager:
 
     def do_refresh(self):
         """点击刷新按钮 -> 重绘整个表格区域"""
-        create_table.refresh()
+        refresh_table_view.refresh()
 
     def batch_retry_click(self):
         """点击批量重试按钮 -> 打开弹窗"""

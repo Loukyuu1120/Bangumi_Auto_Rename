@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Dict, List, Optional, Union, Any
+import re
 
 from ..logger import logger
 from .utils import VIDEO_SUFFIX
@@ -18,31 +19,33 @@ class AIProcessor:
     def analyze_search_metadata(self, path: Path) -> Optional[Dict[str, Any]]:
         """
         当常规TMDB搜索失败时，使用AI分析目录和文件名以推断元数据。
-
-        Args:
-            path: 处理任务的路径（文件或文件夹）
-
-        Returns:
-            Dict containing:
-            - name: str (推断的官方名称)
-            - year: int (年份)
-            - is_movie: bool (是否为电影)
-            - tmdb_id: Optional[str] (如果AI能确定ID)
-            - confidence: str (High/Medium/Low)
         """
         if not self.ai_client.is_available():
             logger.info("[AI搜索] AI功能未启用，跳过智能分析")
             return None
 
-        # 优化上下文获取逻辑
         if path.is_file():
-            # 如果是单文件，强制使用【文件名】作为核心上下文
-            # 并且只分析该文件本身，不再扫描父目录下的其他文件
-            # 这样可以彻底避免“电影合集”目录名干扰单部电影的识别
-            folder_name = path.stem
+            stem = path.stem
+            # 匹配纯数字 或 S01E01 格式
+            is_weak_name = stem.isdigit() or \
+                           len(stem) < 3 or \
+                           re.match(r'(?i)^s\d+e\d+', stem) or \
+                           re.match(r'(?i)^\d+(\.\d+)?$', stem)
+
+            if is_weak_name:
+                # 如果文件名太弱，必须借用父目录的名字
+                parent_name = path.parent.name
+
+                if re.match(r'^(season|series|s)\s*\d*$', parent_name.lower()) or \
+                        re.match(r'^(specials?|sp|ova)$', parent_name.lower()):
+                    folder_name = path.parent.parent.name
+                else:
+                    folder_name = parent_name
+            else:
+                folder_name = stem
+
             video_files = [path]
         else:
-            # 如果是目录，则保持原有逻辑：使用目录名和内部所有视频
             folder_name = path.name
             video_files = self._collect_video_files(path)
 
@@ -60,7 +63,6 @@ class AIProcessor:
             "total_files": len(video_files)
         }
 
-        # 日志提示会变化，现在单文件会显示文件名
         logger.info(f"[AI搜索] 正在请求AI推断元数据: {folder_name} (参考文件数: {len(file_names_context)})")
 
         try:
@@ -103,7 +105,8 @@ class AIProcessor:
             return None
 
         # 分析视频文件
-        file_analysis = self.video_analyzer.analyze_video_files(path, video_files)
+        base_dir = path.parent if path.is_file() else path
+        file_analysis = self.video_analyzer.analyze_video_files(base_dir, video_files)
 
         # 使用AI分析映射关系
         ai_result = self.ai_client.analyze_episode_mapping(anime_info, file_analysis)
@@ -139,14 +142,11 @@ class AIProcessor:
             return {}
 
         new_mapping: Dict[Path, Path] = {}
-        all_local_files = (
-            list(base_path.rglob("*"))
-            if base_path.is_dir()
-            else list(base_path.parent.iterdir())
-        )
+        actual_base_dir = base_path.parent if base_path.is_file() else base_path
+
+        all_local_files = list(actual_base_dir.rglob("*"))
 
         try:
-            # 记录季度映射信息
             if ai_result.season_mapping:
                 logger.info("[AI处理] AI季度映射:")
                 for season_map in ai_result.season_mapping:
@@ -161,8 +161,7 @@ class AIProcessor:
                 episode_type = mapping.episode_type
                 confidence = mapping.confidence
 
-                # 从相对路径还原绝对路径
-                source_path = (base_path / relative_path_str).resolve()
+                source_path = (actual_base_dir / relative_path_str).resolve()
 
                 if not source_path.exists():
                     logger.warning(f"[AI处理] AI返回的文件路径不存在: {source_path}")
@@ -202,14 +201,8 @@ class AIProcessor:
                     if not other_file.is_file() or other_file == source_path:
                         continue
 
-                    # 检查是否为关联文件：完整文件名包含"视频文件名."的就是关联文件
                     if other_file.name.startswith(f"{video_filename}."):
-                        # 提取关联文件的后缀部分（保留所有后缀，如 .lang.ass）
-                        suffix_part = other_file.name[
-                            len(video_filename):  # noqa: E203
-                        ]
-
-                        # 构建关联文件的新文件名：新视频文件名（不含扩展名）+ 关联文件后缀
+                        suffix_part = other_file.name[len(video_filename):]
                         new_video_stem = new_video_filename.rsplit(".", 1)[0]
                         new_associated_filename = f"{new_video_stem}{suffix_part}"
 
@@ -221,28 +214,29 @@ class AIProcessor:
 
         except Exception as e:
             logger.error(f"[AI处理] 应用AI映射时发生严重错误: {str(e)}", exc_info=True)
-            return {}  # 发生错误时返回空映射，避免部分成功导致的数据不一致
+            return {}
 
         return new_mapping
 
     def _collect_video_files(self, path: Path) -> List[Path]:
-        """收集指定路径下的所有视频文件"""
+        """
+        收集视频文件。
+        逻辑：
+        无论传入的是文件还是目录，都获取该目录（或父目录）下的所有视频文件。
+        这样可以一次性分析整个季度的文件，实现批量处理。
+        """
         video_files = []
 
-        if path.is_file():
-            # 兼容旧逻辑，如果是文件，收集该文件及其同级目录下的视频
-            if path.suffix.lower() in VIDEO_SUFFIX:
-                video_files.append(path)
-            try:
-                for item in path.parent.iterdir():
-                    if item.is_file() and item != path and item.suffix.lower() in VIDEO_SUFFIX:
-                        video_files.append(item)
-            except Exception:
-                pass
-        else:
-            for item in path.rglob("*"):
+        # 确定搜索的基准目录
+        search_dir = path if path.is_dir() else path.parent
+
+        try:
+            # 扫描目录下的所有视频文件
+            for item in search_dir.iterdir():
                 if item.is_file() and item.suffix.lower() in VIDEO_SUFFIX:
                     video_files.append(item)
+        except Exception as e:
+            logger.warning(f"[视频搜索] 扫描目录失败: {e}")
 
         return sorted(video_files)
 
