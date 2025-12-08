@@ -30,6 +30,7 @@ from .cleaner import (
     remove_similar_part,
     find_unique_parts_in_videos,
     clean_noise,
+    parse_filename,
 )
 
 jikan = Jikan()
@@ -794,11 +795,12 @@ class Rename:
             logger.info(f'[处理任务] 开始处理{path.name}')
 
             # --- 1. 基础清洗 ---
-            rtpath_name = remove_tag(path.name)
-            if not rtpath_name:
-                rtpath_name = remove_tag(path.name, True)
-            rtpath_name, year = divide_by_year(rtpath_name)
-            rtpath_name = remove_season(remove_episode(rtpath_name)).strip('!')
+            # rtpath_name = remove_tag(path.name)
+            # rtpath_name, year = divide_by_year(rtpath_name)
+            # rtpath_name = remove_season(remove_episode(rtpath_name)).strip('!')
+            rtpath_name, year, detected_season, detected_episode = parse_filename(path.name)
+            if cus_season_id is None and detected_season:
+                cus_season_id = detected_season
 
             # --- 2. 检查是否为弱文件名 ---
             INVALID_NAMES = ['未知', 'unknown', 'none', 'null', 'tba', '未识别到官方名称', '待定']
@@ -810,31 +812,31 @@ class Rename:
                 logger.info(f"[智能判断] 文件名 '{path.name}' 判定为弱文件名，强制作为剧集(TV)处理。")
                 is_movie = False
 
-            # --- 3. 目录缓存逻辑（仅用于电视剧） ---
+            # --- 3. 目录缓存逻辑 ---
             cache_key = str(path.parent.absolute())
-
-            # 先快速判断：如果文件名有 SxxExx 格式，预判为电视剧
             filename = path.name
             has_episode_pattern = bool(re.search(r"S\d{1,2}E\d{1,3}", filename, re.IGNORECASE))
 
-            # 如果是弱文件名 或 明确的剧集格式，尝试使用目录缓存
+            from_ai_cache = False
+
             if (is_weak or has_episode_pattern) and not cus_tmdb_id and not cus_name:
                 if cache_key in Rename._dir_cache:
                     c = Rename._dir_cache[cache_key]
                     cached_is_movie = c.get('is_movie', False)
 
-                    # 只有缓存的也是电视剧，才使用缓存
                     if not cached_is_movie:
                         logger.info(f"[目录缓存] 命中电视剧缓存: {c.get('name')}")
                         cus_tmdb_id, cus_name = c.get('tmdb_id'), c.get('name')
                         if is_anime is None:
                             is_anime = c.get('is_anime')
                         rtpath_name = cus_name
-                        is_movie = False  # 强制为电视剧
+                        is_movie = False
+                        # ⭐ 标记来自缓存
+                        from_ai_cache = True
                     else:
                         logger.info(f"[目录缓存] 缓存为电影，不使用缓存")
                 else:
-                    # 没有缓存，进行溯源
+                    # 溯源逻辑...
                     if is_weak and path.parent != path.root:
                         pname = path.parent.name
                         if re.match(r'^(season|series|s)\s*\d*$',
@@ -856,14 +858,13 @@ class Rename:
                 if new_year > 0:
                     rtpath_name, year = new_name, new_year
 
-            # --- 4. 搜索 TMDB ---
+            # --- 4. 搜索 TMDB（⭐ 如果来自AI缓存且搜索失败，不进行AI补救）---
             if cus_tmdb_id:
                 try:
                     name, info, is_anime, is_movie = self.search.get_info_by_tmdb_id(
                         tmdb_id=int(cus_tmdb_id),
                         is_movie_hint=is_movie
                     )
-                    # 只有电视剧才写入目录缓存
                     if not is_movie and path.parent != path.root:
                         Rename._dir_cache[cache_key] = {
                             'tmdb_id': str(info['id']),
@@ -877,6 +878,12 @@ class Rename:
             else:
                 task_res = self.check_task_type(_uuid, rtpath_name, year, path, is_anime, is_movie)
                 if isinstance(task_res, str):
+                    # ⭐ 关键修改：如果来自AI缓存，说明AI已经分析过，不再重试
+                    if from_ai_cache:
+                        logger.warning(f"[AI缓存] 名称 '{rtpath_name}' 无法在TMDB搜索，但来自AI缓存，跳过AI重试")
+                        return self.error_reply(_uuid, task_res, path)
+
+                    # 否则尝试AI补救
                     if effective_use_ai and not ai_attempted:
                         ai_res = self._attempt_ai_recovery(
                             path, _uuid, is_anime, cus_offset, cus_season_id,
@@ -888,7 +895,6 @@ class Rename:
 
                 name, info, is_anime, is_movie = task_res
 
-                # 只有电视剧才写入目录缓存
                 if info and 'id' in info and path.parent != path.root and not is_movie:
                     Rename._dir_cache[cache_key] = {
                         'tmdb_id': str(info['id']),
