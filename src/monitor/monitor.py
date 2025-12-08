@@ -1,7 +1,7 @@
 import re
 import time
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from ..rename.process import Rename
@@ -28,36 +28,27 @@ class MonitorEventHandler(FileSystemEventHandler):
         if event.is_directory:
             return
 
-        # 将路径转换为统一格式的字符串
-        src_path_str = Path(event.src_path).as_posix()
+        src_path = Path(event.src_path)
+        src_path_str = src_path.as_posix()
 
-        # 遍历正则进行匹配
+        # 1. 排除规则
         for pattern in self.exclude_patterns:
             if pattern.search(src_path_str):
                 logger.info(f"[监控] 忽略创建事件：{event.src_path} (匹配排除规则: '{pattern.pattern}')")
                 return
         logger.info(f"[监控] 检测到新文件创建: {event.src_path}")
 
-        # [新增] 获取当前配置是否启用了 AI
-        # 注意：这里实时获取配置，确保用户在前端开关 AI 后，监控能立即生效
         use_ai = bool(cm.get_config("ai_enabled"))
-
-        # [修改] 将 use_ai 参数传递给 process
-        self.rename_processor.process(Path(event.src_path), use_ai=use_ai)
+        self.rename_processor.process(src_path, use_ai=use_ai)
 
 
 def start_monitoring(
-        path_to_monitor: Path,
-        exclude_dirs: list[str],
-        stop_event: Event | None = None,
+    path_to_monitor: Path,
+    exclude_dirs: list[str],
+    stop_event: Event | None = None,
 ):
     """
     启动目录监控
-
-    Args:
-        path_to_monitor: 要监控的目录
-        exclude_dirs: 需要排除的目录名列表（支持正则表达式）
-        stop_event: 可选的停止事件
     """
     if stop_event is None:
         stop_event = Event()

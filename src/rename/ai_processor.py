@@ -16,6 +16,61 @@ class AIProcessor:
         self.ai_client = AIClient()
         self.video_analyzer = VideoAnalyzer()
 
+    def select_best_tmdb_result(
+            self,
+            query: str,
+            year: int,
+            results: List[Dict],
+            is_movie: bool
+    ) -> Optional[int]:
+        """
+        从多个TMDB搜索结果中选择最佳匹配
+
+        Args:
+            query: 搜索关键词
+            year: 年份（0表示未知）
+            results: TMDB搜索结果列表
+            is_movie: 是否为电影
+
+        Returns:
+            最佳匹配的索引（0-based），None表示无匹配或AI不可用
+        """
+        if not self.ai_client.is_available():
+            logger.debug("[AI辅助选择] AI功能未启用")
+            return None
+
+        if not results:
+            logger.debug("[AI辅助选择] 结果列表为空")
+            return None
+
+        if len(results) == 1:
+            logger.debug("[AI辅助选择] 只有1个结果，无需AI选择")
+            return 0
+
+        if len(results) > 10:
+            logger.info(f"[AI辅助选择] 结果数量({len(results)})超过10个，不使用AI辅助")
+            return None
+
+        logger.info(f"[AI辅助选择] 🤖 TMDB返回{len(results)}个结果，启用AI辅助选择")
+
+        try:
+            selected_idx = self.ai_client.select_best_tmdb_match(
+                query=query,
+                year=year,
+                candidates=results,
+                is_movie=is_movie
+            )
+
+            if selected_idx is not None:
+                return selected_idx
+            else:
+                logger.info("[AI辅助选择] AI未能做出选择")
+                return None
+
+        except Exception as e:
+            logger.warning(f"[AI辅助选择] AI选择过程出错: {e}")
+            return None
+
     def analyze_search_metadata(self, path: Path) -> Optional[Dict[str, Any]]:
         """
         当常规TMDB搜索失败时，使用AI分析目录和文件名以推断元数据。

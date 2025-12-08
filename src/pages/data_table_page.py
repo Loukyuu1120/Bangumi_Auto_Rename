@@ -231,6 +231,7 @@ class TableManager:
 
     def do_refresh(self):
         """点击刷新按钮 -> 重绘整个表格区域"""
+        self.load_data()
         refresh_table_view.refresh()
 
     def batch_retry_click(self):
@@ -339,6 +340,21 @@ class TableManager:
         self.selected_rows = []
         ui.timer(1.0, self.do_refresh, once=True)
 
+
+
+    def delete_by_uuid(self, uuid: str):
+        """根据 uuid 删除任务文件和内存中的行"""
+        path1 = TASK_PATH / f'{uuid}.json'
+        path2 = RECORD_PATH / f'{uuid}.json'
+
+        if path1.exists():
+            path1.unlink()
+        if path2.exists():
+            path2.unlink()
+
+        self.all_rows = [row for row in self.all_rows if row['uuid'] != uuid]
+
+
     def batch_delete(self):
         """批量删除"""
         rows = list(self.selected_rows)
@@ -346,28 +362,19 @@ class TableManager:
             notify('请先勾选需要删除的任务')
             return
 
-        count = 0
         for row in rows:
-            handle_delete(
-                GenericEventArguments(
-                    sender=self.table,
-                    client=None,
-                    args={'row': row},
-                ),
-                is_notify=False,
-            )
-            count += 1
+            self.delete_by_uuid(row['uuid'])
 
-        notify(f'已删除 {count} 个任务记录')
-        self.selected_rows = []
-        self.do_refresh()
+        notify(f'已删除 {len(rows)} 个任务记录')
+
+        self.refresh_table()
 
     def refresh_table(self):
         self.selected_rows = []
         if self.table and self.table.selected:
             self.table.selected.clear()
         self.load_data()
-
+        refresh_table_view.refresh()
 
 manager = TableManager()
 
@@ -578,14 +585,8 @@ def handle_delete(ev: GenericEventArguments, is_notify: bool = True):
     row_data = arg['row']
     uuid = row_data['uuid']
 
-    path1 = TASK_PATH / f'{uuid}.json'
-    path2 = RECORD_PATH / f'{uuid}.json'
-
-    if path1.exists():
-        path1.unlink()
-    if path2.exists():
-        path2.unlink()
+    manager.delete_by_uuid(uuid)
 
     if is_notify:
         notify('删除任务记录成功!')
-        manager.refresh_table()
+    manager.refresh_table()

@@ -39,6 +39,8 @@ class Rename:
     _dir_cache = {}
     _ai_mapping_cache = {}
     _processed_paths = set()
+    _processing_paths = set()
+    _tmdb_search_cache: Dict[tuple, tuple] = {}
 
     def __init__(self):
         self.BANGUMI_PATH = Path(cm.get_config('bangumi_path'))
@@ -176,13 +178,12 @@ class Rename:
                 if titles:
                     for title in titles:
                         similaritys = {}
-                        if title['type'] in ['Default', 'Synonym', 'English', 'French']:
-                            ename = title['title']
-                            clean_path_name = path_name.replace(ename, '')
-                            similarity = SequenceMatcher(
-                                None, sname, remove_tag(clean_path_name)
-                            ).ratio()
-                            similaritys[similarity] = info_season_id
+                        ename = title['title']
+                        clean_path_name = path_name.replace(ename, '')
+                        similarity = SequenceMatcher(
+                            None, sname, remove_tag(clean_path_name)
+                        ).ratio()
+                        similaritys[similarity] = info_season_id
                         all_similaritys.append(similaritys)
 
         if not matched_via_tmdb:
@@ -462,80 +463,104 @@ class Rename:
             is_anime: Optional[bool] = None,
             is_movie: Optional[bool] = None,
     ) -> Union[Tuple[str, Dict, bool, bool], str]:
+        """
+        判断任务类型（电影/电视剧）
+        注意：此方法不处理缓存，只负责类型判断和 TMDB 搜索
+        """
+        norm_name = rtpath_name.strip().lower()
 
-        # [增强逻辑] 强制电影模式下的搜索优化
+        # 如果上下文强制指定为电影
         if is_movie:
             logger.info(f"[处理任务] 上下文强制指定为电影类型，使用文件名 '{rtpath_name}' 进行搜索...")
 
-            # 第1次尝试：标准搜索
-            s2_name, s2_info = self.search.get_movie_info(rtpath_name, year)
-            if s2_name and s2_info and year > 0:
-                release_date = s2_info.get('release_date', '')
-                tmdb_year = int(release_date.split('-')[0]) if release_date else 0
-                if abs(tmdb_year - year) > 1:
-                    ratio = SequenceMatcher(None, rtpath_name.lower(), s2_name.lower()).ratio()
-                    ratio_origin = SequenceMatcher(None, rtpath_name.lower(), s2_info.get('original_title', '').lower()).ratio()
-                    if ratio < 0.5 and ratio_origin < 0.5:
-                         logger.warning(f"[搜索校验] TMDB结果 '{s2_name}'({tmdb_year}) 与文件名 '{rtpath_name}'({year}) 差异过大，丢弃。")
-                         s2_name, s2_info = None, None
+            cache_key = (norm_name, year, "movie")
+            if cache_key in Rename._tmdb_search_cache:
+                s2_name, s2_info = Rename._tmdb_search_cache[cache_key]
+            else:
+                s2_name, s2_info = self.search.get_movie_info(rtpath_name, year)
 
-            # 第2次尝试：如果带年份没搜到，去掉年份
-            if not s2_name and year != 0:
-                logger.info(f"[搜索重试] 去除年份后重试搜索: {rtpath_name}")
-                s2_name, s2_info = self.search.get_movie_info(rtpath_name, 0)
+                # 年份校验
+                if s2_name and s2_info and year > 0:
+                    release_date = s2_info.get('release_date', '')
+                    tmdb_year = int(release_date.split('-')[0]) if release_date else 0
+                    if abs(tmdb_year - year) > 1:
+                        ratio = SequenceMatcher(None, rtpath_name.lower(), s2_name.lower()).ratio()
+                        ratio_origin = SequenceMatcher(
+                            None, rtpath_name.lower(),
+                            s2_info.get('original_title', '').lower()
+                        ).ratio()
+                        if ratio < 0.5 and ratio_origin < 0.5:
+                            logger.warning(
+                                f"[搜索校验] TMDB结果 '{s2_name}'({tmdb_year}) 与文件名 '{rtpath_name}'({year}) 差异过大，丢弃。"
+                            )
+                            s2_name, s2_info = None, None
 
-            # 第3次尝试：如果还没搜到，尝试更激进的清洗
-            if not s2_name:
-                separators = [':', '：', ' ']
-                for sep in separators:
-                    if sep in rtpath_name:
-                        parts = rtpath_name.split(sep)
-                        if len(parts) > 1:
-                            sub_name = parts[-1].strip()
-                            sub_name = clean_noise(sub_name)
-                            if re.match(r'^[\(\[\{]?\d{4}[\)\]\}]?$', sub_name):
-                                logger.debug(f"[搜索安全] 忽略纯年份/数字搜索词: {sub_name}")
-                            elif len(sub_name) > 1:
-                                logger.info(f"[搜索重试] 尝试使用副标题搜索: {sub_name}")
-                                s2_name, s2_info = self.search.get_movie_info(sub_name, year)
-                                if s2_name: break
-                        if not s2_name and len(parts) > 0 and len(parts[0]) > 2:
-                            sub_name = parts[0].strip()
-                            logger.info(f"[搜索重试] 尝试使用主标题搜索: {sub_name}")
-                            s2_name, s2_info = self.search.get_movie_info(sub_name, year)
-                            if s2_name: break
+                if not s2_name and year != 0:
+                    logger.info(f"[搜索重试] 去除年份后重试搜索: {rtpath_name}")
+                    s2_name, s2_info = self.search.get_movie_info(rtpath_name, 0)
+
+                if s2_name:
+                    Rename._tmdb_search_cache[cache_key] = (s2_name, s2_info)
 
             if not s2_name:
                 return f'[TMDB] 未搜索到电影信息 (强制Movie模式), 文件名: {rtpath_name}'
 
             return s2_name, s2_info, (is_anime or False), True
 
-        # ... (以下为自动判断逻辑) ...
+        # ------- 自动判断模式 -------
         pos = 0
         logger.info('[处理任务] 未传入任务类型，开始判断该文件是否为电影！')
 
         # 1. 搜索电视剧信息
-        s1_name, s1_info = self.search.get_tv_info(rtpath_name, year)
+        tv_cache_key = (norm_name, year, "tv")
+        if tv_cache_key in Rename._tmdb_search_cache:
+            s1_name, s1_info = Rename._tmdb_search_cache[tv_cache_key]
+        else:
+            s1_name, s1_info = self.search.get_tv_info(rtpath_name, year)
+            if not s1_name and year != 0:
+                s1_name, s1_info = self.search.get_tv_info(rtpath_name, 0)
+            if s1_name:
+                Rename._tmdb_search_cache[tv_cache_key] = (s1_name, s1_info)
+
         if s1_name:
             logger.info(f'[处理任务] 搜索到的电视剧名称: {s1_name}')
 
-        if not s1_name and year != 0:
-            s1_name, s1_info = self.search.get_tv_info(rtpath_name, 0)
-            if s1_name:
-                logger.info(f'[处理任务] 未搜索到结果, 删除year后重试: {s1_name}')
-
         # 2. 搜索电影信息
-        s2_name, s2_info = self.search.get_movie_info(rtpath_name, year)
+        mv_cache_key = (norm_name, year, "movie")
+        if mv_cache_key in Rename._tmdb_search_cache:
+            s2_name, s2_info = Rename._tmdb_search_cache[mv_cache_key]
+        else:
+            s2_name, s2_info = self.search.get_movie_info(rtpath_name, year)
+            if not s2_name and year != 0:
+                s2_name, s2_info = self.search.get_movie_info(rtpath_name, 0)
+            if s2_name:
+                Rename._tmdb_search_cache[mv_cache_key] = (s2_name, s2_info)
+
         if s2_name:
             logger.info(f'[处理任务] 搜索到的电影名称: {s2_name}')
 
-        if not s2_name and year != 0:
-            s2_name, s2_info = self.search.get_movie_info(rtpath_name, 0)
-            if s2_name:
-                logger.info(f'[处理任务] 未搜索到结果, 删除year后重试: {s2_name}')
+        # 3. 快速判断：检测到 SxxExx 格式直接判定为电视剧
+        filename = path.name
+        has_episode_pattern = bool(re.search(r"S\d{1,2}E\d{1,3}", filename, re.IGNORECASE))
 
-        # 3. 提取文件名中的季号
+        if has_episode_pattern:
+            logger.info('[处理任务] 检测到 SxxExx 格式，直接判定为电视剧')
+            is_movie = False
+            info = s1_info
+            name = s1_name
+            if not name or not info:
+                return f'[TMDB] 未搜索到电视剧信息, 跳过{rtpath_name}'
+
+            if is_anime is None:
+                is_anime = any(g['name'].lower() in ['animation', 'anime']
+                               for g in info.get('genres', []))
+
+            return name, info, is_anime, is_movie
+
+        # 4. 提取季号用于评分
         season_id = extract_season(rtpath_name)
+
+        # 5. 评分逻辑
         if s1_name:
             pos += 1
             if year > 0 and s1_info:
@@ -560,20 +585,21 @@ class Rename:
                     except:
                         pass
 
-        filename = path.name
-        if re.search(r"S\d{1,2}E\d{1,3}", filename, re.IGNORECASE):
-            pos += 2
-
+        # 检查父目录是否有季号标识
         for parent in path.parents:
             pname = parent.name.lower()
             if re.search(r"season\s*\d+", pname) or re.match(r"s\d{1,2}", pname):
                 pos += 1
                 break
 
+        # 检查目录内相似文件
         try:
             dir_to_check = path.parent if path.is_file() else path
             if dir_to_check.is_dir():
-                video_files = [p for p in dir_to_check.iterdir() if p.is_file() and p.suffix.lower() in VIDEO_SUFFIX]
+                video_files = [
+                    p for p in dir_to_check.iterdir()
+                    if p.is_file() and p.suffix.lower() in VIDEO_SUFFIX
+                ]
                 if len(video_files) >= 3:
                     processed_names = []
                     for vf in video_files:
@@ -582,15 +608,18 @@ class Rename:
                         base = remove_episode(base)
                         base = remove_season(base)
                         processed_names.append((vf.name, base))
+
                     similar_pairs = 0
                     n = len(processed_names)
                     for i in range(n):
                         for j in range(i + 1, n):
                             name_i, base_i = processed_names[i]
                             name_j, base_j = processed_names[j]
-                            if not base_i or not base_j: continue
+                            if not base_i or not base_j:
+                                continue
                             ratio = SequenceMatcher(None, base_i, base_j).ratio()
-                            if 0.8 < ratio < 0.999: similar_pairs += 1
+                            if 0.8 < ratio < 0.999:
+                                similar_pairs += 1
 
                     if similar_pairs >= 3:
                         if season_id > 0:
@@ -600,47 +629,47 @@ class Rename:
         except Exception as e:
             logger.warning(f"[处理任务] 检查相似视频文件时出错: {e}")
 
+        # 季号判断
         if season_id == -1:
             pos -= 0.6
-            if path.is_file(): pos -= 0.5
+            if path.is_file():
+                pos -= 0.5
         else:
             pos += 0.6
-            if path.is_file(): pos += 0.5
+            if path.is_file():
+                pos += 0.5
 
+        # 目录文件数量判断
         if path.is_dir():
             if len([i for i in path.iterdir() if i.is_file()]) > 6:
                 pos += 0.4
             else:
                 pos -= 0.4
 
+        # 6. 最终判定
         if pos > 0 or (is_movie is not None and not is_movie):
-            logger.info('[处理任务] 该文件可能为电视剧！')
+            logger.info(f'[处理任务] 该文件可能为电视剧！(得分: {pos})')
             is_movie = False
             info = s1_info
             name = s1_name
             if not name or not info:
                 return f'[TMDB] 未搜索到电视剧信息, 跳过{rtpath_name}'
+
             if is_anime is None:
-                for g in info.get('genres', []):
-                    if g['name'].lower() in ['animation', 'anime']:
-                        is_anime = True
-                        break
-                else:
-                    is_anime = False
+                is_anime = any(g['name'].lower() in ['animation', 'anime']
+                               for g in info.get('genres', []))
         else:
-            logger.info('[处理任务] 该文件可能为电影！')
+            logger.info(f'[处理任务] 该文件可能为电影！(得分: {pos})')
             is_movie = True
             info = s2_info
             name = s2_name
             if not name or not info:
                 return f'[TMDB] 未搜索到电影信息, 跳过{rtpath_name}'
+
             if is_anime is None:
-                for g in info.get('genres', []):
-                    if g['name'].lower() in ['animation', 'anime']:
-                        is_anime = True
-                        break
-                else:
-                    is_anime = False
+                is_anime = any(g['name'].lower() in ['animation', 'anime']
+                               for g in info.get('genres', []))
+
         return name, info, is_anime, is_movie
 
     def _attempt_ai_recovery(
@@ -705,6 +734,9 @@ class Rename:
                 if check_skip_dir and path.is_dir() and ai_is_movie:
                     return "SKIP_DIR_IS_MOVIE"
 
+                abs_str = str(path.resolve())
+                Rename._processing_paths.discard(abs_str)
+
                 return self.process(
                     path,
                     _is_anime=is_anime,
@@ -738,208 +770,275 @@ class Rename:
     ):
         if not _uuid:
             _uuid = str(uuid.uuid4())
-        if str(path.absolute()) in Rename._processed_paths:
-            logger.info(f"[跳过] 文件已在之前的批量任务中处理完毕: {path.name}")
+
+        abs_str = str(path.resolve())
+        if abs_str in Rename._processed_paths:
+            logger.info(f"[跳过] 文件已在之前的任务中处理完毕: {path.name}")
+            return True
+        if abs_str in Rename._processing_paths:
+            logger.info(f"[跳过] 文件当前正在处理中: {path.name}")
             return True
 
-        self.scraped_seasons = set()
+        Rename._processing_paths.add(abs_str)
+        try:
+            self.scraped_seasons = set()
 
-        if not self.search.TMDB_KEY: return self.error_reply(_uuid, '无TMDB Key', path)
+            if not self.search.TMDB_KEY:
+                return self.error_reply(_uuid, '无TMDB Key', path)
 
-        enable_scrape = cm.get_config('scrape_metadata')
-        global_use_ai = bool(cm.get_config('use_ai'))
-        effective_use_ai = use_ai if use_ai is not None else global_use_ai
-        enable_secondary = cm.get_config('secondary_classification')
+            enable_scrape = cm.get_config('scrape_metadata')
+            global_use_ai = bool(cm.get_config('use_ai'))
+            effective_use_ai = use_ai if use_ai is not None else global_use_ai
+            enable_secondary = cm.get_config('secondary_classification')
 
-        logger.info(f'[处理任务] 开始处理{path.name}')
+            logger.info(f'[处理任务] 开始处理{path.name}')
 
-        # --- 1. 基础清洗 ---
-        rtpath_name = remove_tag(path.name)
-        if not rtpath_name: rtpath_name = remove_tag(path.name, True)
-        rtpath_name, year = divide_by_year(rtpath_name)
-        rtpath_name = remove_season(remove_episode(rtpath_name)).strip('!')
+            # --- 1. 基础清洗 ---
+            rtpath_name = remove_tag(path.name)
+            if not rtpath_name:
+                rtpath_name = remove_tag(path.name, True)
+            rtpath_name, year = divide_by_year(rtpath_name)
+            rtpath_name = remove_season(remove_episode(rtpath_name)).strip('!')
 
-        # ==================== 【缓存与溯源逻辑】 ====================
-        # 检测文件名有效性
-        INVALID_NAMES = ['未知', 'unknown', 'none', 'null', 'tba', '未识别到官方名称', '待定']
-        name_check = re.sub(r'[\W_]+', '', rtpath_name.replace(path.suffix, "") if path.suffix else rtpath_name)
-        is_weak = (not name_check) or (name_check.isdigit()) or (len(name_check) < 2) or (
+            # --- 2. 检查是否为弱文件名 ---
+            INVALID_NAMES = ['未知', 'unknown', 'none', 'null', 'tba', '未识别到官方名称', '待定']
+            name_check = re.sub(r'[\W_]+', '', rtpath_name.replace(path.suffix, "") if path.suffix else rtpath_name)
+            is_weak = (not name_check) or (name_check.isdigit()) or (len(name_check) < 2) or (
                     rtpath_name.lower() in INVALID_NAMES)
 
-        if is_weak:
-            logger.info(f"[智能判断] 文件名 '{path.name}' 判定为弱文件名，强制作为剧集(TV)处理。")
-            is_movie = False
-        cache_key = str(path.parent.absolute())
-        if is_weak and not cus_tmdb_id and not cus_name:
-            if cache_key in Rename._dir_cache:
-                c = Rename._dir_cache[cache_key]
-                logger.info(f"[缓存命中] 目录信息: {c.get('name')}")
-                cus_tmdb_id, cus_name = c.get('tmdb_id'), c.get('name')
-                if is_anime is None: is_anime = c.get('is_anime')
-                rtpath_name = cus_name
-            else:
-                # 溯源逻辑 (简化版，复用你已有的)
-                if path.parent != path.root:
-                    pname = path.parent.name
-                    if re.match(r'^(season|series|s)\s*\d*$',
-                                remove_tag(pname).lower().strip()) and path.parent.parent != path.root:
-                        rtpath_name, year = divide_by_year(remove_tag(path.parent.parent.name))
-                        logger.info(f"[溯源] 使用祖父目录: {rtpath_name}")
+            if is_weak:
+                logger.info(f"[智能判断] 文件名 '{path.name}' 判定为弱文件名，强制作为剧集(TV)处理。")
+                is_movie = False
+
+            # --- 3. 目录缓存逻辑（仅用于电视剧） ---
+            cache_key = str(path.parent.absolute())
+
+            # 先快速判断：如果文件名有 SxxExx 格式，预判为电视剧
+            filename = path.name
+            has_episode_pattern = bool(re.search(r"S\d{1,2}E\d{1,3}", filename, re.IGNORECASE))
+
+            # 如果是弱文件名 或 明确的剧集格式，尝试使用目录缓存
+            if (is_weak or has_episode_pattern) and not cus_tmdb_id and not cus_name:
+                if cache_key in Rename._dir_cache:
+                    c = Rename._dir_cache[cache_key]
+                    cached_is_movie = c.get('is_movie', False)
+
+                    # 只有缓存的也是电视剧，才使用缓存
+                    if not cached_is_movie:
+                        logger.info(f"[目录缓存] 命中电视剧缓存: {c.get('name')}")
+                        cus_tmdb_id, cus_name = c.get('tmdb_id'), c.get('name')
+                        if is_anime is None:
+                            is_anime = c.get('is_anime')
+                        rtpath_name = cus_name
+                        is_movie = False  # 强制为电视剧
                     else:
-                        rtpath_name, year = divide_by_year(remove_tag(pname))
-                        logger.info(f"[溯源] 使用父目录: {rtpath_name}")
-
-        if any(inv in rtpath_name.lower() for inv in INVALID_NAMES) and not cus_tmdb_id: rtpath_name = ""
-        if path.is_file() and path.suffix.lower() not in VIDEO_SUFFIX: return
-
-        if cus_name:
-            rtpath_name = cus_name
-            new_name, new_year = divide_by_year(rtpath_name)
-            if new_year > 0: rtpath_name, year = new_name, new_year
-
-        if cus_tmdb_id:
-            try:
-                name, info, is_anime, is_movie = self.search.get_info_by_tmdb_id(tmdb_id=int(cus_tmdb_id),
-                                                                                 is_movie_hint=is_movie)
-                if is_weak: Rename._dir_cache[cache_key] = {'tmdb_id': str(info['id']), 'name': name,
-                                                            'is_anime': is_anime, 'is_movie': is_movie}
-            except Exception as e:
-                return self.error_reply(_uuid, str(e), path)
-        else:
-            task_res = self.check_task_type(_uuid, rtpath_name, year, path, is_anime, is_movie)
-            if isinstance(task_res, str):
-                if effective_use_ai and not ai_attempted:
-                    # 尝试 AI 补救 (元数据)
-                    ai_res = self._attempt_ai_recovery(path, _uuid, is_anime, cus_offset, cus_season_id,
-                                                       effective_use_ai, check_skip_dir=True)
-                    if ai_res: return ai_res
-                return self.error_reply(_uuid, task_res, path)
-            name, info, is_anime, is_movie = task_res
-            if info and 'id' in info and path.parent != path.root:
-                Rename._dir_cache[cache_key] = {'tmdb_id': str(info['id']), 'name': name, 'is_anime': is_anime,
-                                                'is_movie': is_movie}
-
-        ai_available = self.ai_processor.ai_client.is_available()
-        if is_movie:
-            if not name: return self.error_reply(_uuid, "未找到电影信息", path)
-            _WORK_PATH = self.ANIME_MOVIE_PATH if is_anime else self.MOVIE_PATH
-            first_year = info.get('release_date', '0000').split('-')[0]
-
-            if enable_secondary:
-                category = self._get_category_folder(info, True, is_anime)
-                work_path = _WORK_PATH / category / f'{name} ({first_year})'
-            else:
-                work_path = _WORK_PATH / f'{name} ({first_year})'
-
-            work_path.mkdir(parents=True, exist_ok=True)
-            target_file = work_path / f'{name} - {path.name}'
-            self.R[path] = target_file
-
-            # 电影模式下直接刮削，因为电影通常是单文件
-            if enable_scrape: self.scraper.scrape_movie(target_file, info)
-            season_id = 0
-
-        else:
-            if is_anime:
-                _WORK_PATH = self.ANIME_PATH
-            else:
-                _WORK_PATH = self.BANGUMI_PATH
-
-            if not name: return self.error_reply(_uuid, "未找到剧集信息", path)
-
-            if enable_scrape: info = self.search.fill_season_info(info)
-            first_year = info.get('first_air_date', '0000').split('-')[0]
-
-            if enable_secondary:
-                category = self._get_category_folder(info, False, is_anime)
-                work_path = _WORK_PATH / category / f'{name} ({first_year})'
-            else:
-                work_path = _WORK_PATH / f'{name} ({first_year})'
-
-            season_id = self.get_season_id(info, work_path, path, [{'title': name}])
-            if cus_season_id: season_id = int(cus_season_id)
-
-            use_ai_logic = effective_use_ai and ai_available and (is_anime or is_weak)
-
-            if use_ai_logic:
-                tv_info = self.search.fill_season_info(info)
-                ai_cache_key = str(path.parent.absolute())
-
-                if ai_cache_key in Rename._ai_mapping_cache:
-                    logger.info(f"[缓存命中] 使用目录AI映射: {ai_cache_key}")
-                    ai_result = Rename._ai_mapping_cache[ai_cache_key]
+                        logger.info(f"[目录缓存] 缓存为电影，不使用缓存")
                 else:
-                    logger.info("[处理任务] 启用AI批量分析目录...")
-                    ai_result = self.ai_processor.analyze_anime_files(path, tv_info)
-                    if ai_result:
-                        Rename._ai_mapping_cache[ai_cache_key] = ai_result
+                    # 没有缓存，进行溯源
+                    if is_weak and path.parent != path.root:
+                        pname = path.parent.name
+                        if re.match(r'^(season|series|s)\s*\d*$',
+                                    remove_tag(pname).lower().strip()) and path.parent.parent != path.root:
+                            rtpath_name, year = divide_by_year(remove_tag(path.parent.parent.name))
+                            logger.info(f"[溯源] 使用祖父目录: {rtpath_name}")
+                        else:
+                            rtpath_name, year = divide_by_year(remove_tag(pname))
+                            logger.info(f"[溯源] 使用父目录: {rtpath_name}")
 
-                should_use = False
-                if ai_result:
-                    conf = cm.get_config("ai_confidence_threshold")
-                    if conf == "Low" or \
-                            (conf == "Medium" and ai_result.confidence in ["Medium", "High"]) or \
-                            (conf == "High" and ai_result.confidence == "High"):
-                        should_use = True
+            if any(inv in rtpath_name.lower() for inv in INVALID_NAMES) and not cus_tmdb_id:
+                rtpath_name = ""
+            if path.is_file() and path.suffix.lower() not in VIDEO_SUFFIX:
+                return
 
-                if should_use:
-                    logger.info("[AI处理] 应用批量文件映射...")
-                    self.R = self.ai_processor.apply_ai_mapping(ai_result, path, work_path)
+            if cus_name:
+                rtpath_name = cus_name
+                new_name, new_year = divide_by_year(rtpath_name)
+                if new_year > 0:
+                    rtpath_name, year = new_name, new_year
 
-                    if not self.R:
-                        logger.warning("[AI处理] 映射为空，回退传统模式")
-                        # 传统模式回退：先常规刮削季度，再调用处理逻辑
-                        if enable_scrape: self.scraper.scrape_tv_show(work_path, info)
-                        self._process_traditional(path, rtpath_name, work_path, season_id, info, cus_offset,
-                                                  cus_season_id)
+            # --- 4. 搜索 TMDB ---
+            if cus_tmdb_id:
+                try:
+                    name, info, is_anime, is_movie = self.search.get_info_by_tmdb_id(
+                        tmdb_id=int(cus_tmdb_id),
+                        is_movie_hint=is_movie
+                    )
+                    # 只有电视剧才写入目录缓存
+                    if not is_movie and path.parent != path.root:
+                        Rename._dir_cache[cache_key] = {
+                            'tmdb_id': str(info['id']),
+                            'name': name,
+                            'is_anime': is_anime,
+                            'is_movie': is_movie
+                        }
+                        logger.info(f"[目录缓存] 已缓存电视剧: {name}")
+                except Exception as e:
+                    return self.error_reply(_uuid, str(e), path)
+            else:
+                task_res = self.check_task_type(_uuid, rtpath_name, year, path, is_anime, is_movie)
+                if isinstance(task_res, str):
+                    if effective_use_ai and not ai_attempted:
+                        ai_res = self._attempt_ai_recovery(
+                            path, _uuid, is_anime, cus_offset, cus_season_id,
+                            effective_use_ai, check_skip_dir=True
+                        )
+                        if ai_res:
+                            return ai_res
+                    return self.error_reply(_uuid, task_res, path)
+
+                name, info, is_anime, is_movie = task_res
+
+                # 只有电视剧才写入目录缓存
+                if info and 'id' in info and path.parent != path.root and not is_movie:
+                    Rename._dir_cache[cache_key] = {
+                        'tmdb_id': str(info['id']),
+                        'name': name,
+                        'is_anime': is_anime,
+                        'is_movie': is_movie
+                    }
+                    logger.info(f"[目录缓存] 已缓存电视剧: {name}")
+
+            # --- 5. 后续处理逻辑保持不变 ---
+            ai_available = self.ai_processor.ai_client.is_available()
+
+            if is_movie:
+                # 电影处理逻辑（不使用目录缓存）
+                if not name:
+                    return self.error_reply(_uuid, "未找到电影信息", path)
+
+                _WORK_PATH = self.ANIME_MOVIE_PATH if is_anime else self.MOVIE_PATH
+                first_year = info.get('release_date', '0000').split('-')[0]
+
+                if enable_secondary:
+                    category = self._get_category_folder(info, True, is_anime)
+                    work_path = _WORK_PATH / category / f'{name} ({first_year})'
+                else:
+                    work_path = _WORK_PATH / f'{name} ({first_year})'
+
+                work_path.mkdir(parents=True, exist_ok=True)
+                target_file = work_path / f'{name} - {path.name}'
+                self.R[path] = target_file
+
+                if enable_scrape:
+                    self.scraper.scrape_movie(target_file, info)
+                season_id = 0
+
+            else:
+                # 电视剧处理逻辑（使用目录缓存）
+                if is_anime:
+                    _WORK_PATH = self.ANIME_PATH
+                else:
+                    _WORK_PATH = self.BANGUMI_PATH
+
+                if not name:
+                    return self.error_reply(_uuid, "未找到剧集信息", path)
+
+                if enable_scrape:
+                    info = self.search.fill_season_info(info)
+                first_year = info.get('first_air_date', '0000').split('-')[0]
+
+                if enable_secondary:
+                    category = self._get_category_folder(info, False, is_anime)
+                    work_path = _WORK_PATH / category / f'{name} ({first_year})'
+                else:
+                    work_path = _WORK_PATH / f'{name} ({first_year})'
+
+                season_id = self.get_season_id(info, work_path, path, [{'title': name}])
+                if cus_season_id:
+                    season_id = int(cus_season_id)
+
+                use_ai_logic = effective_use_ai and ai_available and (is_anime or is_weak)
+
+                if use_ai_logic:
+                    # AI 处理逻辑...
+                    tv_info = self.search.fill_season_info(info)
+                    ai_cache_key = str(path.parent.absolute())
+
+                    if ai_cache_key in Rename._ai_mapping_cache:
+                        logger.info(f"[缓存命中] 使用目录AI映射: {ai_cache_key}")
+                        ai_result = Rename._ai_mapping_cache[ai_cache_key]
                     else:
+                        logger.info("[处理任务] 启用AI批量分析目录...")
+                        ai_result: AIAnalysisResult | None = (
+                            self.ai_processor.analyze_anime_files(path, tv_info)
+                        )
+                        if ai_result:
+                            Rename._ai_mapping_cache[ai_cache_key] = ai_result
+
+                    should_use = False
+                    if ai_result:
+                        conf = cm.get_config("ai_confidence_threshold")
+                        if conf == "Low" or \
+                                (conf == "Medium" and ai_result.confidence in ["Medium", "High"]) or \
+                                (conf == "High" and ai_result.confidence == "High"):
+                            should_use = True
+
+                    if should_use:
+                        logger.info("[AI处理] 应用批量文件映射...")
+                        self.R = self.ai_processor.apply_ai_mapping(ai_result, path, work_path)
+
+                        if not self.R:
+                            logger.warning("[AI处理] 映射为空，回退传统模式")
+                            if enable_scrape:
+                                self.scraper.scrape_tv_show(work_path, info)
+                            self._process_traditional(
+                                path, rtpath_name, work_path, season_id, info, cus_offset, cus_season_id
+                            )
+                        else:
+                            if enable_scrape:
+                                self.scraper.scrape_tv_show(work_path, info)
+                                logger.info(f"[批量刮削] 正在处理 {len(self.R)} 个文件...")
+                                for src, dest in self.R.items():
+                                    Rename._processed_paths.add(str(src.absolute()))
+                                    try:
+                                        match = re.search(r'S(\d+)E(\d+)', dest.name, re.IGNORECASE)
+                                        if match:
+                                            self.scraper.scrape_episode(
+                                                dest, info, int(match.group(1)), int(match.group(2))
+                                            )
+                                    except Exception as e:
+                                        logger.debug(f"刮削单集失败: {e}")
+                    else:
+                        logger.info("[AI处理] 置信度不足，回退传统模式")
                         if enable_scrape:
                             self.scraper.scrape_tv_show(work_path, info)
-                            logger.info(f"[批量刮削] 正在处理 {len(self.R)} 个文件...")
-                            for src, dest in self.R.items():
-                                Rename._processed_paths.add(str(src.absolute()))
-                                try:
-                                    match = re.search(r'S(\d+)E(\d+)', dest.name, re.IGNORECASE)
-                                    if match:
-                                        self.scraper.scrape_episode(dest, info, int(match.group(1)),
-                                                                    int(match.group(2)))
-                                except Exception as e:
-                                    logger.debug(f"刮削单集失败: {e}")
+                        self._process_traditional(
+                            path, rtpath_name, work_path, season_id, info, cus_offset, cus_season_id
+                        )
                 else:
-                    logger.info("[AI处理] 置信度不足，回退传统模式")
-                    if enable_scrape: self.scraper.scrape_tv_show(work_path, info)
-                    self._process_traditional(path, rtpath_name, work_path, season_id, info, cus_offset, cus_season_id)
-            else:
-                # 传统模式：先刮削季度
-                if enable_scrape: self.scraper.scrape_tv_show(work_path, info)
-                self._process_traditional(path, rtpath_name, work_path, season_id, info, cus_offset, cus_season_id)
+                    # 传统模式
+                    if enable_scrape:
+                        self.scraper.scrape_tv_show(work_path, info)
+                    self._process_traditional(
+                        path, rtpath_name, work_path, season_id, info, cus_offset, cus_season_id
+                    )
 
-        # --- 提交移动任务 ---
-        final_tmdb_id = cus_tmdb_id if cus_tmdb_id else (str(info['id']) if info else None)
-        display_path = str(list(self.R.values())[0]) if self.R else str(work_path)
+            # --- 6. 提交移动任务 ---
+            final_tmdb_id = cus_tmdb_id if cus_tmdb_id else (str(info['id']) if info else None)
+            display_path = str(list(self.R.values())[0]) if self.R else str(work_path)
 
-        # 如果是批量模式，self.R 里包含了所有文件。Trans 类会一次性移动所有文件。
-        trans_result = Trans(self.R, _uuid).trans_file()
+            trans_result = Trans(self.R, _uuid).trans_file()
 
-        # 记录本次成功移动的所有文件到缓存 (双重保险)
-        if trans_result is True:
-            for k in self.R.keys():
-                Rename._processed_paths.add(str(k.absolute()))
+            if trans_result is True:
+                for k in self.R.keys():
+                    Rename._processed_paths.add(str(k.absolute()))
 
-        self.R = {}  # 清空，防止污染下一次（虽然每次 new instance，但 R 是实例变量）
+            self.R = {}
 
-        if isinstance(trans_result, str):
-            return self.error_reply(_uuid, trans_result, path)
+            if isinstance(trans_result, str):
+                return self.error_reply(_uuid, trans_result, path)
 
-        # 写入任务记录
-        task_data = {
-            "path": str(path), "target_path": display_path, "is_anime": is_anime, "is_movie": is_movie,
-            "name": name, "season_id": season_id, "uuid": str(_uuid), "error": None, "use_ai": effective_use_ai,
-            "tmdb_id": final_tmdb_id
-        }
-        with open(TASK_PATH / f"{_uuid}.json", "w", encoding="UTF-8") as f:
-            json.dump(task_data, f, indent=4, ensure_ascii=False)
-        return True
+            # 写入任务记录
+            task_data = {
+                "path": str(path), "target_path": display_path, "is_anime": is_anime, "is_movie": is_movie,
+                "name": name, "season_id": season_id, "uuid": str(_uuid), "error": None, "use_ai": effective_use_ai,
+                "tmdb_id": final_tmdb_id
+            }
+            with open(TASK_PATH / f"{_uuid}.json", "w", encoding="UTF-8") as f:
+                json.dump(task_data, f, indent=4, ensure_ascii=False)
+            return True
+        finally:
+            Rename._processing_paths.discard(abs_str)
 
     def _process_traditional(
             self, path: Path, rtpath_name: str, work_path: Path, season_id: int, info: Optional[Dict] = None,

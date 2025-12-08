@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Dict, List, Optional, Any
 
 from ..logger import logger
@@ -26,6 +27,176 @@ class AIClient:
     def is_available(self) -> bool:
         """检查AI客户端是否可用"""
         return bool(self.enabled and self._client and self._client.is_available())
+
+    def select_best_tmdb_match(
+            self,
+            query: str,
+            year: int,
+            candidates: List[Dict],
+            is_movie: bool
+    ) -> Optional[int]:
+        """从多个TMDB搜索结果中选择最佳匹配"""
+        if not self.is_available():
+            logger.debug("[AI辅助] AI功能未启用，跳过")
+            return None
+
+        if not candidates:
+            return None
+
+        try:
+            # 构建候选信息
+            candidates_info = []
+            for idx, result in enumerate(candidates):
+                if is_movie:
+                    title = result.get('title', '')
+                    release_date = result.get('release_date', '')
+                    overview = result.get('overview', '')[:150]
+                    tmdb_year = release_date.split('-')[0] if release_date else 'N/A'
+                    original_title = result.get('original_title', '')
+                    candidates_info.append({
+                        'index': idx,
+                        'title': title,
+                        'original_title': original_title,
+                        'year': tmdb_year,
+                        'overview': overview
+                    })
+                else:
+                    name = result.get('name', '')
+                    first_air_date = result.get('first_air_date', '')
+                    overview = result.get('overview', '')[:150]
+                    tmdb_year = first_air_date.split('-')[0] if first_air_date else 'N/A'
+                    original_name = result.get('original_name', '')
+                    candidates_info.append({
+                        'index': idx,
+                        'name': name,
+                        'original_name': original_name,
+                        'year': tmdb_year,
+                        'overview': overview
+                    })
+
+            # 构建提示词
+            media_type = "电影" if is_movie else "电视剧"
+            year_hint = f" ({year})" if year > 0 else ""
+
+            user_prompt = f"""你是一个媒体信息匹配专家。现在需要从TMDB搜索结果中选择最匹配的{media_type}。
+
+    搜索关键词: {query}{year_hint}
+
+    候选结果（共{len(candidates_info)}个）:
+    """
+            for c in candidates_info:
+                if is_movie:
+                    user_prompt += f"""
+    {c['index'] + 1}. 标题: {c['title']}
+       原标题: {c['original_title']}
+       年份: {c['year']}
+       简介: {c['overview']}
+    """
+                else:
+                    user_prompt += f"""
+    {c['index'] + 1}. 名称: {c['name']}
+       原名称: {c['original_name']}
+       年份: {c['year']}
+       简介: {c['overview']}
+    """
+
+            user_prompt += f"""
+    请根据以下规则选择最佳匹配:
+    1. 标题相似度（考虑中英文、简繁体、常见别名、数字表示）
+    2. 年份匹配度（如果提供了年份，±1年内视为匹配）
+    3. 概述内容相关性
+    4. 媒体类型正确性
+    5. 原标题/原名称的匹配度
+
+    **特别注意**:
+    - 数字续集（如"2"、"II"、"第二部"）应准确匹配
+    - 如果年份明显不符（相差2年以上），除非其他信息高度匹配，否则降低该候选的优先级
+
+    **输出格式**:
+    只返回一个数字，表示最匹配的序号（1-{len(candidates_info)}）。
+    如果所有候选都不合适，返回 0。
+    不要有任何其他文字。
+    """
+
+            system_prompt = "你是一个专业的媒体信息匹配助手。你需要根据用户提供的搜索关键词和TMDB候选结果，选择最匹配的一个。你只输出数字，不输出其他内容。"
+
+            logger.info(f"[AI辅助] 请求AI从{len(candidates_info)}个结果中选择最佳匹配")
+
+            # 根据不同的客户端类型调用对应的API
+            response = None
+
+            if self.provider.lower() == "openai":
+                # OpenAI 调用方式
+                try:
+                    from openai import OpenAI
+                    client = self._client.client  # 获取底层的 OpenAI 客户端
+
+                    completion = client.chat.completions.create(
+                        model=self._client.model,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt}
+                        ],
+                        temperature=0.3,
+                    )
+                    response = completion.choices[0].message.content.strip()
+
+                except Exception as e:
+                    logger.error(f"[AI辅助] OpenAI调用失败: {e}")
+                    return None
+
+            elif self.provider.lower() == "gemini":
+                # Gemini 调用方式
+                try:
+                    full_prompt = f"{system_prompt}\n\n{user_prompt}"
+                    result = self._client.model.generate_content(full_prompt)
+                    response = result.text.strip()
+
+                except Exception as e:
+                    logger.error(f"[AI辅助] Gemini调用失败: {e}")
+                    return None
+
+            if not response:
+                logger.warning("[AI辅助] AI无响应")
+                return None
+
+            # 解析响应
+            match = re.search(r'\d+', response.strip())
+            if not match:
+                logger.warning(f"[AI辅助] 无法解析AI响应: {response}")
+                return None
+
+            selected = int(match.group())
+
+            if selected == 0:
+                logger.warning("[AI辅助] AI判断所有结果都不匹配")
+                return None
+
+            if not (1 <= selected <= len(candidates_info)):
+                logger.warning(f"[AI辅助] AI返回的索引超出范围: {selected}")
+                return None
+
+            best_idx = selected - 1
+            best = candidates_info[best_idx]
+
+            if is_movie:
+                logger.info(
+                    f"[AI辅助] ✓ AI选择第{selected}个结果: "
+                    f"{best['title']} ({best['year']})"
+                )
+            else:
+                logger.info(
+                    f"[AI辅助] ✓ AI选择第{selected}个结果: "
+                    f"{best['name']} ({best['year']})"
+                )
+
+            return best_idx
+
+        except Exception as e:
+            logger.warning(f"[AI辅助] 选择过程出错: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            return None
 
     def analyze_metadata(self, context_data: Dict) -> Optional[Dict[str, Any]]:
         """

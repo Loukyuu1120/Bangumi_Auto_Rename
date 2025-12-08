@@ -19,12 +19,50 @@ class Search:
     def __init__(self) -> None:
         self.TMDB_KEY = cm.get_config("api_key")
         tmdb.API_KEY = self.TMDB_KEY
+        self._ai_processor = None
+
+    def _get_ai_processor(self):
+        """延迟加载AI处理器，避免循环导入"""
+        if self._ai_processor is None:
+            try:
+                from .ai_processor import AIProcessor
+                self._ai_processor = AIProcessor()
+            except Exception as e:
+                logger.debug(f"[AI辅助] AI处理器加载失败: {e}")
+        return self._ai_processor
+
+    def _select_best_result(
+            self,
+            query: str,
+            year: int,
+            results: List[Dict],
+            is_movie: bool
+    ) -> int:
+        """从多个TMDB结果中选择最佳匹配"""
+        if not results or len(results) == 1:
+            return 0
+
+        # 尝试使用AI辅助选择（2-10个结果时）
+        if 2 <= len(results) <= 10:
+            ai_processor = self._get_ai_processor()
+            if ai_processor:
+                ai_selected_idx = ai_processor.select_best_tmdb_result(
+                    query=query,
+                    year=year,
+                    results=results,
+                    is_movie=is_movie
+                )
+                if ai_selected_idx is not None:
+                    return ai_selected_idx
+
+        # 默认返回第一个结果
+        return 0
 
     def _fetch_tv_with_retry(
-        self,
-        tmdb_id: int,
-        retries: int = 3,
-        delay: float = 1.0,
+            self,
+            tmdb_id: int,
+            retries: int = 3,
+            delay: float = 1.0,
     ) -> Dict[str, Any]:
         last_err: Optional[Exception] = None
         for i in range(retries):
@@ -42,10 +80,10 @@ class Search:
         raise RuntimeError(f"按剧集查询 TMDB ID={tmdb_id} 多次失败: {last_err}")
 
     def _fetch_movie_with_retry(
-        self,
-        tmdb_id: int,
-        retries: int = 3,
-        delay: float = 1.0,
+            self,
+            tmdb_id: int,
+            retries: int = 3,
+            delay: float = 1.0,
     ) -> Dict[str, Any]:
         last_err: Optional[Exception] = None
         for i in range(retries):
@@ -62,13 +100,12 @@ class Search:
                     time.sleep(delay)
         raise RuntimeError(f"按电影查询 TMDB ID={tmdb_id} 多次失败: {last_err}")
 
-
     def get_info_by_tmdb_id(
-        self,
-        tmdb_id: int,
-        is_movie_hint: Optional[bool] = None,
-        retries: int = 3,
-        delay: float = 1.0,
+            self,
+            tmdb_id: int,
+            is_movie_hint: Optional[bool] = None,
+            retries: int = 3,
+            delay: float = 1.0,
     ) -> Tuple[str, Optional[Dict[str, Any]], bool, bool]:
         """
         根据 TMDB ID 获取信息。
@@ -131,9 +168,8 @@ class Search:
 
         return name, info, is_anime, is_movie
 
-
     def get_season_info(
-        self, tv_id: int, season_number: int
+            self, tv_id: int, season_number: int
     ) -> Optional[Dict[str, Any]]:
         cache_key = f"{tv_id}_{season_number}"
         if cache_key in GLOBAL_SEASON_CACHE:
@@ -203,7 +239,7 @@ class Search:
         return None
 
     def get_tv_info_with_seasons(
-        self, query: str, year: int
+            self, query: str, year: int
     ) -> Tuple[str, Optional[Dict[str, Any]]]:
         name, tv_info = self.get_tv_info(query, year)
         if not name or not tv_info:
@@ -218,11 +254,6 @@ class Search:
         tv_id = tv_info["id"]
         seasons = tv_info.get("seasons", [])
 
-        # 某些剧集(如动漫) info里可能seasons为空，需要重新获取
-        if not seasons:
-            # 这里保留原来逻辑占位，避免死循环
-            pass
-
         for season in seasons:
             season_number = season.get("season_number")
             if season_number is None:
@@ -233,7 +264,6 @@ class Search:
                 season.update(detailed_season)
 
         return tv_info
-
 
     def _get_logos(self, tmdb_obj, obj_type: str = "tv"):
         try:
@@ -263,8 +293,17 @@ class Search:
                     language="zh-CN",
                     year=year if year != 0 else None,
                 )
+
                 if search.results:
-                    target = search.results[0]
+                    # 使用AI辅助选择最佳结果
+                    selected_idx = self._select_best_result(
+                        query=query,
+                        year=year,
+                        results=search.results,
+                        is_movie=True
+                    )
+
+                    target = search.results[selected_idx]
                     name = target["title"]
                     movie = tmdb.Movies(target["id"])
                     info = movie.info(language="zh-CN")
@@ -275,6 +314,7 @@ class Search:
 
                 GLOBAL_MOVIE_CACHE[cache_key] = ("", None)
                 return "", None
+
             except Exception as e:
                 logger.warning(
                     f"[TMDB] 搜索电影 '{query}' 失败，第 {i + 1} 次重试: {e}"
@@ -282,7 +322,7 @@ class Search:
                 time.sleep(2)
         return "", None
 
-
+    # 在 get_tv_info 方法中，找到 if search.results: 这一段，修改为：
     def get_tv_info(self, query: str, year: int):
         cache_key = f"{query}_{year}"
         if cache_key in GLOBAL_TV_CACHE:
@@ -298,8 +338,17 @@ class Search:
                         language="zh-CN",
                         first_air_date_year=year if year != 0 else None,
                     )
+
                     if search.results:
-                        target = search.results[0]
+                        # 使用AI辅助选择最佳结果
+                        selected_idx = self._select_best_result(
+                            query=q,
+                            year=year,
+                            results=search.results,
+                            is_movie=False
+                        )
+
+                        target = search.results[selected_idx]
                         name = target["name"]
                         tv = tmdb.TV(target["id"])
                         info = tv.info(language="zh-CN")
@@ -313,6 +362,7 @@ class Search:
 
                 GLOBAL_TV_CACHE[cache_key] = ("", None)
                 return "", None
+
             except Exception as e:
                 logger.warning(
                     f"[TMDB] 搜索剧集 '{query}' 失败，第 {i + 1} 次重试: {e}"
