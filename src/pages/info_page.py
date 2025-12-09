@@ -15,6 +15,11 @@ LOG_HISTORY = deque(maxlen=15)
 
 
 class GlobalHistoryHandler(logging.Handler):
+    """
+    全局历史日志记录器
+    不涉及 UI 操作，用于存储最近的日志以便新打开页面时显示
+    """
+
     def __init__(self):
         super().__init__(logging.INFO)
         self.setFormatter(logging.Formatter("%(asctime)s | %(message)s", datefmt="%H:%M:%S"))
@@ -25,6 +30,7 @@ class GlobalHistoryHandler(logging.Handler):
             msg = self.format(record)
             LOG_HISTORY.append(msg)
         except Exception:
+            # 这里是纯内存操作，可以使用默认错误处理
             self.handleError(record)
 
 
@@ -52,10 +58,9 @@ class NiceGuiLogHandler(logging.Handler):
         try:
             if record.name.startswith("nicegui"): return
             msg = self.format(record)
-            if app.loop and app.loop.is_running():
-                app.call_from_background(self.log_element.push, msg)
+            app.call_from_background(self.log_element.push, msg)
         except Exception:
-            self.handleError(record)
+            pass
 
 
 # --- 辅助函数 ---
@@ -314,5 +319,5 @@ def info_page():
                 # 捕获 UI 更新中的异常，防止 timer 崩溃
                 print(f"UI Update Error: {e}")
 
-        # 启动定时器 (1秒刷新一次，页面关闭后自动停止)
+        # 启动定时器 (1秒刷新一次)
         ui.timer(1.0, update_ui_state)

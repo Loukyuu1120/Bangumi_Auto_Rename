@@ -95,11 +95,7 @@ class Rename:
                                 # 使用 call_from_background 将 UI 更新任务调度到主线程循环中执行
                                 # 这将串行化 UI 操作，彻底消除竞争条件
                                 try:
-                                    if app.loop and app.loop.is_running():
-                                        app.call_from_background(h_self.log_element.push, msg)
-                                    else:
-                                        # 如果 loop 没运行（极少见），尝试直接推送或忽略
-                                        pass
+                                    app.call_from_background(h_self.log_element.push, msg)
                                 except Exception:
                                     pass
                             except Exception:
