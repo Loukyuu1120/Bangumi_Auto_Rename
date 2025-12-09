@@ -5,12 +5,15 @@ import platform
 from pathlib import Path
 from threading import Event, Thread
 from queue import Queue, Empty
+from typing import Optional, Dict, Any
+
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver
 from ..rename.process import Rename
 from ..config.config_manager import cm
 
 from ..logger import logger
+
 
 class MonitorEventHandler(FileSystemEventHandler):
     def __init__(self, task_queue: Queue, exclude_dirs: list[str]):
@@ -27,7 +30,7 @@ class MonitorEventHandler(FileSystemEventHandler):
                 logger.error(f"[监控] 排除规则 '{pattern_str}' 无效: {e}")
 
     def _should_ignore(self, file_path_str: str) -> bool:
-        if os.path.basename(file_path_str).startswith('.'):
+        if os.path.basename(file_path_str).startswith("."):
             return True
         for pattern in self.exclude_patterns:
             if pattern.search(file_path_str):
@@ -51,7 +54,7 @@ class MonitorEventHandler(FileSystemEventHandler):
             return
 
         logger.info(f"[监控] {action_name}: {path_obj.name} -> 加入队列")
-        self.task_queue.put(path_obj)
+        self.task_queue.put((path_obj, {}))
 
 
 class MonitorService:
@@ -59,6 +62,7 @@ class MonitorService:
     智能单例模式监控服务
     支持自动切换 原生事件驱动(高效) / 轮询模式(兼容)
     """
+
     _instance = None
 
     def __new__(cls):
@@ -82,7 +86,6 @@ class MonitorService:
     # --- 核心辅助方法：统计文件数 ---
     @staticmethod
     def count_directory_files(directory: Path, max_check: int = 10000) -> int:
-        """统计目录下的文件数量（用于检测是否超过系统限制）"""
         try:
             count = 0
             for root, dirs, files in os.walk(str(directory)):
@@ -97,36 +100,34 @@ class MonitorService:
     # --- 检查系统限制 (Linux) ---
     @staticmethod
     def check_system_limits() -> dict:
-        """检查 Linux 系统 inotify 限制"""
-        limits = {'max_user_watches': 8192}  # 默认值
-        if platform.system() != 'Linux':
+        limits = {"max_user_watches": 8192}
+        if platform.system() != "Linux":
             return limits
-
         try:
-            with open('/proc/sys/fs/inotify/max_user_watches', 'r') as f:
-                limits['max_user_watches'] = int(f.read().strip())
+            with open("/proc/sys/fs/inotify/max_user_watches", "r") as f:
+                limits["max_user_watches"] = int(f.read().strip())
         except Exception:
             pass
         return limits
 
     # --- 动态加载 Observer ---
     def __choose_observer(self):
-        """尝试加载最高效的 Observer，失败则返回 None"""
         system = platform.system()
         observers_to_try = []
 
-        if system == 'Linux':
-            observers_to_try = [('InotifyObserver', 'watchdog.observers.inotify')]
-        elif system == 'Darwin':  # macOS
-            observers_to_try = [('FSEventsObserver', 'watchdog.observers.fsevents')]
-        elif system == 'Windows':
-            observers_to_try = [('WindowsApiObserver', 'watchdog.observers.read_directory_changes')]
+        if system == "Linux":
+            observers_to_try = [("InotifyObserver", "watchdog.observers.inotify")]
+        elif system == "Darwin":
+            observers_to_try = [("FSEventsObserver", "watchdog.observers.fsevents")]
+        elif system == "Windows":
+            observers_to_try = [
+                ("WindowsApiObserver", "watchdog.observers.read_directory_changes")
+            ]
 
         for class_name, module_name in observers_to_try:
             try:
                 module = __import__(module_name, fromlist=[class_name])
                 ObserverClass = getattr(module, class_name)
-                # 尝试实例化测试一下
                 test_obs = ObserverClass()
                 test_obs.stop()
                 return ObserverClass
@@ -142,33 +143,30 @@ class MonitorService:
 
         self.stop_event.clear()
 
-        # 1. 启动消费者线程 (文件处理)
+        # 1. 启动消费者线程
         self.worker_thread = Thread(
-            target=self._process_worker,
-            daemon=True,
-            name="RenameWorker"
+            target=self._process_worker, daemon=True, name="RenameWorker"
         )
         self.worker_thread.start()
 
         # 2. 智能选择监控模式
         use_polling = False
         total_files = 0
-
-        # 统计文件总量并检查系统限制
         for path in paths_to_monitor:
             if path.exists():
                 total_files += self.count_directory_files(path)
 
         limits = self.check_system_limits()
-        max_watches = limits['max_user_watches']
+        max_watches = limits["max_user_watches"]
 
-        # 决策逻辑：如果文件数超过限制的 80%，强制使用轮询，避免系统报错崩溃
-        if platform.system() == 'Linux' and total_files > max_watches * 0.8:
-            logger.warning(f"[监控] 文件数量({total_files}) 接近系统限制({max_watches})，强制使用轮询模式")
+        if platform.system() == "Linux" and total_files > max_watches * 0.8:
+            logger.warning(
+                f"[监控] 文件数量({total_files}) 接近系统限制({max_watches})，强制使用轮询模式"
+            )
             use_polling = True
 
-        # 用户也可以在 config 中强制开启兼容模式
-        if cm.get_config('monitor_mode') == 'compatibility': use_polling = True
+        if cm.get_config("monitor_mode") == "compatibility":
+            use_polling = True
 
         # 3. 实例化 Observer
         ObserverClass = None
@@ -179,11 +177,9 @@ class MonitorService:
                 use_polling = True
 
         if use_polling or ObserverClass is None:
-            # 轮询模式：需要 timeout 参数来降低 CPU 占用
             self.observer = PollingObserver(timeout=2)
             mode_name = "兼容模式(轮询)"
         else:
-            # 原生模式：通常不需要 timeout
             self.observer = ObserverClass()
             mode_name = "高效模式(原生)"
 
@@ -202,37 +198,89 @@ class MonitorService:
             try:
                 self.observer.start()
                 self.is_running = True
-                logger.info(f"[监控] 服务已启动，模式: [{mode_name}]，监控 {monitored_count} 个目录")
+                logger.info(
+                    f"[监控] 服务已启动，模式: [{mode_name}]，监控 {monitored_count} 个目录"
+                )
             except Exception as e:
                 logger.error(f"[监控] 启动失败: {e}")
-                # 如果是原生模式启动失败(比如inotify满了)，尝试紧急降级到轮询
                 if not use_polling:
                     logger.warning("[监控] 尝试紧急切换到轮询模式...")
                     try:
                         self.observer = PollingObserver(timeout=3)
                         for path in paths_to_monitor:
                             if path.exists() and path.is_dir():
-                                self.observer.schedule(event_handler, str(path), recursive=True)
+                                self.observer.schedule(
+                                    event_handler, str(path), recursive=True
+                                )
                         self.observer.start()
                         self.is_running = True
                         logger.info("[监控] 紧急切换成功，当前运行于: [兼容模式]")
                     except Exception as e2:
                         logger.error(f"[监控] 紧急切换也失败了: {e2}")
-
         else:
             logger.warning("[监控] 没有有效的监控目录，服务未启动监听")
 
+    def stop(self):
+        """停止监控服务和处理线程"""
+        logger.info("[监控] 正在接收停止指令...")
+
+        # 1. 停止 Watchdog Observer
+        if self.observer:
+            if self.observer.is_alive():
+                self.observer.stop()
+                self.observer.join()
+            self.observer = None
+            logger.info("[监控] 目录监听器已停止")
+
+        # 2. 停止 Worker Thread
+        if self.worker_thread and self.worker_thread.is_alive():
+            self.stop_event.set()  # 发送停止信号
+            self.worker_thread.join()
+            self.worker_thread = None
+            logger.info("[监控] 处理线程已停止")
+
+        self.is_running = False
+        logger.info("[监控] 服务已完全停止")
+
     def get_queue_list(self) -> list[str]:
-        """返回当前队列中的文件名列表，供UI显示"""
-        return [p.name for p in list(self.task_queue.queue)]
+        return [
+            p[0].name if isinstance(p, tuple) else p.name
+            for p in list(self.task_queue.queue)
+        ]
+
+    def add_manual_task(self, path: Path, options: Dict[str, Any] = None):
+        """手动添加任务到处理队列"""
+        if options is None:
+            options = {}
+
+        # 确保服务已初始化（即使未启动监控，队列线程也应准备好，
+        # 但通常建议 add_task 前先 start，或者至少确保 worker_thread 在运行）
+        if not self.worker_thread or not self.worker_thread.is_alive():
+            # 如果监控没开，我们可以临时启动 worker 或者直接警告
+            # 为了简单起见，这里假设系统启动时 MonitorService 已经初始化
+            logger.warning("[监控] 处理线程未运行，尝试启动...")
+            self.stop_event.clear()
+            self.worker_thread = Thread(
+                target=self._process_worker, daemon=True, name="RenameWorker"
+            )
+            self.worker_thread.start()
+            self.is_running = True
+
+        logger.info(f"[手动任务] 添加: {path.name} 参数: {options}")
+        self.task_queue.put((path, options))
 
     def _process_worker(self):
         logger.info("[处理线程] 启动成功，等待任务...")
         while not self.stop_event.is_set():
             try:
-                file_path = self.task_queue.get(timeout=1)
+                item = self.task_queue.get(timeout=1)
             except Empty:
                 continue
+
+            if isinstance(item, tuple):
+                file_path, options = item
+            else:
+                file_path, options = item, {}
 
             try:
                 if not self._wait_for_file_ready(file_path):
@@ -242,8 +290,20 @@ class MonitorService:
 
                 self.current_file = file_path.name
                 use_ai = bool(cm.get_config("ai_enabled"))
-                logger.info(f"[开始处理] {file_path.name}")
-                self.rename_processor.process(file_path, use_ai=use_ai)
+
+                # 提取覆盖参数
+                kwargs = {}
+                if "is_anime" in options:
+                    kwargs["_is_anime"] = options["is_anime"]
+                if "use_ai" in options:
+                    use_ai = options["use_ai"]
+
+                # 还可以传递其他参数，如 tmdb_id 等，视 Rename.process 支持情况而定
+
+                logger.info(
+                    f"[开始处理] {file_path.name} | AI: {use_ai} | Opts: {options}"
+                )
+                self.rename_processor.process(file_path, use_ai=use_ai, **kwargs)
 
             except Exception as e:
                 logger.error(f"[处理异常] {file_path.name}: {e}")
@@ -251,12 +311,16 @@ class MonitorService:
                 self.current_file = None
                 self.task_queue.task_done()
 
-    def _wait_for_file_ready(self, file_path: Path, timeout=10, check_interval=1.0) -> bool:
+    def _wait_for_file_ready(
+        self, file_path: Path, timeout=10, check_interval=1.0
+    ) -> bool:
         if not file_path.exists():
             return False
         start_time = time.time()
         last_size = -1
         while time.time() - start_time < timeout:
+            if self.stop_event.is_set():
+                return False
             try:
                 current_size = file_path.stat().st_size
                 if current_size > 0 and current_size == last_size:

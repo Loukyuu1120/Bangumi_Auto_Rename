@@ -18,26 +18,19 @@ class Scraper:
 
         # [配置读取] 获取用户配置的允许下载类型
         types = cm.get_config("scrape_image_types")
-        # 默认值保护：如果用户从未设置过或为空，默认下载常用类型，防止刮削不出图
-        # if not types:
-        #     self.allowed_types = {"poster", "backdrop", "background", "logo", "thumb"}
-        self.allowed_types = set(types)
+        self.allowed_types = set(types) if types else set()
 
     # -------------------------
-    #  核心：智能下载/复制图片
+    #  智能下载/复制图片
     # -------------------------
     def _smart_download(self, url_suffix: Optional[str], save_path: Path, image_type: str, size: str = "original"):
         """
         下载图片，支持去重和类型检查
-        :param url_suffix: TMDB图片后缀
-        :param save_path: 本地保存路径
-        :param image_type: 图片类型 (对应配置项: poster, backdrop, logo, clearart, thumb, banner 等)
-        :param size: 下载尺寸
         """
         if not url_suffix:
             return
 
-        # 1. 类型检查：如果你没勾选这个类型，直接不下载
+        # 1. 类型检查
         if image_type not in self.allowed_types:
             return
 
@@ -49,8 +42,7 @@ class Scraper:
         # 3. 构造完整 URL
         full_url = f"{self.tmdb_image_base}{size}{url_suffix}"
 
-        # 4. 缓存检查：如果这个 URL 之前下载过（比如 backdrop 和 background 用了同一张图）
-        # 直接在本地复制，不再请求网络
+        # 4. 缓存检查
         if full_url in self.url_cache:
             existing_path = self.url_cache[full_url]
             if existing_path.exists():
@@ -68,8 +60,6 @@ class Scraper:
                 with open(save_path, "wb") as f:
                     f.write(resp.content)
                 logger.info(f"[刮削] 下载成功: {save_path.name} [{image_type}]")
-
-                # 记录到缓存
                 self.url_cache[full_url] = save_path
             else:
                 logger.warning(f"[刮削] 下载失败 {resp.status_code}: {full_url}")
@@ -79,7 +69,6 @@ class Scraper:
     def _get_tmdb_images(self, tmdb_id: int, media_type: str) -> Dict[str, List[Dict]]:
         if not self.api_key: return {}
         url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/images"
-        # include_image_language: 优先中文、无文字(null)、英文
         params = {"api_key": self.api_key, "include_image_language": "zh,cn,null,en"}
         try:
             resp = requests.get(url, params=params, headers=self.headers, timeout=10)
@@ -107,52 +96,40 @@ class Scraper:
     # -------------------------
     def scrape_movie(self, save_path: Path, info: Dict[str, Any]):
         if not info: return
-
-        # 每次处理新电影，清空 URL 缓存
         self.url_cache.clear()
-
         tmdb_id = info.get("id")
         folder = save_path.parent
-        # 兼容性：优先生成 movie.nfo，如果已存在同名 nfo 则不生成
         nfo_path = folder / "movie.nfo"
         if not nfo_path.exists():
-             nfo_path = folder / f"{save_path.stem}.nfo"
+            nfo_path = folder / f"{save_path.stem}.nfo"
 
         images_data = self._get_tmdb_images(tmdb_id, "movie")
         posters = images_data.get("posters", [])
         backdrops = images_data.get("backdrops", [])
         logos = images_data.get("logos", [])
 
-        # 1. Poster
+        # 下载各类图片
         p_url = posters[0]['file_path'] if posters else info.get("poster_path")
-        self._smart_download(p_url, folder / "poster.jpg", image_type="poster", size="original")
+        self._smart_download(p_url, folder / "poster.jpg", image_type="poster")
 
-        # 2. Backdrop / Fanart (属于 backdrop 类型)
         bd_url_1 = backdrops[0]['file_path'] if backdrops else info.get("backdrop_path")
-        self._smart_download(bd_url_1, folder / "backdrop.jpg", image_type="backdrop", size="original")
-        self._smart_download(bd_url_1, folder / "fanart.jpg", image_type="backdrop", size="original")
+        self._smart_download(bd_url_1, folder / "backdrop.jpg", image_type="backdrop")
+        self._smart_download(bd_url_1, folder / "fanart.jpg", image_type="backdrop")
 
-        # 3. Background (属于 background 类型，尝试找第二张图)
         bd_url_2 = backdrops[1]['file_path'] if len(backdrops) > 1 else bd_url_1
-        self._smart_download(bd_url_2, folder / "background.jpg", image_type="background", size="original")
+        self._smart_download(bd_url_2, folder / "background.jpg", image_type="background")
 
-        # 4. Thumb (属于 thumb 类型，尝试找第三张图，用 w500)
         bd_url_3 = backdrops[2]['file_path'] if len(backdrops) > 2 else bd_url_1
         self._smart_download(bd_url_3, folder / "thumb.jpg", image_type="thumb", size="w500")
 
-        # 5. Banner (属于 banner 类型，TMDB无原生banner，用背景图裁剪/缩放)
         self._smart_download(bd_url_1, folder / "banner.jpg", image_type="banner", size="w780")
 
-        # 6. Logo & Clearart (区分类型)
         if logos:
             l_url = logos[0]['file_path']
-            self._smart_download(l_url, folder / "logo.png", image_type="logo", size="original")
-            self._smart_download(l_url, folder / "clearart.png", image_type="clearart", size="original")
+            self._smart_download(l_url, folder / "logo.png", image_type="logo")
+            self._smart_download(l_url, folder / "clearart.png", image_type="clearart")
         elif info.get("logo_path"):
-            self._smart_download(info.get("logo_path"), folder / "logo.png", image_type="logo", size="original")
-
-        # 7. Disc (占位)
-        # self._smart_download(None, folder / "disc.png", image_type="disc")
+            self._smart_download(info.get("logo_path"), folder / "logo.png", image_type="logo")
 
         nfo_data = {
             "title": info.get("title"), "originaltitle": info.get("original_title"),
@@ -167,7 +144,6 @@ class Scraper:
     def scrape_tv_show(self, work_path: Path, info: Dict[str, Any]):
         if not info: return
         self.url_cache.clear()
-
         tmdb_id = info.get("id")
         images_data = self._get_tmdb_images(tmdb_id, "tv")
         posters = images_data.get("posters", [])
@@ -175,14 +151,14 @@ class Scraper:
         logos = images_data.get("logos", [])
 
         p_url = posters[0]['file_path'] if posters else info.get("poster_path")
-        self._smart_download(p_url, work_path / "poster.jpg", image_type="poster", size="original")
+        self._smart_download(p_url, work_path / "poster.jpg", image_type="poster")
 
         bd_url_1 = backdrops[0]['file_path'] if backdrops else info.get("backdrop_path")
-        self._smart_download(bd_url_1, work_path / "backdrop.jpg", image_type="backdrop", size="original")
-        self._smart_download(bd_url_1, work_path / "fanart.jpg", image_type="backdrop", size="original")
+        self._smart_download(bd_url_1, work_path / "backdrop.jpg", image_type="backdrop")
+        self._smart_download(bd_url_1, work_path / "fanart.jpg", image_type="backdrop")
 
         bd_url_2 = backdrops[1]['file_path'] if len(backdrops) > 1 else bd_url_1
-        self._smart_download(bd_url_2, work_path / "background.jpg", image_type="background", size="original")
+        self._smart_download(bd_url_2, work_path / "background.jpg", image_type="background")
 
         bd_url_3 = backdrops[2]['file_path'] if len(backdrops) > 2 else bd_url_1
         self._smart_download(bd_url_3, work_path / "thumb.jpg", image_type="thumb", size="w500")
@@ -190,8 +166,8 @@ class Scraper:
         self._smart_download(bd_url_1, work_path / "banner.jpg", image_type="banner", size="w780")
 
         if logos:
-            self._smart_download(logos[0]['file_path'], work_path / "logo.png", image_type="logo", size="original")
-            self._smart_download(logos[0]['file_path'], work_path / "clearart.png", image_type="clearart", size="original")
+            self._smart_download(logos[0]['file_path'], work_path / "logo.png", image_type="logo")
+            self._smart_download(logos[0]['file_path'], work_path / "clearart.png", image_type="clearart")
 
         nfo_data = {
             "title": info.get("name"), "originaltitle": info.get("original_name"),
@@ -205,35 +181,46 @@ class Scraper:
     # -------------------------
     #  单季刮削
     # -------------------------
-    def scrape_season(self, work_path: Path, season_number: int, info: Dict[str, Any]):
+    def scrape_season(self, work_path: Path, season_number: int, info: Dict[str, Any], season_dir: Path = None):
+        """
+        :param work_path: 剧集根目录，用于存放 seasonXX-poster.jpg
+        :param season_number: 季号
+        :param info: TMDB信息
+        :param season_dir: 真实的季文件夹路径 (如果使用了自定义模板，这里会传入真实路径)
+        """
         season_info = next((s for s in info.get("seasons", []) if s.get("season_number") == season_number), None)
         if not season_info: return
 
         poster = season_info.get("poster_path")
         if poster:
-            # 标准季海报 (poster)
+            # 1. 标准季海报：放在剧集根目录下，命名为 seasonXX-poster.jpg
+            # 这是 Kodi/Emby 识别多季海报的标准方式，与子文件夹命名无关。
             self._smart_download(
                 poster,
                 work_path / f"season{season_number:02d}-poster.jpg",
-                image_type="poster",
-                size="original"
+                image_type="poster"
             )
-            # self._smart_download(
-            #     poster,
-            #     work_path / f"Season {season_number:02d}.jpg",
-            #     image_type="poster",
-            #     size="original"
-            # )
 
-        season_dir = work_path / f"Season{season_number}"
-        season_dir.mkdir(parents=True, exist_ok=True)
+        # 2. 季 NFO：放在真实的季文件夹内
+        # 如果没有传入 season_dir (未使用自定义模板)，则默认假设为 Season X
+        target_dir = season_dir if season_dir else (work_path / f"Season{season_number}")
 
-        nfo_data = {
-            "title": season_info.get("name", f"Season {season_number}"),
-            "season": season_number, "plot": season_info.get("overview"),
-            "premiered": season_info.get("air_date"), "id": season_info.get("id"),
-        }
-        self._write_nfo(nfo_data, season_dir / "season.nfo", "season")
+        # 确保目录存在（如果是自定义模板，目录通常已经由 Trans 创建好了，但这里兜底一下）
+        if not target_dir.exists():
+            # 只有在默认模式下才尝试创建默认目录，自定义模式下如果目录不存在则跳过nfo
+            if not season_dir:
+                try:
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                except:
+                    pass
+
+        if target_dir.exists():
+            nfo_data = {
+                "title": season_info.get("name", f"Season {season_number}"),
+                "season": season_number, "plot": season_info.get("overview"),
+                "premiered": season_info.get("air_date"), "id": season_info.get("id"),
+            }
+            self._write_nfo(nfo_data, target_dir / "season.nfo", "season")
 
     # -------------------------
     #  单集刮削
@@ -245,6 +232,7 @@ class Scraper:
         ep = next((e for e in episodes if e.get("episode_number") == episode_num), None)
         if not ep: return
 
+        # 生成 NFO
         nfo_data = {
             "title": ep.get("name"), "plot": ep.get("overview"),
             "season": season_number, "episode": episode_num,
@@ -252,12 +240,12 @@ class Scraper:
         }
         self._write_nfo(nfo_data, video_target.with_suffix(".nfo"), "episodedetails")
 
+        # 生成缩略图 (与视频同名)
         still = ep.get("still_path")
         if still:
-            # 这里的 image_type 明确指定为 "thumb"，对应 ConfigPage 里的 "thumb" 选项
+            # 单集截图使用 "thumb" 类型
             self._smart_download(
                 still,
                 video_target.with_suffix(".jpg"),
-                image_type="thumb",
-                size="original"
+                image_type="thumb"
             )

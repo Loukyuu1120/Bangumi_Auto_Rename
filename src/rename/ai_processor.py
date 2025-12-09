@@ -71,7 +71,7 @@ class AIProcessor:
             logger.warning(f"[AI辅助选择] AI选择过程出错: {e}")
             return None
 
-    def analyze_search_metadata(self, path: Path) -> Optional[Dict[str, Any]]:
+    def analyze_search_metadata(self, path: Path, context_hint: str = None) -> Optional[Dict[str, Any]]:
         """
         当常规TMDB搜索失败时，使用AI分析目录和文件名以推断元数据。
         """
@@ -103,6 +103,10 @@ class AIProcessor:
         else:
             folder_name = path.name
             video_files = self._collect_video_files(path)
+
+        if context_hint:
+            folder_name = context_hint
+            logger.info(f"[AI搜索] 使用上下文提示覆盖文件夹名称{context_hint}")
 
         if not video_files:
             logger.warning("[AI搜索] 未找到视频文件，无法进行AI元数据分析")

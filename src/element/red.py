@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Union, Literal, Optional
 
-from nicegui import ui
+from nicegui import ui, Client
 from nicegui.context import context
 from nicegui.events import (
     Handler,
@@ -52,7 +52,12 @@ def notify(
     options['message'] = str(message)
     options.update(kwargs)
     client = context.client
-    client.outbox.enqueue_message('notify', options, client.id)
+    try:
+        if client.id not in Client.instances:
+            return
+        ui.notify(message, type=type, position=position, close_button=close_button)
+    except Exception:
+        pass
 
 
 class RedDropDownButton(ui.dropdown_button):

@@ -3,6 +3,7 @@ import difflib
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
+from jinja2 import Environment, BaseLoader
 from ..logger import logger
 from .utils import (
     NUM_MAP,
@@ -514,3 +515,167 @@ def chinese_to_arabic(cn: str) -> int:
             tmp += x
     val += tmp
     return val
+
+
+def sanitize_variable(text: str) -> str:
+    """
+    清洗上下文变量，防止变量中包含的非法字符破坏路径结构。
+    特别是要移除 '/' 和 '\'，因为这些应该由模板结构控制。
+    """
+    if not text:
+        return ""
+    # 替换路径分隔符和非法文件字符
+    text = str(text).replace('/', ' ').replace('\\', ' ')
+    text = text.replace(':', '：').replace('?', '？').replace('*', '') \
+        .replace('"', '').replace('<', '').replace('>', '').replace('|', '')
+    # 去除多余空格
+    return ' '.join(text.split())
+
+
+def extract_media_info(filename: str) -> Dict[str, str]:
+    """从文件名中提取分辨率、编码、来源等技术信息"""
+    info = {
+        "webSource": "",
+        "videoFormat": "",
+        "videoCodec": "",
+        "audioCodec": "",
+        "releaseGroup": "",
+        "edition": "",
+        "part": ""
+    }
+
+    upper_name = filename.upper()
+
+    # Source
+    sources = {
+        'BLURAY': 'BluRay', 'REMUX': 'Remux', 'HDTV': 'HDTV',
+        'WEB-DL': 'WEB-DL', 'WEBRIP': 'WEBRip', 'DVD': 'DVD',
+        'BDRIP': 'BDRip'
+    }
+    for k, v in sources.items():
+        if k in upper_name:
+            info['webSource'] = v
+            break
+
+    # Resolution
+    res_match = re.search(r'(2160[Pp]|4[Kk]|1080[PpIi]|720[Pp]|480[Pp]|576[Pp])', filename)
+    if res_match:
+        info['videoFormat'] = res_match.group(1).lower()
+
+    # Video Codec
+    if re.search(r'[Hx].?264|AVC', upper_name):
+        info['videoCodec'] = 'x264'
+    elif re.search(r'[Hx].?265|HEVC', upper_name):
+        info['videoCodec'] = 'x265'
+    elif 'MPEG2' in upper_name:
+        info['videoCodec'] = 'mpeg2'
+    elif 'AV1' in upper_name:
+        info['videoCodec'] = 'av1'
+    elif 'VC-1' in upper_name or 'VC1' in upper_name:
+        info['videoCodec'] = 'vc1'
+
+    # Audio Codec
+    audio_map = {
+        'AAC': 'AAC', 'AC3': 'AC3', 'EAC3': 'EAC3', 'DDP': 'EAC3',
+        'DTS-HD': 'DTS-HD', 'DTS': 'DTS', 'TRUEHD': 'TrueHD',
+        'FLAC': 'FLAC', 'OPUS': 'Opus', 'MP3': 'MP3', 'ATMOS': 'Atmos'
+    }
+    for k, v in audio_map.items():
+        if k in upper_name:
+            info['audioCodec'] = v
+            break
+
+    # Group
+    group_match = re.search(r'-([a-zA-Z0-9_]+)(?:\[.*?\])?(?:\.[a-zA-Z0-9]{2,4})?$', filename)
+    if group_match:
+        grp = group_match.group(1)
+        if grp.upper() not in ['DL', 'RIP', 'H264', 'H265', 'HEVC', 'AAC', 'MKV', 'MP4']:
+            info['releaseGroup'] = grp
+
+    # Edition
+    if 'EXTENDED' in upper_name:
+        info['edition'] = 'Extended'
+    elif 'DIRECTOR' in upper_name:
+        info['edition'] = "Director's Cut"
+    elif 'UNCUT' in upper_name:
+        info['edition'] = 'Uncut'
+    elif 'REMASTERED' in upper_name:
+        info['edition'] = 'Remastered'
+
+    # Part / CD
+    part_match = re.search(r'(?:CD|PART|DISC)\s?(\d+)', upper_name)
+    if part_match:
+        info['part'] = f"CD{part_match.group(1)}"
+
+    return info
+
+
+def get_render_context(path: Path, info: Dict, season: int = None, episode: int = None) -> Dict:
+    """准备 Jinja2 渲染所需的上下文变量"""
+    tech_info = extract_media_info(path.name)
+
+    # 基础 TMDB 信息
+    raw_title = info.get('name') or info.get('title', '')
+    raw_original_title = info.get('original_name') or info.get('original_title', '')
+
+    # 使用 cleaner.py 内部已有的 clean_noise 函数
+    title = clean_noise(raw_title)
+    original_title = clean_noise(raw_original_title)
+
+    # 年份
+    date_str = info.get('release_date') or info.get('first_air_date') or '0000'
+    year = date_str.split('-')[0]
+    if year == '0000': year = ''
+
+    tmdb_id = str(info.get('id', ''))
+
+    context = {
+        'title': sanitize_variable(title),
+        'en_title': sanitize_variable(original_title),
+        'original_title': sanitize_variable(original_title),
+        'year': year,
+        'tmdbid': tmdb_id,
+        'fileExt': path.suffix,
+        # 技术参数
+        'webSource': sanitize_variable(tech_info['webSource']),
+        'videoFormat': sanitize_variable(tech_info['videoFormat']),
+        'videoCodec': sanitize_variable(tech_info['videoCodec']),
+        'audioCodec': sanitize_variable(tech_info['audioCodec']),
+        'releaseGroup': sanitize_variable(tech_info['releaseGroup']),
+        'edition': sanitize_variable(tech_info['edition']),
+        'part': sanitize_variable(tech_info['part']),
+        'customization': '',
+    }
+
+    # 剧集特有
+    if season is not None:
+        context['season'] = season
+        context['season_00'] = f"{season:02d}"
+    if episode is not None:
+        context['episode'] = episode
+        context['episode_00'] = f"{episode:02d}"
+    if season is not None and episode is not None:
+        context['season_episode'] = f"S{season:02d}E{episode:02d}"
+    else:
+        # 如果获取不到季或集，给一个空字符串，防止报错
+        context['season_episode'] = ""
+
+    return context
+
+
+def render_path_template(template_str: str, context: Dict) -> Optional[Path]:
+    """渲染路径模板"""
+    try:
+        logger.debug(f">>> [渲染路径] 正在渲染模板: [{template_str}]")
+        env = Environment(loader=BaseLoader(), trim_blocks=True, lstrip_blocks=True)
+        template = env.from_string(template_str)
+        result = template.render(**context)
+
+        # 只清理绝对非法字符，保留路径分隔符 /
+        result = result.replace(':', '：').replace('?', '？').replace('*', '') \
+            .replace('"', '').replace('<', '').replace('>', '').replace('|', '')
+
+        return Path(result.strip())
+    except Exception as e:
+        logger.error(f"[模板渲染错误] {e}")
+        return None

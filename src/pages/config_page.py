@@ -31,6 +31,8 @@ class ConfigPage(ui.dialog):
                 "movie_path",
                 "anime_path",
                 "anime_movie_path",
+                "tv_rename_format",
+                "movie_rename_format",
                 "mode",
                 "overwrite_mode",
                 "scrape_metadata",
@@ -289,7 +291,7 @@ class ConfigPage(ui.dialog):
                         ui.textarea(
                             value=text_value,
                             placeholder=(
-                                "每行一个要排除的目录名（按名称匹配，支持正则，不是完整路径），例如：\n"
+                                "每行一个要排除的目录名（默认排除隐藏文件，支持正则，不是完整路径），例如：\n"
                                 "短剧 -> 只要路径里有“短剧”就忽略\n"
                                 "S00 -> 忽略包含 S00 的路径（特典）\n"
                                 "\\.m4a$ -> 忽略所有以 .m4a 结尾的文件"
@@ -299,6 +301,48 @@ class ConfigPage(ui.dialog):
                                 [line.strip() for line in (e.value or "").splitlines() if line.strip()],
                             )
                         ).props("filled").style("flex-grow:2")
+
+                    elif cn in ["tv_rename_format", "movie_rename_format"]:
+                        if cn == "tv_rename_format":
+                            placeholder = "{{title}}/Season {{season}}/{{title}} - S{{season_00}}E{{episode_00}}"
+                            tooltip_text = (
+                                "可用变量:\n"
+                                "{{title}}: 标题\n"
+                                "{{en_title}}: 英文/原名\n"
+                                "{{year}}: 年份\n"
+                                "{{season}}: 季号(1)\n"
+                                "{{season_00}}: 两位季号(01)\n"
+                                "{{episode}}: 集号(1)\n"
+                                "{{episode_00}}: 两位集号(01)\n"
+                                "{{fileExt}}: 扩展名\n"
+                                "以及 videoFormat, videoCodec, audioCodec 等技术参数"
+                            )
+                        else:
+                            placeholder = "{{title}} ({{year}})/{{title}} - {{year}}"
+                            tooltip_text = (
+                                "可用变量:\n"
+                                "{{title}}: 标题\n"
+                                "{{en_title}}: 英文/原名\n"
+                                "{{year}}: 年份\n"
+                                "{{tmdbid}}: TMDB ID\n"
+                                "{{webSource}}: 来源(BluRay)\n"
+                                "{{videoFormat}}: 分辨率(2160p)\n"
+                                "{{videoCodec}}: 视频编码(x265)\n"
+                                "{{audioCodec}}: 音频编码(AAC)\n"
+                                "{{releaseGroup}}: 制作组\n"
+                                "{{fileExt}}: 扩展名"
+                            )
+
+                        with ui.column().style("flex-grow: 2"):
+                            ui.textarea(
+                                value=cm.get_config(cn),
+                                placeholder=placeholder,
+                                on_change=lambda e, c=cn: self._change(c, e.value),
+                            ).props("filled rows=2").style("width: 100%")
+
+                            # 添加变量提示说明的小字
+                            ui.label("鼠标悬停查看可用变量").style(
+                                "font-size: 10px; color: gray; cursor: help").tooltip(tooltip_text)
 
                     else:
                         ui.input(
