@@ -126,16 +126,11 @@ def remove_tag(title: str, skip=False):
 def divide_by_year(filename: str) -> Tuple[str, int]:
     """
     增强版：分离年份并处理英文点号分隔的标题
-
-    示例：
-    - "Sword.and.Beloved.2025.S01E23" -> ("Sword and Beloved", 2025)
-    - "香格里拉.2022" -> ("香格里拉", 2022)
-    - "The.Last.of.Us.2023" -> ("The Last of Us", 2023)
     """
     original = filename
 
     # 1. 先用正则提取年份
-    year_pattern = re.compile(r'(?:[\(\[\.\s]|^)(19\d{2}|20[0-3]\d)(?:[\)\]\.\s]|$)', re.IGNORECASE)
+    year_pattern = re.compile(r'[.\s\-_\(\[]([12][90]\d{2})(?:[.\s\-_\)\]]|$)', re.IGNORECASE)
     match = year_pattern.search(filename)
 
     year = 0
@@ -153,30 +148,29 @@ def divide_by_year(filename: str) -> Tuple[str, int]:
             title_part = re.sub(r'^[\)\]\.\s\-]+', '', rest).strip()
 
     # 2. 检测是否为英文点号分隔格式
-    # 条件：包含点号 且 没有中文字符
     is_english_dotted = '.' in title_part and not re.search(r'[\u4e00-\u9fff]', title_part)
 
     if is_english_dotted:
         logger.debug(f'[年份分离] 检测到英文点号分隔: {title_part}')
 
-        # 移除季集信息（避免干扰）
+        # ⭐ 先移除季集信息（避免干扰）
         title_part = re.sub(r'\.S\d{1,2}E\d{1,3}.*$', '', title_part, flags=re.IGNORECASE)
-        title_part = re.sub(r'\.S\d{1,2}\..*$', '', title_part, flags=re.IGNORECASE)
+        title_part = re.sub(r'\.S\d{1,2}(?:\.|$).*$', '', title_part, flags=re.IGNORECASE)
 
         # 移除分辨率等技术标签
         tech_tags = [
             r'\.2160p', r'\.1080p', r'\.720p', r'\.4K', r'\.UHD',
             r'\.WEB-?DL', r'\.WEBRip', r'\.BluRay', r'\.BDRip',
             r'\.HEVC', r'\.x26[45]', r'\.H\.26[45]',
-            r'\.DDP', r'\.AAC', r'\.AC3', r'\.DTS',
-            r'\.HDR', r'\.SDR', r'\.\d+fps',
+            r'\.DDP', r'\.AAC', r'\.AC3', r'\.DTS', r'\.FLAC',
+            r'\.HDR', r'\.SDR', r'\.\d+fps', r'\.Remux', r'\.AVC',
             r'\.-[A-Z][a-zA-Z]+$'  # 组名如 -HiveWeb
         ]
         for tag in tech_tags:
             title_part = re.sub(tag, '', title_part, flags=re.IGNORECASE)
 
         # 转换点号和下划线为空格
-        title_part = title_part.replace('.', ' ').replace('_', ' ')
+        title_part = title_part.replace('.', ' ').replace('_', ' ').replace('-', ' ')
 
         # 清理多余空格
         title_part = re.sub(r'\s+', ' ', title_part).strip()
@@ -201,10 +195,8 @@ def parse_filename(filename: str) -> Tuple[str, int, Optional[int], Optional[int
     示例：
     - "Sword.and.Beloved.2025.S01E23.2160p.WEB-DL.HEVC.strm"
       -> ("Sword and Beloved", 2025, 1, 23)
-    - "[LoliHouse] 香格里拉.2022.S01E01.1080p.mkv"
-      -> ("香格里拉", 2022, 1, 1)
-    - "The.Last.of.Us.S01.1080p.mkv"
-      -> ("The Last of Us", 0, 1, None)
+    - "Emiya-san.Chi.no.Kyou.no.Gohan.S01E13.2017.1080p.BluRay.strm"
+      -> ("Emiya san Chi no Kyou no Gohan", 2017, 1, 13)
 
     返回：(标题, 年份, 季号, 集号)
     """
@@ -217,7 +209,14 @@ def parse_filename(filename: str) -> Tuple[str, int, Optional[int], Optional[int
     # 2. 移除文件扩展名
     name = re.sub(r'\.(mkv|mp4|avi|mov|strm|ts|iso)$', '', name, flags=re.IGNORECASE)
 
-    # 3. 提取季集信息
+    # 3. ⭐ 先提取年份（在截断之前）
+    year = 0
+    year_match = re.search(r'[.\s\-_\(]([12][90]\d{2})(?:[.\s\-_\)]|$)', name)
+    if year_match:
+        year = int(year_match.group(1))
+        logger.debug(f'[文件名解析] 提取到年份: {year}')
+
+    # 4. 提取季集信息（会截断字符串，所以放在年份后面）
     season_num = None
     episode_num = None
 
@@ -236,22 +235,25 @@ def parse_filename(filename: str) -> Tuple[str, int, Optional[int], Optional[int
             name = name[:s_match.start()]
             logger.debug(f'[文件名解析] 提取到 S{season_num}')
 
-    # 4. 提取年份
-    year = 0
-    year_match = re.search(r'[.\s\-_\(]([12][90]\d{2})(?:[.\s\-_\)]|$)', name)
-    if year_match:
-        year = int(year_match.group(1))
-        name = name[:year_match.start()]
-        logger.debug(f'[文件名解析] 提取到年份: {year}')
+    # 5. 如果前面没提取到年份，再试一次（处理特殊格式）
+    if year == 0:
+        year_match = re.search(r'[.\s\-_\(]([12][90]\d{2})(?:[.\s\-_\)]|$)', name)
+        if year_match:
+            year = int(year_match.group(1))
+            name = name[:year_match.start()]
+            logger.debug(f'[文件名解析] 二次提取到年份: {year}')
+    else:
+        # 年份已提取，从标题中移除年份部分
+        name = re.sub(r'[.\s\-_\(]' + str(year) + r'(?:[.\s\-_\)]|$)', '.', name)
 
-    # 5. 移除技术标签（从第一个技术关键词开始截断）
-    tech_pattern = r'[.\s\-_](2160p|1080p|720p|480p|4K|UHD|WEB-?DL|WEBRip|BluRay|BDRip|DVDRip|HDTV|HEVC|x26[45]|H\.26[45])'
+    # 6. 移除技术标签（从第一个技术关键词开始截断）
+    tech_pattern = r'[.\s\-_](2160p|1080p|720p|480p|4K|UHD|WEB-?DL|WEBRip|BluRay|BDRip|DVDRip|HDTV|HEVC|x26[45]|H\.26[45]|Remux|AVC|FLAC)'
     tech_match = re.search(tech_pattern, name, re.IGNORECASE)
     if tech_match:
         name = name[:tech_match.start()]
         logger.debug(f'[文件名解析] 移除技术标签后: {name}')
 
-    # 6. 判断是否为英文点号分隔格式
+    # 7. 判断是否为英文点号分隔格式
     is_english_dotted = '.' in name and not re.search(r'[\u4e00-\u9fff]', name)
 
     if is_english_dotted:
@@ -261,7 +263,7 @@ def parse_filename(filename: str) -> Tuple[str, int, Optional[int], Optional[int
         # 中文或其他情况，只替换下划线
         name = name.replace('_', ' ')
 
-    # 7. 清理多余空格和首尾空白
+    # 8. 清理多余空格和首尾空白
     name = re.sub(r'\s+', ' ', name).strip()
     name = name.strip('.-_[](){} ')
 

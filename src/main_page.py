@@ -8,6 +8,7 @@ from .pages.download_log import download_log
 from .__version__ import __url__, __version__
 from .pages.data_table_page import create_table
 from .element.red import RedButton, RedDropDownButton
+from .pages.info_page import info_page
 
 
 def main_page():
@@ -99,5 +100,5 @@ def main_page():
             ).classes('w-full h-full'):
                 with ui.tab_panel(finish_task_tab).classes('max-w-full'):
                     create_table()
-                with ui.tab_panel(add_task_tab):
-                    ui.label('添加任务')
+                with ui.tab_panel(add_task_tab).classes('p-0'):
+                    info_page()

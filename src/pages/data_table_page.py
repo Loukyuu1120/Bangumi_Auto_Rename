@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import math
 
 from nicegui import ui, run
 from nicegui.events import GenericEventArguments
@@ -102,6 +103,14 @@ class TableManager:
         self.table = None
         self.selected_rows = []
 
+        # 引用 UI 元素以便直接更新文本
+        self.selection_label = None
+
+        # --- 分页参数 ---
+        self.page = 1
+        self.page_size = 100
+        self.total_items = 0
+
     def load_data(self):
         """加载数据并应用当前的过滤器"""
         rows = []
@@ -114,10 +123,16 @@ class TableManager:
             TASK_PATH.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True
         )
         for index, i in enumerate(sorted_files):
+            # 忽略非 json 文件
+            if i.suffix.lower() != '.json':
+                continue
+
             try:
                 task_data = get_task(i.stem)
+
+                # 如果文件存在但内容为空或解析后为None
                 if not task_data:
-                    continue
+                    raise ValueError("文件内容为空")
 
                 if task_data.get('error'):
                     status = '失败'
@@ -152,20 +167,35 @@ class TableManager:
                 )
             except Exception as e:
                 logger.error(f"Error loading task {i}: {e}")
+                rows.append({
+                    'id': index,
+                    'uuid': i.stem,
+                    'path': '文件损坏或格式错误',
+                    'target_path': '',
+                    'name': f'无法读取的任务 ({i.name})',
+                    'season': '',
+                    'status': '失败',
+                    'error_msg': f"文件读取错误: {str(e)}。请尝试删除此记录。",
+                    'is_anime': False,
+                    'is_movie': False,
+                    'ai_used': False,
+                    'tmdb_id': '',
+                    'episode_offset': 0,
+                    'value': '操作',
+                })
 
         self.all_rows = rows
         self.filter_data()
 
     def get_filtered_rows(self):
-        """纯计算：根据当前条件返回过滤后的数据列表"""
+        """纯计算：根据当前条件返回过滤后的数据列表（不分页）"""
         filtered = []
 
         # 预处理条件
         txt = str(self.filter_text).lower().strip() if self.filter_text else ''
         status = self.filter_status
         season = str(self.filter_season).strip() if (
-                    self.filter_season is not None and str(self.filter_season).strip()) else ''
-
+                self.filter_season is not None and str(self.filter_season).strip()) else ''
 
         for row in self.all_rows:
             # 1. 文本
@@ -186,22 +216,31 @@ class TableManager:
                     continue
 
             filtered.append(row)
+
+        self.total_items = len(filtered)
         return filtered
 
+    def get_current_page_data(self):
+        """获取当前页的数据切片"""
+        filtered = self.get_filtered_rows()
+
+        # 简单的越界保护
+        max_page = math.ceil(self.total_items / self.page_size) if self.page_size > 0 else 1
+        if self.page > max_page and max_page > 0:
+            self.page = max_page
+
+        start = (self.page - 1) * self.page_size
+        end = start + self.page_size
+        return filtered[start:end]
+
     def filter_data(self):
-        if not self.table:
-            return
+        refresh_table_view.refresh()
 
-        # 重新计算筛选结果
-        filtered_rows = self.get_filtered_rows()
-        self.table.rows = filtered_rows
-
-        # 清空选中项，避免操作到隐藏的行
-        self.selected_rows = []
-        if self.table.selected:
-            self.table.selected.clear()
-
-        self.table.update()
+    def update_selection_label(self):
+        """更新界面左下角的选中计数"""
+        if self.selection_label:
+            count = len(self.selected_rows)
+            self.selection_label.text = f'已选中: {count}'
 
     def handle_selection(self, e):
         """处理 Quasar 的选择逻辑"""
@@ -229,20 +268,21 @@ class TableManager:
         elif isinstance(args, list):
             self.selected_rows = args
 
+        # 实时更新左下角文字
+        self.update_selection_label()
+
     def do_refresh(self):
         """点击刷新按钮 -> 重绘整个表格区域"""
         self.load_data()
         refresh_table_view.refresh()
 
     def batch_retry_click(self):
-        """点击批量重试按钮 -> 打开弹窗"""
         if not self.selected_rows:
             notify('请先勾选需要重试的任务')
             return
         BatchEditDialog(self.selected_rows, self.execute_batch_process).open()
 
     async def execute_batch_process(self, rows: List[Dict], settings: Dict):
-        """异步执行批量处理，防止界面卡死"""
         if not rows:
             notify("没有需要处理的任务")
             return
@@ -269,11 +309,9 @@ class TableManager:
                 path = Path(row['path'])
                 uuid = row['uuid']
 
-                # 读取最新配置，防止覆盖
                 task_data = get_task(uuid)
                 if task_data:
                     name = task_data.get('name')
-                    # 如果批量设置没填，就用任务原本的；如果任务原本没有，就是None
                     is_anime_orig = task_data.get('is_anime')
                     is_movie_orig = task_data.get('is_movie')
                     ai_used_orig = task_data.get('use_ai')
@@ -281,7 +319,6 @@ class TableManager:
                     season_id_orig = task_data.get('season_id')
                     offset_orig = task_data.get('episode_offset')
                 else:
-                    # 兜底
                     name = row.get('name')
                     is_anime_orig = row.get('is_anime')
                     is_movie_orig = row.get('is_movie')
@@ -290,7 +327,6 @@ class TableManager:
                     season_id_orig = row.get('season')
                     offset_orig = row.get('episode_offset')
 
-                # 逻辑：批量设置 > 原始设置
                 tmdb_id = batch_tmdb_id if batch_tmdb_id is not None else tmdb_id_orig
                 season_id = int(batch_season_id) if batch_season_id else season_id_orig
                 offset = int(batch_offset) if batch_offset else offset_orig
@@ -340,10 +376,7 @@ class TableManager:
         self.selected_rows = []
         ui.timer(1.0, self.do_refresh, once=True)
 
-
-
     def delete_by_uuid(self, uuid: str):
-        """根据 uuid 删除任务文件和内存中的行"""
         path1 = TASK_PATH / f'{uuid}.json'
         path2 = RECORD_PATH / f'{uuid}.json'
 
@@ -354,9 +387,7 @@ class TableManager:
 
         self.all_rows = [row for row in self.all_rows if row['uuid'] != uuid]
 
-
     def batch_delete(self):
-        """批量删除"""
         rows = list(self.selected_rows)
         if not rows:
             notify('请先勾选需要删除的任务')
@@ -366,23 +397,25 @@ class TableManager:
             self.delete_by_uuid(row['uuid'])
 
         notify(f'已删除 {len(rows)} 个任务记录')
-
         self.refresh_table()
 
     def refresh_table(self):
         self.selected_rows = []
+        # 清空 UI 状态
+        self.update_selection_label()
         if self.table and self.table.selected:
             self.table.selected.clear()
         self.load_data()
         refresh_table_view.refresh()
+
 
 manager = TableManager()
 
 
 @ui.refreshable
 def refresh_table_view():
-    # 每次刷新都重新获取筛选后的数据
-    rows = manager.get_filtered_rows()
+    rows_page = manager.get_current_page_data()
+    total_pages = math.ceil(manager.total_items / manager.page_size) if manager.page_size > 0 else 1
 
     columns: List[Dict[str, Any]] = [
         {'name': 'name', 'label': '剧集信息 / 原文件路径', 'field': 'name', 'sortable': True, 'align': 'left'},
@@ -395,9 +428,10 @@ def refresh_table_view():
     ]
 
     manager.table = (
-        ui.table(columns=columns, rows=rows, selection='multiple', row_key='uuid')
+        ui.table(columns=columns, rows=rows_page, selection='multiple', row_key='uuid')
         .classes('w-full h-full rounded')
-        .style('max-height: 80vh; border-radius: 10px; separator: cell')
+        .style('max-height: 75vh; border-radius: 10px; separator: cell')
+        .props('hide-bottom')
     )
 
     manager.table.on('selection', manager.handle_selection)
@@ -458,39 +492,78 @@ def refresh_table_view():
     manager.table.on('edit', lambda ev: handle_edit(ev))
     manager.table.on('del', lambda ev: handle_delete(ev))
 
+    # --- 自定义底部工具栏 ---
+    with ui.row().classes('w-full justify-between items-center q-mt-sm q-px-sm'):
+        # 左侧：显示选中数量
+        # 将这个 Label 赋值给 manager，以便在 selection 事件中动态更新
+        manager.selection_label = ui.label(f'已选中: {len(manager.selected_rows)}').classes(
+            'text-subtitle2 text-primary font-bold')
+
+        # 右侧：分页控制区域 (总数、每页数量、翻页器)
+        with ui.row().classes('items-center q-gutter-x-sm'):
+            ui.label(f'总计: {manager.total_items}').classes('text-grey-7 q-mr-md')
+
+            def on_page_size_change(e):
+                manager.page_size = e.value
+                manager.page = 1
+                manager.selected_rows = []
+                manager.update_selection_label()  # 清空后更新 Label
+                refresh_table_view.refresh()
+
+            def on_page_change(e):
+                manager.page = e.value
+                manager.selected_rows = []
+                manager.update_selection_label()  # 清空后更新 Label
+                refresh_table_view.refresh()
+
+            if total_pages > 1:
+                ui.pagination(
+                    min=1,
+                    max=total_pages,
+                    value=manager.page,
+                    on_change=on_page_change
+                ).props('boundary-numbers direction-links input')
+
+            RedSelect(
+                options=[100, 200, 500, 1000],
+                value=manager.page_size,
+                on_change=on_page_size_change,
+                label='每页'
+            ).props('dense outlined options-dense').classes('w-24')
+
 
 def create_table():
-    # --- 事件处理：更新变量后直接刷新表格视图 ---
+    manager.load_data()
+
     def on_text_change(e):
         manager.filter_text = e.value
-        refresh_table_view.refresh()  # 强制刷新表格区域
+        manager.page = 1
+        refresh_table_view.refresh()
 
     def on_season_change(e):
         manager.filter_season = e.value
+        manager.page = 1
         refresh_table_view.refresh()
 
     def on_status_change(e):
         manager.filter_status = e.value
+        manager.page = 1
         refresh_table_view.refresh()
 
-    # --- 顶部工具栏 (输入框区域) ---
     with ui.row().classes('w-full items-center q-mb-md justify-between'):
         with ui.row().classes('items-center'):
-            # 搜索框
             RedInput(
                 label='搜索 剧名/路径',
                 value=manager.filter_text,
                 on_change=on_text_change
             ).props('dense outlined clearable debounce=300').classes('w-64 q-mr-md')
 
-            # 季号框
             RedInput(
                 label='季号',
                 value=manager.filter_season,
                 on_change=on_season_change
             ).props('dense outlined clearable type=number debounce=300').classes('w-24')
 
-            # 状态选择
             RedSelect(
                 options=['全部', '成功', '失败'],
                 value=manager.filter_status,
@@ -507,11 +580,6 @@ def create_table():
 
     refresh_table_view()
 
-    # 首次加载数据
-    # 注意：如果 create_table 会被多次调用，这里要判断一下避免重复加载，或者 load_data 内部处理
-    if not manager.all_rows:
-        manager.load_data()
-
 
 async def handle_edit(ev: GenericEventArguments):
     arg = ev.args
@@ -521,17 +589,11 @@ async def handle_edit(ev: GenericEventArguments):
 
 
 async def handle_retry(ev: GenericEventArguments, is_batch: bool = False):
-    """
-    单个任务重试逻辑
-    1. 强制读取最新的 JSON 配置文件，不再使用 UI 上过期的参数。
-    2. 使用 run.io_bound 异步执行，防止阻塞 UI。
-    """
     arg = ev.args
     row_data = arg['row']
     uuid = row_data['uuid']
 
     task_data = get_task(uuid)
-
     if not task_data:
         task_data = row_data
 
