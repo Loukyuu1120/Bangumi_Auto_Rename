@@ -32,6 +32,7 @@ CONFIG_DEFAULT = {
     "ai_auto_save": False,  # 是否自动保存AI分析结果
     "log_level": "INFO",  # 日志等级
     "monitor_enabled": False,  # 是否启用监控
+    "monitor_mode": "compatibility",  # 监控模式
     "monitor_paths": [],  # 监控目录列表
     "monitor_exclude_dirs": [],  # 监控排除目录列表
 }
@@ -63,6 +64,7 @@ CN_MAP = {
     "ai_auto_save": "💾 自动保存AI分析",
     "log_level": "📝 日志等级",
     "monitor_enabled": "💡 启用监控",
+    "monitor_mode": "👀 监控模式",
     "monitor_paths": "📁 监控目录",
     "monitor_exclude_dirs": "🚫 监控排除目录",
 }

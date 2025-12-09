@@ -167,8 +167,8 @@ class MonitorService:
             logger.warning(f"[监控] 文件数量({total_files}) 接近系统限制({max_watches})，强制使用轮询模式")
             use_polling = True
 
-        # TODO: 用户也可以在 config 中强制开启兼容模式(如果有这个配置项)
-        # TODO: if cm.get_config('monitor_mode') == 'compatibility': use_polling = True
+        # 用户也可以在 config 中强制开启兼容模式
+        if cm.get_config('monitor_mode') == 'compatibility': use_polling = True
 
         # 3. 实例化 Observer
         ObserverClass = None

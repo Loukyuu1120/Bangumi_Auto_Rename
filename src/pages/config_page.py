@@ -57,6 +57,7 @@ class ConfigPage(ui.dialog):
 
             monitor_configs = [
                 "monitor_enabled",
+                "monitor_mode",
                 "monitor_paths",
                 "monitor_exclude_dirs",
             ]
@@ -236,7 +237,29 @@ class ConfigPage(ui.dialog):
                         )
                         tg.style("font-size: 10px")
                         tg.classes("flex no-wrap w-full")
+                    elif cn == "monitor_mode":
+                        # 获取当前值，默认为 fast
+                        current_mode = cm.get_config(cn)
+                        # 如果配置是 'compatibility' 显示为 '兼容模式'，否则为 '高效模式'
+                        ui_value = "兼容模式" if current_mode == "compatibility" else "高效模式"
 
+                        tg = RedToogle(
+                            ["高效模式", "兼容模式"],
+                            value=ui_value,
+                            # 保存时：兼容模式->compatibility, 高效模式->fast
+                            on_change=lambda e, c=cn: self._change(
+                                c, "compatibility" if e.value == "兼容模式" else "fast"
+                            ),
+                        )
+                        tg.style("font-size: 10px")
+                        tg.classes("flex no-wrap w-full")
+
+                        # 添加提示信息 (鼠标悬停显示)
+                        with tg:
+                            ui.tooltip(
+                                "高效模式: 使用系统原生事件(Inotify)，性能好但Docker下可能有数量限制，概率会出现文件缺失。\n"
+                                "兼容模式: 使用轮询(Polling)，CPU占用稍高但绝对稳定，适合大批量文件或NFS挂载。"
+                            )
                     elif cn == "monitor_paths":
                         # config.json 里是列表，这里用多行文本每行一个路径
                         current_value = cm.get_config(cn) or []
