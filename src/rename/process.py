@@ -270,7 +270,9 @@ class Rename:
             rel_path = render_path_template(tv_rename_format, ctx)
 
             if rel_path:
-                p = Path(str(rel_path).replace("\\", "/"))
+                path_str = str(rel_path).replace("\\", "/")
+                path_str = re.sub(r'\.{2,}', '.', path_str)
+                p = Path(str(path_str))
                 # 1. 检查模板的第一层是否与 work_path 的名字相同 (忽略大小写)
                 if work_path.name.lower() == p.parts[0].lower():
                     # 如果相同，说明 rel_path 包含了根目录名，需要去掉第一层，避免重复
@@ -980,6 +982,9 @@ class Rename:
                     ctx = get_render_context(path, info)
                     rel_path = render_path_template(movie_rename_format, ctx)
                     if rel_path:
+                        path_str = str(rel_path).replace("\\", "/")
+                        path_str = re.sub(r'\.{2,}', '.', path_str)
+                        rel_path = Path(path_str)
                         # 对于电影，模板通常包含文件夹名: e.g. {{title}} ({{year}})/{{title}}...
                         # 如果开启了二级分类
                         if enable_secondary:

@@ -10,6 +10,7 @@ from ..monitor.monitor import monitor_service
 from ..pages.data_table_page import refresh_table_view, manager
 from ..element.red import RedButton, RedToogle, RedInput, notify
 from ..component.local_file_picker import local_file_picker
+from ..rename.utils import VIDEO_SUFFIX
 
 
 class TaskConfigDialog(ui.dialog):
@@ -107,6 +108,8 @@ def _process_files_in_thread(
 
         # 遍历文件
         for f_path in files_iterator:
+            if f_path.suffix.lower() not in VIDEO_SUFFIX:
+                continue
             if _should_ignore(f_path, exclude_pattern):
                 # 排除的文件只在 debug 记录，防止日志爆炸
                 logger.debug(f"[手动任务] 排除: {f_path.name}")
