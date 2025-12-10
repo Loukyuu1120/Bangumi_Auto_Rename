@@ -261,8 +261,6 @@ class Rename:
             cus_season_id: Optional[int] = None,
     ):
         time.sleep(0.005)
-        if item_path.suffix.lower() not in VIDEO_SUFFIX:
-            return
 
         item_name = item_path.name
         if item_repeat:
@@ -438,6 +436,10 @@ class Rename:
         }
 
         if path.is_file():
+            if path.suffix.lower() not in VIDEO_SUFFIX:
+                logger.debug(f"[跳过] 文件后缀不在允许列表中: {path.name}")
+                return False
+
             return self._process(path, _uuid=_tuuid, **initial_context)
 
         stack = [(path, _tuuid, initial_context)]
@@ -1044,6 +1046,7 @@ class Rename:
                             target_file = _WORK_PATH / rel_path
 
                         self.R[path] = target_file
+                        logger.info(f'[自定义格式] 目标路径: {target_file}')
                         use_template_ok = True
                         work_path = target_file.parent
                         season_id = 0

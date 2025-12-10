@@ -9,6 +9,7 @@ from typing import Optional, Dict, Any
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver
+from ..rename.utils import VIDEO_SUFFIX
 from ..rename.process import Rename
 from ..config.config_manager import cm
 
@@ -32,6 +33,9 @@ class MonitorEventHandler(FileSystemEventHandler):
     def _should_ignore(self, file_path_str: str) -> bool:
         if os.path.basename(file_path_str).startswith("."):
             return True
+        suffix = Path(file_path_str).suffix.lower()
+        if suffix not in VIDEO_SUFFIX:
+            return True
         for pattern in self.exclude_patterns:
             if pattern.search(file_path_str):
                 return True
@@ -40,21 +44,23 @@ class MonitorEventHandler(FileSystemEventHandler):
     def on_created(self, event):
         if event.is_directory:
             return
-        self._add_to_queue(event.src_path, "捕获新建")
+        if self._add_to_queue(event.src_path, "捕获新建"):
+            pass
 
     def on_moved(self, event):
         if event.is_directory:
             return
-        self._add_to_queue(event.dest_path, "捕获移动")
+        if self._add_to_queue(event.dest_path, "捕获移动"):
+            pass
 
     def _add_to_queue(self, path_str, action_name):
-        path_obj = Path(path_str)
-        if self._should_ignore(path_obj.as_posix()):
-            logger.info(f"[监控] 忽略: {path_obj.name} (匹配排除规则)")
-            return
+        if self._should_ignore(path_str):
+            return False
 
+        path_obj = Path(path_str)
         logger.info(f"[监控] {action_name}: {path_obj.name} -> 加入队列")
         self.task_queue.put((path_obj, {}))
+        return True
 
 
 class MonitorService:

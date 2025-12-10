@@ -89,7 +89,6 @@ def _process_files_in_thread(
     count_added = 0
     count_ignored = 0
 
-    # 稍微减少日志输出频率，避免大量文件时刷屏太快
     logger.info(f"[手动任务] 开始后台扫描路径: {len(paths)} 个目标")
 
     for p_str in paths:
@@ -97,26 +96,36 @@ def _process_files_in_thread(
         if not path_obj.exists():
             continue
 
-        # 使用生成器遍历，减少内存占用
         files_iterator = []
+
+        # 情况1: 用户直接选了一个文件
         if path_obj.is_file():
-            files_iterator = [path_obj]
+            if path_obj.suffix.lower() in VIDEO_SUFFIX:
+                files_iterator = [path_obj]
+            else:
+                logger.warning(f"[手动任务] 跳过不支持的文件类型: {path_obj.name}")
+                count_ignored += 1
+                continue
+
+        # 情况2: 用户选了一个文件夹
         elif path_obj.is_dir():
             for root, _, files in os.walk(path_obj):
                 for file in files:
                     files_iterator.append(Path(root) / file)
 
-        # 遍历文件
+        # 遍历收集到的文件列表
         for f_path in files_iterator:
+            # 1. 再次检查后缀（针对文件夹遍历的情况）
             if f_path.suffix.lower() not in VIDEO_SUFFIX:
                 continue
+
+            # 2. 检查正则排除
             if _should_ignore(f_path, exclude_pattern):
-                # 排除的文件只在 debug 记录，防止日志爆炸
                 logger.debug(f"[手动任务] 排除: {f_path.name}")
                 count_ignored += 1
                 continue
 
-            # 加入队列 (queue是线程安全的，这里直接调用没问题)
+            # 3. 加入队列
             monitor_service.add_manual_task(f_path, {'is_anime': is_anime})
             count_added += 1
 
