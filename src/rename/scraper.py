@@ -48,7 +48,7 @@ class Scraper:
             if existing_path.exists():
                 try:
                     shutil.copy2(existing_path, save_path)
-                    logger.info(f"[刮削] 快速复制: {save_path.name} (源自 {existing_path.name})")
+                    logger.debug(f"[刮削] 快速复制: {save_path.name} (源自 {existing_path.name})")
                     return
                 except Exception as e:
                     logger.warning(f"[刮削] 复制失败，转为重新下载: {e}")

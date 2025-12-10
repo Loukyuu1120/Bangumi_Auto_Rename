@@ -84,7 +84,7 @@ class MonitorService:
         self.stop_event = Event()
         self.observer = None
         self.worker_thread = None
-        self.rename_processor = Rename()
+        # self.rename_processor = Rename()
         self.is_running = False
         self.current_file: str | None = None
         self.initialized = True
@@ -309,7 +309,7 @@ class MonitorService:
                 logger.info(
                     f"[开始处理] {file_path.name} | AI: {use_ai} | Opts: {options}"
                 )
-                self.rename_processor.process(file_path, use_ai=use_ai, **kwargs)
+                Rename().process(file_path, use_ai=use_ai, **kwargs)
 
             except Exception as e:
                 logger.error(f"[处理异常] {file_path.name}: {e}")

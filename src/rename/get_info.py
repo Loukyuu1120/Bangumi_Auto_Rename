@@ -1,6 +1,9 @@
 import re
 import time
+import requests  # 新增
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlencode, urljoin
+from bs4 import BeautifulSoup  # 新增
 
 import tmdbsimple as tmdb
 
@@ -30,6 +33,72 @@ class Search:
             except Exception as e:
                 logger.debug(f"[AI辅助] AI处理器加载失败: {e}")
         return self._ai_processor
+
+    def _search_tmdb_web(self, query: str, target_type: str = "tv", language: str = "zh-CN") -> Optional[int]:
+        """
+        通过爬取TMDB网页搜索结果获取ID (当API搜不到时的兜底方案)
+        target_type: 'tv' 或 'movie'
+        返回: tmdb_id (int) or None
+        """
+        base_url = "https://www.themoviedb.org"
+        params = {
+            "language": language,
+            "query": query
+        }
+        url = base_url + "/search?" + urlencode(params)
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
+        }
+
+        try:
+            logger.info(f"[TMDB Web] 正在尝试网页搜索兜底: {query} (Type: {target_type})")
+            resp = requests.get(url, headers=headers, timeout=10)
+            if resp.status_code != 200:
+                logger.warning(f"[TMDB Web] 网页搜索返回状态码: {resp.status_code}")
+                return None
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            # 遍历搜索结果卡片
+            for card in soup.select("div.card.v4.tight"):
+                # 1. 获取链接解析ID和类型
+                a_el = card.select_one("a.result")
+                if not a_el:
+                    continue
+                href = a_el.get("href", "")  # 形如 /tv/288306?language=zh-CN
+
+                try:
+                    path = href.split("?")[0]  # /tv/288306
+                    parts = path.strip("/").split("/")  # ["tv", "288306"]
+
+                    if len(parts) >= 2:
+                        media_type = parts[0]  # tv / movie
+                        tmdb_id_str = parts[1]
+
+                        # 如果类型匹配，直接返回第一个结果的ID (通常第一个就是最匹配的)
+                        if media_type == target_type and tmdb_id_str.isdigit():
+                            tmdb_id = int(tmdb_id_str)
+
+                            # 获取一下标题用于日志记录
+                            title_el = card.select_one("div.title a h2")
+                            title = title_el.get_text(strip=True) if title_el else "Unknown"
+
+                            logger.info(f"[TMDB Web] 网页搜索命中: {title} (ID: {tmdb_id})")
+                            return tmdb_id
+                except Exception:
+                    continue
+
+        except Exception as e:
+            logger.warning(f"[TMDB Web] 网页搜索发生异常: {e}")
+
+        return None
+
 
     def _select_best_result(
             self,
@@ -110,11 +179,6 @@ class Search:
         """
         根据 TMDB ID 获取信息。
         返回: (name, info, is_anime, is_movie)
-
-        is_movie_hint:
-            - True  -> 只按电影查，失败直接报错（带重试）
-            - False -> 只按剧集查，失败直接报错（带重试）
-            - None  -> 先当剧集查（带重试），失败再当电影查（带重试，兜底）
         """
         if not self.TMDB_KEY:
             raise RuntimeError("TMDB API Key 未配置")
@@ -312,6 +376,20 @@ class Search:
                     GLOBAL_MOVIE_CACHE[cache_key] = (name, info)
                     return name, info
 
+                # --- API 搜不到，尝试网页搜兜底 ---
+                elif i == 0:  # 只在第一次尝试失败时调用网页搜，避免反复调用
+                    web_id = self._search_tmdb_web(query, target_type="movie")
+                    if web_id:
+                        try:
+                            movie = tmdb.Movies(web_id)
+                            info = movie.info(language="zh-CN")
+                            name = info["title"]
+                            info["logo_path"] = self._get_logos(movie, "movie")
+                            GLOBAL_MOVIE_CACHE[cache_key] = (name, info)
+                            return name, info
+                        except Exception as e_web:
+                            logger.error(f"[TMDB Web] 兜底ID获取元数据失败: {e_web}")
+
                 GLOBAL_MOVIE_CACHE[cache_key] = ("", None)
                 return "", None
 
@@ -322,7 +400,6 @@ class Search:
                 time.sleep(2)
         return "", None
 
-    # 在 get_tv_info 方法中，找到 if search.results: 这一段，修改为：
     def get_tv_info(self, query: str, year: int):
         cache_key = f"{query}_{year}"
         if cache_key in GLOBAL_TV_CACHE:
@@ -331,6 +408,7 @@ class Search:
         for i in range(3):
             try:
                 q = query
+                # 尝试3次API搜索 (可能在内部做一些字符清理)
                 for _ in range(3):
                     search = tmdb.Search()
                     search.tv(
@@ -356,6 +434,21 @@ class Search:
 
                         GLOBAL_TV_CACHE[cache_key] = (name, info)
                         return name, info
+
+                    if _ == 0:
+                        web_id = self._search_tmdb_web(q, target_type="tv")
+                        if web_id:
+                            try:
+                                tv = tmdb.TV(web_id)
+                                info = tv.info(language="zh-CN")
+                                name = info["name"]
+                                info["logo_path"] = self._get_logos(tv, "tv")
+                                GLOBAL_TV_CACHE[cache_key] = (name, info)
+                                return name, info
+                            except Exception as e_web:
+                                logger.error(f"[TMDB Web] 兜底ID获取元数据失败: {e_web}")
+
+                    # 之前的重试逻辑：去除非中文字符再试
                     else:
                         if is_chinese_percentage_sufficient(q):
                             q = re.sub(r"[a-zA-Z]", "", q)

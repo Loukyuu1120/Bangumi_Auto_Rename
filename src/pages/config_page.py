@@ -117,8 +117,8 @@ class ConfigPage(ui.dialog):
 
                     if cn == "mode":
                         tg = RedToogle(
-                            ["链接", "复制", "剪切"],
-                            value=cm.get_config(cn),
+                            ["硬链接", "软链接", "复制", "剪切"],
+                            value=cm.get_config(cn) if cm.get_config(cn) != "链接" else "硬链接",
                             on_change=lambda e, c=cn: self._change(c, e.value),
                         )
                         tg.style("font-size: 10px")
@@ -313,7 +313,24 @@ class ConfigPage(ui.dialog):
                         ).props("filled").props("rows=3").style(
                             "flex-grow: 2"
                         )
+                    elif cn == "docker_mnt":
+                        # 处理配置：支持从旧的字符串格式自动兼容为列表
+                        current_val = cm.get_config(cn)
+                        if isinstance(current_val, str) and current_val:
+                            current_val = [current_val]
+                        elif not isinstance(current_val, list):
+                            current_val = []
 
+                        text_value = "\n".join(current_val)
+
+                        ui.textarea(
+                            value=text_value,
+                            placeholder="Docker环境下映射的路径，每行一个。\n例如：\n/mnt/media\n/data/downloads",
+                            on_change=lambda e, c=cn: self._change(
+                                c,
+                                [line.strip() for line in (e.value or "").splitlines() if line.strip()],
+                            ),
+                        ).props("filled rows=3").style("flex-grow: 2")
                     elif cn == "monitor_exclude_dirs":
                         current_value = cm.get_config(cn) or []
                         if isinstance(current_value, list):

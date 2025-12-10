@@ -13,7 +13,7 @@ CONFIG_DEFAULT = {
     "tv_rename_format": "{{title}}{% if year %} ({{year}}){% endif %}/Season {{season}}/{{title}} - {{season_episode}}{% if part %}-{{part}}{% endif %}{% if episode %} - 第 {{episode}} 集{% endif %}{{fileExt}}",
     "movie_rename_format": "{{title}}{% if year %} ({{year}}){% endif %}/{{title}}{% if year %} ({{year}}){% endif %}{% if part %}-{{part}}{% endif %}{% if videoFormat %} - {{videoFormat}}{% endif %}{{fileExt}}",
     "exclude_dirs": [],
-    "mode": "链接",
+    "mode": "硬链接",
     "overwrite_mode": "从不覆盖",
     "scrape_metadata": False,
     "scrape_image_types": ["poster", "backdrop", "logo"],

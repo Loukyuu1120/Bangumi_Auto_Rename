@@ -424,6 +424,9 @@ class Rename:
     ):
         time.sleep(0.01)
 
+        if cus_tmdb_id and str(cus_tmdb_id).lower() in ['none', 'null', 'n/a', '']:
+            cus_tmdb_id = None
+
         initial_context = {
             'is_anime': _is_anime,
             'is_movie': _is_movie,
@@ -780,6 +783,10 @@ class Rename:
 
             if ai_meta:
                 ai_name = ai_meta.get('name')
+                ai_tmdb_id = ai_meta.get('tmdb_id')
+                if ai_tmdb_id:
+                    if str(ai_tmdb_id).strip().lower() in ['none', 'null', 'n/a', '']:
+                        ai_tmdb_id = None
                 invalid_names = ['未知', 'Unknown', 'None', 'Null', 'TBA', '未识别到官方名称', '待定']
                 if not ai_name or any(inv.lower() in ai_name.lower() for inv in invalid_names):
                     logger.warning(f"[AI处理] AI返回了无效名称 '{ai_name}'，视为失败，不进行搜索。")
@@ -796,7 +803,6 @@ class Rename:
                         logger.info(f"[AI处理] 从名称中分离年份: Name='{ai_name}', Year={detected_year}")
                 if detected_year and ai_name:
                     ai_name = f"{ai_name} ({detected_year})"
-                ai_tmdb_id = ai_meta.get('tmdb_id')
                 ai_is_movie = ai_meta.get('is_movie', False)
                 logger.info(
                     f"[AI处理] AI推断成功: Name={ai_name}, TMDB_ID={ai_tmdb_id}, Movie={ai_is_movie}"
@@ -875,7 +881,7 @@ class Rename:
             effective_use_ai = use_ai if use_ai is not None else global_use_ai
             enable_secondary = cm.get_config('secondary_classification')
 
-            logger.info(f'[处理任务] 开始处理{path.name}')
+            logger.debug(f'[处理任务] 开始处理{path.name}')
 
             rtpath_name, year, detected_season, detected_episode = parse_filename(path.name)
             if cus_season_id is None and detected_season:
@@ -913,7 +919,7 @@ class Rename:
                 if cache_key in Rename._dir_cache:
                     cached_data = Rename._dir_cache[cache_key]
 
-            if (is_weak or has_episode_pattern) and not cus_tmdb_id and not cus_name:
+            if is_weak and not cus_tmdb_id and not cus_name:
                 if cached_data:
                     c = cached_data
                     cached_is_movie = c.get('is_movie', False)
@@ -966,19 +972,22 @@ class Rename:
                                 'is_anime': is_anime,
                                 'is_movie': is_movie
                             }
-                        logger.info(f"[目录缓存] 已缓存电视剧: {name}")
                 except Exception as e:
                     return self.error_reply(_uuid, str(e), path)
             else:
                 search_candidates = []
                 search_candidates.append(rtpath_name)
 
-                clean_brackets_name = re.sub(r'[\[【\(（].*?[\]】\)）]', '', rtpath_name).strip()
-                clean_brackets_name = re.sub(r'\s+', ' ', clean_brackets_name).strip()
+                try:
+                    name_no_brackets = re.sub(r'[\[【\(（].*?[\]】\)）]', '', rtpath_name)
+                    name_no_brackets = re.sub(r'\s+', ' ', name_no_brackets).strip()
 
-                if clean_brackets_name and clean_brackets_name != rtpath_name:
-                    logger.debug(f"[处理任务] 添加去括号重试关键词: {clean_brackets_name}")
-                    search_candidates.append(clean_brackets_name)
+                    if name_no_brackets and name_no_brackets != rtpath_name:
+                        if len(name_no_brackets) >= 2:
+                            search_candidates.append(name_no_brackets)
+                            logger.debug(f"[搜索增强] 添加去括号关键词: '{name_no_brackets}'")
+                except Exception:
+                    pass
                 if ' - ' in rtpath_name:
                     parts = rtpath_name.split(' - ')
                     for part in parts:
@@ -1038,7 +1047,6 @@ class Rename:
                         'is_anime': is_anime,
                         'is_movie': is_movie
                     }
-                logger.info(f"[目录缓存] 已缓存电视剧: {name}")
 
             work_path = None
             season_id = 0

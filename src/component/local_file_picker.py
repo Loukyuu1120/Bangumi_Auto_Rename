@@ -75,42 +75,54 @@ class local_file_picker(ui.dialog):
     def add_drives_toggle(self):
         if platform.system() == 'Windows':
             import win32api
-
             drives = win32api.GetLogicalDriveStrings().split('\000')[:-1]
-
-            # drives = [str(i) for i in Path(drives[0]).iterdir()]
             self.drives_toggle = RedToogle(
                 drives, value=drives[0], on_change=self.update_drive
             )
         elif platform.system() == 'Darwin':  # macOS
             import os
-
-            # On macOS, we can list mount points in '/Volumes'
             drives = [
                 drive
                 for drive in os.listdir('/Volumes')
                 if os.path.isdir(os.path.join('/Volumes', drive))
             ]
+            drives = [os.path.join('/Volumes', d) for d in drives]
+            if not drives:
+                drives = ['/']
+
             self.drives_toggle = RedToogle(
-                drives, value=drives[0], on_change=self.update_drive
+                drives, value=drives[0], on_change=lambda e: self.update_drive(None)
             )
 
         elif platform.system() == 'Linux':
             import os
+            docker_config = cm.get_config('docker_mnt')
 
-            docker_path = cm.get_config('docker_mnt')
-            drives = [
-                drive
-                for drive in os.listdir(docker_path)
-                if os.path.isdir(os.path.join(docker_path, drive))
-            ]
-            # drives = [f'{i}' for i in drives]
+            drives = []
+            if isinstance(docker_config, list):
+                drives = [d for d in docker_config if os.path.isdir(d)]
+            elif isinstance(docker_config, str) and docker_config and os.path.isdir(docker_config):
+                try:
+                    # 获取子目录并拼凑成完整路径
+                    sub_dirs = [
+                        os.path.join(docker_config, d)
+                        for d in os.listdir(docker_config)
+                        if os.path.isdir(os.path.join(docker_config, d))
+                    ]
+                    drives = sub_dirs
+                except Exception:
+                    pass
+
+            # 兜底：如果没有配置或路径无效，默认显示根目录
+            if not drives:
+                drives = ['/']
+
+            # 创建切换按钮
             self.drives_toggle = RedToogle(drives, value=drives[0])
             self.drives_toggle.on_value_change(
-                lambda e: self.update_drive(docker_path),
+                lambda e: self.update_drive(None),
             )
         self.drives_toggle.classes(add="column", remove="row inline")
-        # self.drives_toggle.classes('w-1/2')
 
     def update_drive(self, main: Optional[str] = None):
         if main is None:
@@ -120,12 +132,30 @@ class local_file_picker(ui.dialog):
         self.path = Path(path_str).expanduser()  # type: ignore
         self.update_grid()
 
+    def _get_safe_mtime(self, p: Path) -> float:
+        try:
+            # 尝试获取修改时间
+            return p.stat().st_mtime
+        except (FileNotFoundError, PermissionError, OSError):
+            # 如果文件是损坏的软链接、无权限或者是诡异的系统文件
+            # 返回 0.0，让它排在列表最后
+            return 0.0
+
     def update_grid(self) -> None:
-        paths = list(self.path.glob('*'))
-        paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        # 1. 安全地获取文件列表 (glob 也有可能因为权限报错)
+        try:
+            paths = list(self.path.glob('*'))
+        except Exception as e:
+            paths = []
+
+        # 2. 使用辅助方法进行排序，防止崩溃
+        # paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        paths.sort(key=self._get_safe_mtime, reverse=True)
 
         if not self.show_hidden_files:
             paths = [p for p in paths if not p.name.startswith('.')]
+
+        # 3. 继续后续排序
         paths.sort(key=lambda p: p.name.lower())
         paths.sort(key=lambda p: not p.is_dir())
         self.grid.options['rowData'] = [
@@ -136,7 +166,7 @@ class local_file_picker(ui.dialog):
             for p in paths
         ]
         if (self.upper_limit is None and self.path != self.path.parent) or (
-            self.upper_limit is not None and self.path != self.upper_limit
+                self.upper_limit is not None and self.path != self.upper_limit
         ):
             self.grid.options['rowData'].insert(
                 0,
