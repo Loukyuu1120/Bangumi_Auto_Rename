@@ -59,7 +59,7 @@ class Scraper:
             if resp.status_code == 200:
                 with open(save_path, "wb") as f:
                     f.write(resp.content)
-                logger.info(f"[刮削] 下载成功: {save_path.name} [{image_type}]")
+                logger.debug(f"[刮削] 下载成功: {save_path.name} [{image_type}]")
                 self.url_cache[full_url] = save_path
             else:
                 logger.warning(f"[刮削] 下载失败 {resp.status_code}: {full_url}")

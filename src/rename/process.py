@@ -187,7 +187,7 @@ class Rename:
 
                     # 加入重命名队列
                     self.R[sibling] = target_sub_path
-                    logger.info(f"[伴随文件] {sibling.name} -> {target_sub_path.name}")
+                    logger.debug(f"[伴随文件] {sibling.name} -> {target_sub_path.name}")
 
         except Exception as e:
             logger.warning(f"[伴随文件] 处理出错: {e}")
@@ -204,7 +204,7 @@ class Rename:
         all_similaritys: List[Dict] = []
 
         int_rtpath_name = extract_season(path_name)
-        logger.info(f'[处理任务] 提取标题季号:{int_rtpath_name}')
+        logger.debug(f'[处理任务] 提取标题季号:{int_rtpath_name}')
 
         matched_via_tmdb = False
 
@@ -530,6 +530,8 @@ class Rename:
         norm_name = rtpath_name.strip().lower()
         filename = path.name
 
+        logger.info(f"[搜索参数] 准备搜索: Name='{rtpath_name}', Year={year}, Is_Movie={is_movie}, Is_Anime={is_anime}")
+
         with Rename._lock:
             cached_res = None
             if is_movie:
@@ -542,7 +544,9 @@ class Rename:
 
             if cached_res:
                 s2_name, s2_info = cached_res
+                logger.debug(f"[TMDB缓存] 命中电影缓存: {s2_name}")
             else:
+                logger.debug(f"[TMDB搜索] 正在搜索电影: 关键词='{rtpath_name}', 年份={year}")
                 s2_name, s2_info = self.search.get_movie_info(rtpath_name, year)
 
             if s2_name and s2_info and year > 0:
@@ -561,7 +565,7 @@ class Rename:
                         s2_name, s2_info = None, None
 
             if not s2_name and year != 0:
-                logger.info(f"[搜索重试] 去除年份后重试搜索: {rtpath_name}")
+                logger.debug(f"[TMDB搜索] 电影带年份搜索失败，尝试去除年份: 关键词='{rtpath_name}'")
                 s2_name, s2_info = self.search.get_movie_info(rtpath_name, 0)
 
             if s2_name:
@@ -581,13 +585,18 @@ class Rename:
             with Rename._lock:
                 if tv_cache_key in Rename._tmdb_search_cache:
                     s1_name, s1_info = Rename._tmdb_search_cache[tv_cache_key]
+                    if s1_name:
+                        logger.debug(f"[TMDB缓存] 命中电视剧缓存: {s1_name}")
                 else:
                     s1_name, s1_info = None, None
 
             if not s1_name:
+                logger.debug(f"[TMDB搜索] 正在搜索TV (SxxExx模式): 关键词='{rtpath_name}', 年份={year}")
                 s1_name, s1_info = self.search.get_tv_info(rtpath_name, year)
+
                 # 尝试去除年份重试
                 if not s1_name and year != 0:
+                    logger.debug(f"[TMDB搜索] TV带年份搜索失败，尝试去除年份: 关键词='{rtpath_name}'")
                     s1_name, s1_info = self.search.get_tv_info(rtpath_name, 0)
 
                 if s1_name:
@@ -595,7 +604,7 @@ class Rename:
                         Rename._tmdb_search_cache[tv_cache_key] = (s1_name, s1_info)
 
             if not s1_name or not s1_info:
-                return f'[TMDB] 未搜索到电视剧信息 (检测到SxxExx), 跳过{rtpath_name}'
+                return f'[TMDB] 未搜索到电视剧信息 (检测到SxxExx), 搜索词: {rtpath_name}'
 
             logger.info(f'[处理任务] 搜索到的电视剧名称: {s1_name}')
 
@@ -606,6 +615,7 @@ class Rename:
         logger.info('[处理任务] 未传入任务类型且无明确SxxExx特征，开始双向搜索判断！')
         pos = 0
         tv_cache_key = (norm_name, year, "tv")
+        logger.debug(f"[TMDB搜索] 双向搜索-尝试TV: 关键词='{rtpath_name}', 年份={year}")
         with Rename._lock:
             s1_name, s1_info = Rename._tmdb_search_cache.get(tv_cache_key, (None, None))
 
@@ -622,6 +632,7 @@ class Rename:
 
         # 2. 搜索电影信息
         mv_cache_key = (norm_name, year, "movie")
+        logger.debug(f"[TMDB搜索] 双向搜索-尝试Movie: 关键词='{rtpath_name}', 年份={year}")
         with Rename._lock:
             s2_name, s2_info = Rename._tmdb_search_cache.get(mv_cache_key, (None, None))
 
@@ -720,7 +731,7 @@ class Rename:
                 pos -= 0.4
 
         if pos > 0 or (is_movie is not None and not is_movie):
-            logger.info(f'[处理任务] 该文件可能为电视剧！(得分: {pos})')
+            logger.debug(f'[处理任务] 该文件可能为电视剧！(得分: {pos})')
             is_movie = False
             info = s1_info
             name = s1_name
@@ -731,7 +742,7 @@ class Rename:
                 is_anime = any(g['name'].lower() in ['animation', 'anime']
                                for g in info.get('genres', []))
         else:
-            logger.info(f'[处理任务] 该文件可能为电影！(得分: {pos})')
+            logger.debug(f'[处理任务] 该文件可能为电影！(得分: {pos})')
             is_movie = True
             info = s2_info
             name = s2_name
@@ -749,7 +760,7 @@ class Rename:
         if self.ai_processor.ai_client.is_available():
             try:
                 if hint_name:
-                    context_hint = f"{hint_name} {path.name}"
+                    context_hint = hint_name
                 else:
                     parts = path.parts
                     if len(parts) >= 3:
@@ -960,6 +971,14 @@ class Rename:
                     return self.error_reply(_uuid, str(e), path)
             else:
                 search_candidates = []
+                search_candidates.append(rtpath_name)
+
+                clean_brackets_name = re.sub(r'[\[【\(（].*?[\]】\)）]', '', rtpath_name).strip()
+                clean_brackets_name = re.sub(r'\s+', ' ', clean_brackets_name).strip()
+
+                if clean_brackets_name and clean_brackets_name != rtpath_name:
+                    logger.debug(f"[处理任务] 添加去括号重试关键词: {clean_brackets_name}")
+                    search_candidates.append(clean_brackets_name)
                 if ' - ' in rtpath_name:
                     parts = rtpath_name.split(' - ')
                     for part in parts:
@@ -996,8 +1015,10 @@ class Rename:
 
                     if effective_use_ai and not ai_attempted:
                         hint_for_ai = rtpath_name
-                        if is_weak:
+                        if is_weak and rtpath_name not in path.name:
                             hint_for_ai = f"{rtpath_name} {path.name}"
+                        elif is_weak:
+                            hint_for_ai = path.name
                         ai_res = self._attempt_ai_recovery(
                             path, _uuid, is_anime, cus_offset, cus_season_id,
                             effective_use_ai, check_skip_dir=True,

@@ -5,16 +5,16 @@ from typing import Dict, List, Tuple, Optional
 from jinja2 import Environment, BaseLoader
 from ..logger import logger
 from .utils import (
-    VIDEO_SUFFIX,  # 唯一需要用到的基础常量，用于去除扩展名
-    KEYWORDS_TO_CLEAN,  # 用于清洗标题
-    BRACKET_PATTERNS,  # 用于去除括号
-    CN_NUM,  # 中文数字映射
-    SEASON_PATTERNS,  # 季号正则
-    EPISODE_PATTERNS,  # 集号正则
-    NUM_MAP,  # 英文数字映射
-    ROMA_MAP,  # 罗马数字映射
-    CODE_PATTERNS,  # 技术噪声正则
-    MEDIA_MAPPING  # 媒体信息映射
+    VIDEO_SUFFIX,
+    KEYWORDS_TO_CLEAN,
+    BRACKET_PATTERNS,
+    CN_NUM,
+    SEASON_PATTERNS,
+    EPISODE_PATTERNS,
+    NUM_MAP,
+    ROMA_MAP,
+    CODE_PATTERNS,
+    MEDIA_MAPPING
 )
 
 
@@ -152,12 +152,15 @@ def extract_season(text: str):
 def match_and_extract(input_string: str):
     """
     提取季和集
+    支持动漫格式 [01], [01v2] 等
     """
+    # 1. 标准 S01E01 格式
     pattern = re.compile(r'S(\d+)(?:E|EP)(\d+)', re.IGNORECASE)
     match = pattern.search(input_string)
     if match:
         return int(match.group(1)), int(match.group(2))
 
+    # 2. 中文 第x集 格式
     cn_pattern = re.search(r'第\s*(\d+|[零一二三四五六七八九十百千万]+)\s*[集话]', input_string)
     if cn_pattern:
         ep_str = cn_pattern.group(1)
@@ -167,13 +170,44 @@ def match_and_extract(input_string: str):
         if episode > 0:
             return season, episode
 
+    # 3. 动漫方括号格式 [01], [12v2], 【03】
+    # 过滤掉常见的年份(19xx, 20xx) 和分辨率(720, 1080, 2160, 264, 265)
+    brackets = re.findall(r'[\[【](\d{1,4})(?:[vV]\d)?[\]】]', input_string)
+    valid_eps = []
+    for val in brackets:
+        num = int(val)
+        # 排除 480, 720, 1080, 2160 (分辨率) 以及 264, 265 (编码) 以及 年份
+        if num not in [480, 576, 720, 1080, 2160, 264, 265] and not (1900 < num < 2100):
+            valid_eps.append(num)
+
+    if valid_eps:
+        # 通常取第一个有效的数字作为集数
+        episode = valid_eps[0]
+        season = extract_season(input_string)
+        if season == -1: season = 1
+        return season, episode
+
     return None
 
 
 def extract_base_num(filename: str) -> Optional[float]:
-    match = re.search(r'S\d+(?:E|EP)(\d+)', filename, re.IGNORECASE)
+    """
+    提取基础集数，用于 process_sub 的兜底逻辑
+    增强：支持动漫格式 [01]
+    """
+    # 1. SxxExx 格式
+    match = re.search(r'(?i)S\d+(?:E|EP)(\d+)', filename)
     if match:
         return float(match.group(1))
+
+    # 2. 动漫方括号格式 [01]
+    brackets = re.findall(r'[\[【](\d{1,4})(?:[vV]\d)?[\]】]', filename)
+    for val in brackets:
+        num = float(val)
+        # 同样的过滤逻辑
+        if num not in [480, 576, 720, 1080, 2160, 264, 265] and not (1900 < num < 2100):
+            return num
+
     return None
 
 
@@ -183,6 +217,7 @@ def extract_number(filename: str) -> Optional[float]:
         r = match.group(1)
         return int(r) if r.isdigit() else chinese_to_arabic(r)
     return None
+
 
 def is_weak_filename(filename: str) -> bool:
     """
@@ -204,6 +239,7 @@ def is_weak_filename(filename: str) -> bool:
         return True
     return False
 
+
 def is_season_name(filename: str) -> bool:
     """
     判断是否为季目录名
@@ -217,6 +253,7 @@ def is_season_name(filename: str) -> bool:
     if re.match(r'^\d{1,2}$', stem):
         return True
     return False
+
 
 # ================= 复杂文件名解析 =================
 

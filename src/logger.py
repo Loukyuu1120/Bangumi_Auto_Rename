@@ -90,6 +90,8 @@ structlog.configure(
 logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 logging.getLogger('niceGUI').propagate = False
 logging.getLogger('openai').setLevel(logging.WARNING)
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('httpcore').setLevel(logging.WARNING)
 
 def update_log_level_from_config() -> None:
     """Update log levels based on config."""

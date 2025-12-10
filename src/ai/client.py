@@ -212,7 +212,7 @@ class AIClient:
             logger.warning(f"[AI搜索] AI功能未启用或{self.provider}客户端不可用")
             return None
 
-        logger.info(f"[AI搜索] 使用 {self.provider.upper()} 进行元数据推断")
+        logger.debug(f"[AI搜索] 使用 {self.provider.upper()} 进行元数据推断")
 
         # 调用具体客户端的实现
         # 注意：你需要确保 BaseAIClient 及其子类实现了 analyze_metadata 方法
@@ -274,7 +274,7 @@ class AIClient:
 {files_str}
 
 要求：
-1. 请提取最准确的官方名称（优先英文名，其次原名）。
+1. 请提取最准确的官方名称（优先英文名，其次原名；如果英文是拼音，优先中文名）。
 2. 如果可以确定，请提供发行年份。
 3. 根据文件名特征（如S01E01表示TV，年份+文件名表示Movie）判断是剧集还是电影。
 4. 如果文件名中包含明显的TMDB ID信息，请提取。
