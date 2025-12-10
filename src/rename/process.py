@@ -1,6 +1,7 @@
 import re
 import json
 import uuid
+import time
 import types
 import threading
 from pathlib import Path
@@ -67,14 +68,10 @@ class Rename:
         self.R = {}
         self.scraped_seasons = set()
 
-        # 初始化时尝试修补日志处理器，解决多线程报错
         self._patch_logger_safe()
 
     def _patch_logger_safe(self):
-        """
-        [热修复] 修补 NiceGUI 的日志处理器以支持多线程。
-        解决 RuntimeError: dictionary changed size during iteration
-        """
+        """修复 NiceGUI 日志并发问题"""
         if Rename._logger_patched or app is None:
             return
 
@@ -83,35 +80,24 @@ class Rename:
                 return
 
             try:
-                # 遍历所有处理器，找到包含 log_element 的处理器（即 UI 日志处理器）
-                patched_count = 0
                 for handler in logger.handlers:
                     if hasattr(handler, 'log_element') and not getattr(handler, '_is_patched', False):
-
-                        # 定义线程安全的 emit 方法
                         def safe_emit(h_self, record):
                             try:
                                 msg = h_self.format(record)
-                                # 使用 call_from_background 将 UI 更新任务调度到主线程循环中执行
-                                # 这将串行化 UI 操作，彻底消除竞争条件
+                                # 使用 call_from_background 确保 UI 更新在主线程
                                 try:
                                     app.call_from_background(h_self.log_element.push, msg)
                                 except Exception:
                                     pass
                             except Exception:
-                                h_self.handleError(record)
+                                pass  # 忽略错误防止循环
 
-                        # 动态替换实例方法
                         handler.emit = types.MethodType(safe_emit, handler)
                         handler._is_patched = True
-                        patched_count += 1
-
-                if patched_count > 0:
-                    logger.info(f"[系统] 已自动修补 {patched_count} 个日志处理器以支持多线程并发。")
-
                 Rename._logger_patched = True
-            except Exception as e:
-                print(f"Logger patch failed: {e}")
+            except Exception:
+                pass
 
     def _get_category_folder(self, info: Dict, is_movie: bool, is_anime: bool) -> str:
         if not info:
@@ -226,6 +212,8 @@ class Rename:
             cus_offset: Optional[int] = None,
             cus_season_id: Optional[int] = None,
     ):
+        time.sleep(0.005)
+
         item_name = item_path.name
         if item_repeat:
             item_name_remove = remove_similar_part(item_repeat, item_path.stem)
@@ -281,7 +269,6 @@ class Rename:
         if cus_offset is not None and cus_offset != 0:
             ep = ep + cus_offset
 
-        # ---------------- 自定义格式处理逻辑  ----------------
         if tv_rename_format and info and ep > 0:
             ctx = get_render_context(item_path, info, int(season_id), int(ep))
             rel_path = render_path_template(tv_rename_format, ctx)
@@ -381,6 +368,8 @@ class Rename:
             use_ai: Optional[bool] = None,
             _ai_attempted: bool = False,
     ):
+        time.sleep(0.01)
+
         initial_context = {
             'is_anime': _is_anime,
             'is_movie': _is_movie,
@@ -399,6 +388,8 @@ class Rename:
         final_result = True
 
         while stack:
+            time.sleep(0.005)
+
             curr_path, curr_uuid, ctx = stack.pop()
 
             if curr_path.name.startswith(('.', '@', '$RECYCLE')):
@@ -476,6 +467,8 @@ class Rename:
             is_anime: Optional[bool] = None,
             is_movie: Optional[bool] = None,
     ) -> Union[Tuple[str, Dict, bool, bool], str]:
+        time.sleep(0.005)
+
         norm_name = rtpath_name.strip().lower()
 
         with Rename._lock:
@@ -706,6 +699,8 @@ class Rename:
 
             logger.info(f"[AI处理] 正在请求AI分析: {context_hint}")
 
+            time.sleep(0.01)
+
             ai_meta = self.ai_processor.analyze_search_metadata(path, context_hint=context_hint)
 
             if ai_meta:
@@ -779,6 +774,8 @@ class Rename:
     ):
         if not _uuid:
             _uuid = str(uuid.uuid4())
+
+        time.sleep(0.01)
 
         abs_str = str(path.resolve())
 
@@ -903,6 +900,7 @@ class Rename:
                 last_error = "未搜索到结果"
 
                 for idx, candidate_name in enumerate(search_candidates):
+                    time.sleep(0.01)
                     if idx > 0:
                         logger.info(f"[搜索重试] 尝试第 {idx + 1} 个关键词: {candidate_name}")
 
@@ -1068,6 +1066,7 @@ class Rename:
             self, path: Path, rtpath_name: str, work_path: Path, season_id: int, info: Optional[Dict] = None,
             cus_offset: Optional[int] = None, cus_season_id: Optional[int] = None,
     ):
+        time.sleep(0.01)
         if path.is_file():
             logger.info(f"[处理任务] 开始对 [单文件] {path.name}处理")
             self.process_sub(

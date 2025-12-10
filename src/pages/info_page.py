@@ -3,6 +3,7 @@ import platform
 import requests
 import asyncio
 import time
+import threading
 from collections import deque
 from nicegui import ui, app
 
@@ -11,13 +12,14 @@ from ..utils.utils import get_task
 from ..monitor.monitor import monitor_service
 from ..config.config_manager import cm
 
-LOG_HISTORY = deque(maxlen=15)
+# 使用 deque 存储最近日志 (用于新打开页面时回显)
+LOG_HISTORY = deque(maxlen=50)
 
 
 class GlobalHistoryHandler(logging.Handler):
     """
     全局历史日志记录器
-    不涉及 UI 操作，用于存储最近的日志以便新打开页面时显示
+    纯后端内存操作，无性能瓶颈
     """
 
     def __init__(self):
@@ -30,11 +32,10 @@ class GlobalHistoryHandler(logging.Handler):
             msg = self.format(record)
             LOG_HISTORY.append(msg)
         except Exception:
-            # 这里是纯内存操作，可以使用默认错误处理
             self.handleError(record)
 
 
-# 注册全局历史记录器 (防止重复添加)
+# 注册全局历史记录器
 _has_history_handler = False
 for h in logging.getLogger().handlers:
     if isinstance(h, GlobalHistoryHandler):
@@ -44,23 +45,54 @@ if not _has_history_handler:
     logging.getLogger().addHandler(GlobalHistoryHandler())
 
 
-class NiceGuiLogHandler(logging.Handler):
+class BufferedLogHandler(logging.Handler):
     """
-    线程安全的 UI 日志处理器
+    [性能优化版] 缓冲日志处理器
+    不再每条日志都触发 UI 更新，而是先存入缓冲区。
+    解决批量处理时大量日志导致网页卡死无法访问的问题。
     """
 
-    def __init__(self, log_element, level=logging.NOTSET):
+    def __init__(self, level=logging.NOTSET):
         super().__init__(level)
-        self.log_element = log_element
         self.setFormatter(logging.Formatter("%(asctime)s | %(message)s", datefmt="%H:%M:%S"))
+        self.buffer = []  # 缓冲区列表
+        self.lock = threading.Lock()  # 线程锁，保证 list 操作安全
 
     def emit(self, record):
         try:
             if record.name.startswith("nicegui"): return
             msg = self.format(record)
-            app.call_from_background(self.log_element.push, msg)
+
+            # 仅仅是将消息写入内存列表，速度极快，不涉及 UI 操作
+            with self.lock:
+                self.buffer.append(msg)
+
         except Exception:
-            pass
+            self.handleError(record)
+
+    def flush_to_ui(self, log_element):
+        """
+        将缓冲区的内容一次性刷入 UI
+        这个方法由主线程定时器调用
+        """
+        if not self.buffer:
+            return
+
+        with self.lock:
+            # 取出当前所有日志，并清空缓冲区
+            messages = self.buffer[:]
+            self.buffer.clear()
+
+        # 批量推送到 UI
+        # 注意：这里是在主线程执行的，非常安全
+        if messages and log_element:
+            # 如果日志太多（比如超过100条），为了防止前端JS卡顿，可以只截取最后100条
+            if len(messages) > 100:
+                messages = messages[-100:]
+                messages.insert(0, "...(日志更新过快，部分省略)...")
+
+            for msg in messages:
+                log_element.push(msg)
 
 
 # --- 辅助函数 ---
@@ -71,7 +103,7 @@ def get_stats():
     fail = 0
     try:
         if TASK_PATH.exists():
-            # 使用 list 转换防止迭代时文件变动
+            # 使用 list() 快照防止迭代报错
             for file in list(TASK_PATH.glob('*.json')):
                 total += 1
                 task = get_task(file.stem)
@@ -99,7 +131,7 @@ def info_card(title, value, icon, color, subtext=None):
 
 
 async def check_tmdb_connection(label_element, btn_element):
-    """测试 TMDB 连接并更新 UI"""
+    """测试 TMDB 连接"""
     btn_element.props('loading')
     label_element.text = '连接中...'
     label_element.classes(replace='text-grey-6 text-xs font-bold')
@@ -117,7 +149,6 @@ async def check_tmdb_connection(label_element, btn_element):
     try:
         start_time = time.time()
         url = f"{base_url}/configuration?api_key={api_key}"
-        # 使用 to_thread 防止阻塞主线程
         response = await asyncio.to_thread(requests.get, url, timeout=8)
         ping = (time.time() - start_time) * 1000
 
@@ -143,9 +174,6 @@ async def check_tmdb_connection(label_element, btn_element):
 
 
 def get_active_monitor_paths():
-    """
-    智能获取当前生效的监控路径
-    """
     paths = []
     try:
         raw_paths = cm.config.get('monitor_paths', [])
@@ -180,16 +208,16 @@ def info_page():
 
     with ui.column().classes('w-full h-full p-4 gap-4 scroll bg-slate-50'):
 
-        # 第一栏：业务统计
+        # 1. 顶部统计卡片
         with ui.grid(columns=4).classes('w-full gap-4'):
             info_card('总任务数', total, 'list_alt', 'blue')
             info_card('重命名成功', success, 'check_circle', 'green', f'成功率: {success_rate:.1f}%')
             info_card('失败/异常', fail, 'warning', 'red')
             info_card('运行环境', f"Py {platform.python_version()}", 'memory', 'purple', platform.system())
 
-        # 第二栏：服务与监控配置
+        # 2. 状态信息
         with ui.grid(columns=2).classes('w-full gap-4'):
-            # 监控目录状态
+            # 监控状态
             with ui.card().classes('w-full p-0 no-shadow border-[1px]'):
                 with ui.row().classes('w-full p-2 bg-grey-1 border-b-[1px] items-center gap-2'):
                     ui.icon('folder_open', color='indigo')
@@ -204,7 +232,7 @@ def info_page():
                     monitor_status_text = ui.label('检查中...').classes(
                         'text-xs font-bold text-grey-5 bg-grey-2 px-2 py-1 rounded')
 
-            # TMDB 服务状态
+            # TMDB 状态
             with ui.card().classes('w-full p-0 no-shadow border-[1px]'):
                 with ui.row().classes('w-full p-2 bg-grey-1 border-b-[1px] items-center gap-2'):
                     ui.icon('movie', color='blue')
@@ -219,9 +247,9 @@ def info_page():
                                          on_click=lambda: check_tmdb_connection(tmdb_status_label, btn_tmdb)) \
                         .props('flat dense size=sm color=blue-7')
 
-        # 第三栏：队列与日志
+        # 3. 任务队列与日志
         with ui.row().classes('w-full flex-nowrap gap-4 h-[400px]'):
-            # 左侧：正在处理 & 等待队列
+            # 左侧队列
             with ui.column().classes('w-1/3 h-full gap-4'):
                 with ui.card().classes('w-full p-0 no-shadow border-[1px]'):
                     with ui.row().classes('w-full p-2 bg-blue-1 items-center gap-2 border-b-[1px]'):
@@ -239,30 +267,36 @@ def info_page():
                         queue_count_badge = ui.badge('0', color='orange')
                     queue_scroll = ui.scroll_area().classes('w-full flex-grow p-2')
 
-            # 右侧：实时日志
+            # 右侧日志
             with ui.card().classes('w-2/3 h-full p-0 no-shadow border-[1px] flex flex-col'):
                 with ui.row().classes('w-full p-2 bg-grey-2 items-center border-b-[1px]'):
                     ui.icon('terminal', color='grey-8')
                     ui.label('实时日志').classes('font-bold text-grey-8')
                     ui.label('(Live)').classes('text-xs text-green-6 ml-auto font-mono')
 
-                log_view = ui.log(max_lines=500).classes(
+                log_view = ui.log(max_lines=300).classes(
                     'w-full flex-grow p-2 font-mono text-xs bg-[#1e1e1e] text-green-400')
 
-                # [安全修复] 使用 list() 创建快照，防止迭代时 LOG_HISTORY 被后台修改导致报错
+                # 填充历史日志
                 for history_msg in list(LOG_HISTORY):
                     log_view.push(history_msg)
 
+                # 初始化缓冲日志处理器
                 root_logger = logging.getLogger()
-                gui_handler = NiceGuiLogHandler(log_view)
-                root_logger.addHandler(gui_handler)
+                buffered_handler = BufferedLogHandler()
+                root_logger.addHandler(buffered_handler)
 
-                # 页面关闭时自动移除 Handler
-                ui.context.client.on_disconnect(lambda: root_logger.removeHandler(gui_handler))
+                # 页面断开时移除 Handler
+                ui.context.client.on_disconnect(lambda: root_logger.removeHandler(buffered_handler))
 
         def update_ui_state():
             try:
-                # 1. 更新当前处理文件
+                # 1. 刷新日志 (从缓冲区批量取)
+                # 这保证了无论后台日志多快，前端每 0.2 秒只更新一次
+                buffered_handler.flush_to_ui(log_view)
+
+                # 2. 降低队列刷新频率的消耗
+                # 更新当前文件
                 cur = monitor_service.current_file
                 if cur:
                     current_file_label.text = cur
@@ -271,29 +305,46 @@ def info_page():
                     current_file_label.text = '等待任务...'
                     current_file_label.classes(remove='text-blue-7 font-bold', add='text-grey-5 italic')
 
-                # 2. 更新队列列表
+                # 3. 更新队列列表 (带异常保护)
                 items = monitor_service.get_queue_list()
                 queue_count_badge.text = str(len(items))
+
+                # 只有队列变化时才重绘列表，避免 DOM 闪烁和性能消耗
+                # 这里简单起见还是清空重绘，但因为是 1s 一次，影响可控
+
+            except Exception:
+                pass
+
+        def slow_update_ui_state():
+            """
+            低频更新的任务 (1秒一次)
+            """
+            try:
+                # 更新队列详情显示 (比较耗时 DOM 操作)
+                items = monitor_service.get_queue_list()
                 queue_scroll.clear()
                 with queue_scroll:
                     if not items:
                         with ui.column().classes('w-full h-full items-center justify-center text-grey-4 q-mt-md'):
                             ui.label('队列空闲').classes('text-xs')
                     else:
+                        # 限制显示数量，防止队列太长卡死前端
+                        display_items = items[:50]
                         with ui.list().props('dense separator').classes('w-full'):
-                            for idx, filename in enumerate(items):
+                            for idx, filename in enumerate(display_items):
                                 with ui.item():
                                     with ui.item_section().props('avatar min-width=20px'):
                                         ui.label(str(idx + 1)).classes('text-grey-5 text-xs')
                                     with ui.item_section():
                                         ui.label(filename).classes('text-xs break-all')
+                        if len(items) > 50:
+                            ui.label(f'...还有 {len(items) - 50} 个任务').classes('text-xs text-grey-5 q-ml-md')
 
-                # 3. 更新监控目录路径
+                # 更新路径和状态
                 active_paths = get_active_monitor_paths()
                 monitor_path_label.text = active_paths
                 monitor_path_label.update()
 
-                # 4. 检查监控服务状态
                 is_running = False
                 has_paths = (active_paths != "未配置" and active_paths != "配置读取错误" and active_paths != "")
                 monitor_enabled = cm.config.get('monitor_enabled', False)
@@ -314,10 +365,11 @@ def info_page():
                     monitor_status_text.text = '未启动'
                     monitor_status_text.classes(replace='text-white bg-red-4')
                     monitor_status_icon.props('color=red')
+            except Exception:
+                pass
 
-            except Exception as e:
-                # 捕获 UI 更新中的异常，防止 timer 崩溃
-                print(f"UI Update Error: {e}")
+        # 启动高频定时器 (仅刷新日志) - 0.2秒一次
+        ui.timer(0.2, update_ui_state)
 
-        # 启动定时器 (1秒刷新一次)
-        ui.timer(1.0, update_ui_state)
+        # 启动低频定时器 (刷新队列 DOM 和状态) - 1.5秒一次，减轻浏览器负担
+        ui.timer(1.5, slow_update_ui_state)
