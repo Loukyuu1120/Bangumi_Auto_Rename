@@ -894,19 +894,6 @@ class Rename:
             if is_weak:
                 logger.info(f"[智能判断] 文件名 '{path.name}' 判定为弱文件名，强制作为剧集(TV)处理。")
                 is_movie = False
-                if path.parent != path.root:
-                    pname = path.parent.name
-                    # 尝试解析父目录
-                    parent_title, parent_year, _, _ = parse_filename(pname)
-
-                    if parent_title:
-                        logger.info(f"[溯源] 从父目录 '{pname}' 提取标题: {parent_title}")
-                        rtpath_name = parent_title
-                        if parent_year > 0:
-                            year = parent_year
-                    else:
-                        logger.warning(f"[溯源] 父目录解析失败，保留原名: {pname}")
-                        rtpath_name = pname
 
             cache_key = str(path.parent.absolute())
             filename = path.name
@@ -935,17 +922,30 @@ class Rename:
                     else:
                         logger.info(f"[目录缓存] 缓存为电影，不使用缓存")
                 else:
-                    if is_weak and path.parent != path.root:
+                    # 缓存没命中，必须手动溯源
+                    final_search_name = ""
+
+                    if path.parent != path.root:
                         pname = path.parent.name
                         pname_cleaned = remove_tag(pname).lower().strip()
-                        is_season_folder = is_season_name(pname_cleaned)
 
-                        if is_season_folder and path.parent.parent != path.root:
-                            rtpath_name, year, _, _ = parse_filename(path.parent.parent.name)
-                            logger.info(f"[溯源] 识别到季目录 '{pname}'，使用祖父目录: {rtpath_name}")
+                        # 判断父目录是否为季号
+                        if is_season_name(pname_cleaned):
+                            # 是季号，找爷爷
+                            if path.parent.parent != path.root:
+                                grandparent_name = path.parent.parent.name
+                                final_search_name, year, _, _ = parse_filename(grandparent_name)
+                                logger.info(f"[溯源] 识别到季目录 '{pname}'，使用祖父目录: {final_search_name}")
+                            else:
+                                logger.warning(f"[溯源] 无法向上回溯，被迫使用季号目录: {pname}")
+                                final_search_name = pname
                         else:
-                            rtpath_name, year, _, _ = parse_filename(pname)
-                            logger.info(f"[溯源] 使用父目录: {rtpath_name}")
+                            # 不是季号，直接用父目录
+                            final_search_name, year, _, _ = parse_filename(pname)
+                            logger.info(f"[溯源] 使用父目录: {final_search_name}")
+
+                    if final_search_name:
+                        rtpath_name = final_search_name
 
                     if any(inv in rtpath_name.lower() for inv in INVALID_NAMES) and not cus_tmdb_id:
                         rtpath_name = ""

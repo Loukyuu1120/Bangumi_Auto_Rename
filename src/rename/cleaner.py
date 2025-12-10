@@ -242,16 +242,29 @@ def is_weak_filename(filename: str) -> bool:
 
 def is_season_name(filename: str) -> bool:
     """
-    判断是否为季目录名
-    例如: "Show Name S01", "Show Name 第1季"
+    判断目录名是否为纯季号目录（不包含剧名）
+    例如: "S01", "Season 1", "第1季", "S01-S02", "1"
     """
-    stem = Path(filename).stem
-    # 检查是否包含季号格式
-    for p in SEASON_PATTERNS:
-        if re.fullmatch(p, stem, re.IGNORECASE):
-            return True
-    if re.match(r'^\d{1,2}$', stem):
+    stem = Path(filename).stem.strip()
+
+    # 1. 纯数字 (如 1, 2)
+    if re.fullmatch(r'\d{1,2}', stem):
         return True
+
+    # 2. 纯季号格式 (S01, S1)
+    if re.fullmatch(r'S\d+', stem, re.IGNORECASE):
+        return True
+
+    # 3. 季号范围 (S01-S02, Season 1-2)
+    if re.fullmatch(r'(S|Season\s*)\d+\s*-\s*(S|Season\s*)?\d+', stem, re.IGNORECASE):
+        return True
+
+    for p in SEASON_PATTERNS:
+        # 尝试移除季号
+        remain = re.sub(p, '', stem, flags=re.IGNORECASE).strip()
+        if not remain or re.fullmatch(r'[.\-_\[\]\(\)\s]+', remain):
+            return True
+
     return False
 
 
