@@ -37,6 +37,7 @@ class ConfigPage(ui.dialog):
                 "overwrite_mode",
                 "scrape_metadata",
                 "scrape_image_types",
+                "subtitle_extensions",
                 "secondary_classification",
                 "docker_mnt",
                 "log_level",
@@ -160,6 +161,38 @@ class ConfigPage(ui.dialog):
                             label="选择要下载的图片类型",
                             on_change=lambda e, c=cn: self._change(c, e.value),
                         ).props("use-chips filled").style("flex-grow: 2")
+
+                    elif cn == "subtitle_extensions":
+                        # 读取配置，默认为 ['.ass', '.srt']
+                        current_exts = cm.get_config(cn)
+                        if not current_exts:
+                            current_exts = ['.ass', '.srt', '.sub']
+
+                        display_val = ", ".join([e.lstrip('.') for e in current_exts])
+
+                        def _save_sub_exts(value_str):
+                            # 字符串转回列表
+                            # "ass, srt" -> ['.ass', '.srt']
+                            exts = []
+                            if value_str:
+                                # 支持中文逗号和英文逗号
+                                parts = value_str.replace('，', ',').split(',')
+                                for p in parts:
+                                    clean_p = p.strip()
+                                    if clean_p:
+                                        if not clean_p.startswith('.'):
+                                            clean_p = '.' + clean_p
+                                        exts.append(clean_p.lower())
+                            self._change(cn, exts)
+
+                        with ui.column().style("flex-grow: 2"):
+                            ui.input(
+                                value=display_val,
+                                placeholder="ass, srt, sub",
+                                on_change=lambda e: _save_sub_exts(e.value)
+                            ).props("filled dense").style("width: 100%")
+                            ui.label("移动视频时，会自动带走同名的这些后缀文件（保留语言标记，如 .zh.ass）").style(
+                                "font-size: 10px; color: gray;")
 
                     elif cn == "secondary_classification":
                         tg = RedToogle(

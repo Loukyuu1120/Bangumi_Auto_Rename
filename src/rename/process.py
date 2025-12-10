@@ -37,6 +37,8 @@ from .cleaner import (
     parse_filename,
     get_render_context,
     render_path_template,
+    is_weak_filename,
+    is_season_name,
 )
 
 jikan = Jikan()
@@ -144,6 +146,52 @@ class Rename:
             return "日韩剧"
         return "欧美剧"
 
+    def _process_accompanying_files(self, source_video_path: Path, target_video_path: Path):
+        """
+        处理伴随文件（字幕等）
+        source_video_path: 原视频路径 (例如 /downloads/Movie.mp4)
+        target_video_path: 新视频路径 (例如 /data/Movie/Movie.mp4)
+        """
+        try:
+            # 1. 获取允许的后缀列表
+            allowed_exts = cm.get_config('subtitle_extensions') or ['.ass', '.srt', '.sub']
+
+            # 2. 获取源目录和视频的文件名主干
+            source_dir = source_video_path.parent
+            video_stem = source_video_path.stem  # "Movie"
+
+            # 3. 遍历源目录寻找匹配文件
+            for sibling in source_dir.iterdir():
+                if sibling == source_video_path:
+                    continue
+                if sibling.is_dir():
+                    continue
+
+                # 检查后缀是否在允许列表中
+                if sibling.suffix.lower() not in allowed_exts:
+                    continue
+
+                # 检查文件名是否以视频名开头
+                # 视频: S01E01.mp4 (stem: S01E01)
+                # 字幕: S01E01.zh.ass
+                if sibling.name.startswith(video_stem):
+                    # 提取剩余的后缀部分 (包括语言标记)
+                    # S01E01.zh.ass - S01E01 = .zh.ass
+                    suffix_part = sibling.name[len(video_stem):]
+
+                    # 构造新的目标路径
+                    # 目标视频: .../Show/S01/NewName.mp4
+                    # 新字幕: .../Show/S01/NewName.zh.ass
+                    new_sub_name = target_video_path.stem + suffix_part
+                    target_sub_path = target_video_path.parent / new_sub_name
+
+                    # 加入重命名队列
+                    self.R[sibling] = target_sub_path
+                    logger.info(f"[伴随文件] {sibling.name} -> {target_sub_path.name}")
+
+        except Exception as e:
+            logger.warning(f"[伴随文件] 处理出错: {e}")
+
     def get_season_id(
             self,
             tv_info: Dict,
@@ -213,6 +261,8 @@ class Rename:
             cus_season_id: Optional[int] = None,
     ):
         time.sleep(0.005)
+        if item_path.suffix.lower() not in VIDEO_SUFFIX:
+            return
 
         item_name = item_path.name
         if item_repeat:
@@ -247,7 +297,9 @@ class Rename:
             for ex in EXTRA_TAG:
                 if re.search(rf'(?<!{p}){ex.lower()}(?!{p})', n_item_name_l):
                     t = work_path / 'extra'
-                    self.R[item_path] = t / item_name
+                    target_file = t / item_name # 提取变量
+                    self.R[item_path] = target_file
+                    self._process_accompanying_files(item_path, target_file)
                     logger.info(f'[处理任务] 处理完成{item_name} (Extra)')
                     return
 
@@ -255,7 +307,9 @@ class Rename:
                 if re.search(rf'(?<!{p}){s0.lower()}(?!{p})', item_name_l) or \
                         re.search(rf'(?<!{p}){s0.lower()}[\d]{{1,3}}(?!{p})', item_name_l):
                     t = work_path / 'Season0'
-                    self.R[item_path] = t / item_name
+                    target_file = t / item_name # 提取变量
+                    self.R[item_path] = target_file
+                    self._process_accompanying_files(item_path, target_file)
                     logger.info(f'[处理任务] 处理完成{item_name} (Season0)')
                     return
 
@@ -292,6 +346,7 @@ class Rename:
 
                 self.R[item_path] = target_file
                 logger.info(f'[自定义格式] 目标路径: {target_file}')
+                self._process_accompanying_files(item_path, target_file)
 
                 if enable_scrape:
                     try:
@@ -341,6 +396,7 @@ class Rename:
         ft = f'S{ss}E{ep_str}'
         target_file = t / f'{ft} - {item_name}'
         self.R[item_path] = target_file
+        self._process_accompanying_files(item_path, target_file)
 
         if enable_scrape and info and ep > 0:
             try:
@@ -470,6 +526,7 @@ class Rename:
         time.sleep(0.005)
 
         norm_name = rtpath_name.strip().lower()
+        filename = path.name
 
         with Rename._lock:
             cached_res = None
@@ -514,16 +571,41 @@ class Rename:
 
             return s2_name, s2_info, (is_anime or False), True
 
-        pos = 0
-        logger.info('[处理任务] 未传入任务类型，开始判断该文件是否为电影！')
-
         # 1. 搜索电视剧信息
+        has_episode_pattern = extract_base_num(filename)
+        if has_episode_pattern:
+            logger.info('[处理任务] 检测到 SxxExx 格式，锁定为电视剧模式，跳过电影搜索')
+            tv_cache_key = (norm_name, year, "tv")
+            with Rename._lock:
+                if tv_cache_key in Rename._tmdb_search_cache:
+                    s1_name, s1_info = Rename._tmdb_search_cache[tv_cache_key]
+                else:
+                    s1_name, s1_info = None, None
+
+            if not s1_name:
+                s1_name, s1_info = self.search.get_tv_info(rtpath_name, year)
+                # 尝试去除年份重试
+                if not s1_name and year != 0:
+                    s1_name, s1_info = self.search.get_tv_info(rtpath_name, 0)
+
+                if s1_name:
+                    with Rename._lock:
+                        Rename._tmdb_search_cache[tv_cache_key] = (s1_name, s1_info)
+
+            if not s1_name or not s1_info:
+                return f'[TMDB] 未搜索到电视剧信息 (检测到SxxExx), 跳过{rtpath_name}'
+
+            logger.info(f'[处理任务] 搜索到的电视剧名称: {s1_name}')
+
+            if is_anime is None:
+                is_anime = any(g['name'].lower() in ['animation', 'anime'] for g in s1_info.get('genres', []))
+
+            return s1_name, s1_info, is_anime, False
+        logger.info('[处理任务] 未传入任务类型且无明确SxxExx特征，开始双向搜索判断！')
+        pos = 0
         tv_cache_key = (norm_name, year, "tv")
         with Rename._lock:
-            if tv_cache_key in Rename._tmdb_search_cache:
-                s1_name, s1_info = Rename._tmdb_search_cache[tv_cache_key]
-            else:
-                s1_name, s1_info = None, None
+            s1_name, s1_info = Rename._tmdb_search_cache.get(tv_cache_key, (None, None))
 
         if not s1_name:
             s1_name, s1_info = self.search.get_tv_info(rtpath_name, year)
@@ -539,10 +621,7 @@ class Rename:
         # 2. 搜索电影信息
         mv_cache_key = (norm_name, year, "movie")
         with Rename._lock:
-            if mv_cache_key in Rename._tmdb_search_cache:
-                s2_name, s2_info = Rename._tmdb_search_cache[mv_cache_key]
-            else:
-                s2_name, s2_info = None, None
+            s2_name, s2_info = Rename._tmdb_search_cache.get(mv_cache_key, (None, None))
 
         if not s2_name:
             s2_name, s2_info = self.search.get_movie_info(rtpath_name, year)
@@ -554,23 +633,6 @@ class Rename:
 
         if s2_name:
             logger.info(f'[处理任务] 搜索到的电影名称: {s2_name}')
-
-        filename = path.name
-        has_episode_pattern = bool(re.search(r"S\d{1,2}E\d{1,3}", filename, re.IGNORECASE))
-
-        if has_episode_pattern:
-            logger.info('[处理任务] 检测到 SxxExx 格式，直接判定为电视剧')
-            is_movie = False
-            info = s1_info
-            name = s1_name
-            if not name or not info:
-                return f'[TMDB] 未搜索到电视剧信息, 跳过{rtpath_name}'
-
-            if is_anime is None:
-                is_anime = any(g['name'].lower() in ['animation', 'anime']
-                               for g in info.get('genres', []))
-
-            return name, info, is_anime, is_movie
 
         season_id = extract_season(rtpath_name)
 
@@ -600,7 +662,7 @@ class Rename:
 
         for parent in path.parents:
             pname = parent.name.lower()
-            if re.match(r'^(season|series|s)\s*\d*$', pname) or re.match(r'^\d{1,2}$', pname):
+            if is_season_name(pname):
                 pos += 1
                 break
 
@@ -808,16 +870,28 @@ class Rename:
 
             INVALID_NAMES = ['未知', 'unknown', 'none', 'null', 'tba', '未识别到官方名称', '待定']
             name_check = re.sub(r'[\W_]+', '', rtpath_name.replace(path.suffix, "") if path.suffix else rtpath_name)
-            is_weak = (not name_check) or (name_check.isdigit()) or (len(name_check) < 2) or (
-                    rtpath_name.lower() in INVALID_NAMES)
+            is_weak = is_weak_filename(name_check)
 
             if is_weak:
                 logger.info(f"[智能判断] 文件名 '{path.name}' 判定为弱文件名，强制作为剧集(TV)处理。")
                 is_movie = False
+                if path.parent != path.root:
+                    pname = path.parent.name
+                    # 尝试解析父目录
+                    parent_title, parent_year, _, _ = parse_filename(pname)
+
+                    if parent_title:
+                        logger.info(f"[溯源] 从父目录 '{pname}' 提取标题: {parent_title}")
+                        rtpath_name = parent_title
+                        if parent_year > 0:
+                            year = parent_year
+                    else:
+                        logger.warning(f"[溯源] 父目录解析失败，保留原名: {pname}")
+                        rtpath_name = pname
 
             cache_key = str(path.parent.absolute())
             filename = path.name
-            has_episode_pattern = bool(re.search(r"S\d{1,2}E\d{1,3}", filename, re.IGNORECASE))
+            has_episode_pattern = extract_base_num(filename)
 
             from_ai_cache = False
 
@@ -845,8 +919,7 @@ class Rename:
                     if is_weak and path.parent != path.root:
                         pname = path.parent.name
                         pname_cleaned = remove_tag(pname).lower().strip()
-                        is_season_folder = re.match(r'^(season|series|s)\s*\d*$', pname_cleaned) or \
-                                           re.match(r'^\d{1,2}$', pname_cleaned)
+                        is_season_folder = is_season_name(pname_cleaned)
 
                         if is_season_folder and path.parent.parent != path.root:
                             rtpath_name, year, _, _ = parse_filename(path.parent.parent.name)
@@ -920,10 +993,13 @@ class Rename:
                         return self.error_reply(_uuid, last_error, path)
 
                     if effective_use_ai and not ai_attempted:
+                        hint_for_ai = rtpath_name
+                        if is_weak:
+                            hint_for_ai = f"{rtpath_name} {path.name}"
                         ai_res = self._attempt_ai_recovery(
                             path, _uuid, is_anime, cus_offset, cus_season_id,
                             effective_use_ai, check_skip_dir=True,
-                            hint_name=rtpath_name
+                            hint_name=hint_for_ai
                         )
                         if ai_res:
                             return ai_res

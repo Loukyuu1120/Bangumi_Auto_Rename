@@ -1,0 +1,15 @@
+version: "3.9"
+
+services:
+  bangumi-auto-rename:
+    image: loukyuu1120/bangumi-auto-rename:web
+    container_name: bangumi-auto-rename
+    ports:
+      - "5999:5999"
+    volumes:
+      - /你的/媒体目录:/media
+      - ./data:/Bangumi_Auto_Rename/data
+    environment:
+      - HTTP_PROXY=http://192.168.0.1:7890
+      - HTTPS_PROXY=http://192.168.0.1:7890
+    restart: unless-stopped

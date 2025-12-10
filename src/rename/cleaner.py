@@ -2,494 +2,36 @@ import re
 import difflib
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
-
 from jinja2 import Environment, BaseLoader
 from ..logger import logger
 from .utils import (
-    NUM_MAP,
-    ROMA_MAP,
-    cn_num,
-    keywords,
-    code_partten,
-    season_partten,
-    episode_partten,
-    bracket_patterns,
+    VIDEO_SUFFIX,  # 唯一需要用到的基础常量，用于去除扩展名
+    KEYWORDS_TO_CLEAN,  # 用于清洗标题
+    BRACKET_PATTERNS,  # 用于去除括号
+    CN_NUM,  # 中文数字映射
+    SEASON_PATTERNS,  # 季号正则
+    EPISODE_PATTERNS,  # 集号正则
+    NUM_MAP,  # 英文数字映射
+    ROMA_MAP,  # 罗马数字映射
+    CODE_PATTERNS,  # 技术噪声正则
+    MEDIA_MAPPING  # 媒体信息映射
 )
 
 
-def _clean_title_case_insensitive(title: str):
-    # 将关键词和标题转换为小写进行匹配
-    lower_keywords = [kw.lower() for kw in keywords]
-    j = '|'.join(re.escape(kw) for kw in lower_keywords)
-    keyword_regex = re.compile(j)
-
-    # 遍历所有括号类型
-    for pattern in bracket_patterns:
-        # 查找所有匹配的括号内容
-        matches = re.findall(pattern, title)  # 保留原始大小写内容
-        for match in matches:
-            # 转为小写进行匹配
-            if keyword_regex.search(match.lower()):
-                title = title.replace(match, '')  # 删除原始大小写内容
-
-    # 返回清理后的标题
-    return title.strip()[1:-1]
-
+# ================= 工具函数 =================
 
 def chinese_to_number(chinese_numeral):
-    chinese_digits = {
-        '零': 0,
-        '一': 1,
-        '二': 2,
-        '三': 3,
-        '四': 4,
-        '五': 5,
-        '六': 6,
-        '七': 7,
-        '八': 8,
-        '九': 9,
-    }
-    if chinese_numeral in chinese_digits:
-        return chinese_digits[chinese_numeral]
+    if chinese_numeral in CN_NUM:
+        return CN_NUM[chinese_numeral]
     return None
-
-
-def clean_noise(text: str) -> str:
-    """
-    清洗文件名中的常见垃圾词（分辨率、编码、扩展名等）
-    """
-    # 1. 去除扩展名
-    text = re.sub(r'\.(strm|mp4|mkv|avi|mov|iso|ts)$', '', text, flags=re.IGNORECASE)
-
-    # 2. 去除分辨率、编码等关键词 (基于 keywords 列表，或者手动补充)
-    noise_patterns = [
-        r'1080[pP]', r'720[pP]', r'2160[pP]', r'4[kK]',
-        r'WebRip', r'BluRay', r'HEVC', r'AVC', r'AAC', r'H\.?26[45]',
-        r'AC3', r'DTS', r'TrueHD', r'Atmos', r'HDR', r'Remux',
-        r'-',  # 孤立的连字符
-    ]
-
-    for pat in noise_patterns:
-        text = re.sub(pat, ' ', text, flags=re.IGNORECASE)
-
-    # 3. 清理多余空格
-    return re.sub(r'\s+', ' ', text).strip()
-
-
-def remove_tag(title: str, skip=False):
-    '''
-    该步骤将带括号的文件名中，包含【指定关键词】的【任意括号】内容删除。
-
-    [LoliHouse] Shangri / 香格里拉 [WebRip 1080p HEVC-10bit AAC]【简繁内封字幕】
-
-    将会变为
-
-    Shangri / 香格里拉
-
-    如果指定`skip=True`，则会保留第二个匹配的括号，将会变为
-
-    Shangri / 香格里拉 [WebRip 1080p HEVC-10bit AAC]
-
-    当指定文件夹名字是下面类型的，会很有用
-
-    [LoliHouse] [Shangri / 香格里拉] [WebRip 1080p HEVC-10bit AAC]【简繁内封字幕】
-    '''
-    s = title
-    if skip:
-        # 创建一个字典来追踪每种括号的匹配次数
-        counts = {pattern: 0 for pattern in bracket_patterns}
-
-        # 定义替换函数，追踪匹配次数并决定是否保留第二个匹配
-        def replace_match(pattern, match):
-            counts[pattern] += 1
-            # 保留每种括号的第二个匹配，否则去除
-            if counts[pattern] == 2:
-                return match.group(0)
-            else:
-                return ''
-
-        # 对每个模式应用相应的匹配逻辑
-        for pattern in bracket_patterns:
-            s = re.sub(pattern, lambda m: replace_match(pattern, m), s)
-    else:
-        # 不启用跳过规则，正常删除所有匹配项
-        for pattern in bracket_patterns:
-            s = re.sub(pattern, '', s)
-
-    remove_tag_s = s.strip()
-    logger.debug(f'[移除标签工具] {remove_tag_s}')
-    if not remove_tag_s:
-        s = _clean_title_case_insensitive(title)
-
-    return s.strip()
-
-
-def divide_by_year(filename: str) -> Tuple[str, int]:
-    """
-    增强版：分离年份并处理英文点号分隔的标题
-    """
-    original = filename
-
-    # 1. 先用正则提取年份
-    year_pattern = re.compile(r'[.\s\-_\(\[]([12][90]\d{2})(?:[.\s\-_\)\]]|$)', re.IGNORECASE)
-    match = year_pattern.search(filename)
-
-    year = 0
-    title_part = filename
-
-    if match:
-        year_str = match.group(1)
-        year = int(year_str)
-        start, end = match.span()
-        title_part = filename[:start]
-
-        # 如果年份前没有内容，取年份后的内容
-        if not title_part.strip():
-            rest = filename[end:]
-            title_part = re.sub(r'^[\)\]\.\s\-]+', '', rest).strip()
-
-    # 2. 检测是否为英文点号分隔格式
-    is_english_dotted = '.' in title_part and not re.search(r'[\u4e00-\u9fff]', title_part)
-
-    if is_english_dotted:
-        logger.debug(f'[年份分离] 检测到英文点号分隔: {title_part}')
-
-        # ⭐ 先移除季集信息（避免干扰）
-        title_part = re.sub(r'\.S\d{1,2}E\d{1,3}.*$', '', title_part, flags=re.IGNORECASE)
-        title_part = re.sub(r'\.S\d{1,2}(?:\.|$).*$', '', title_part, flags=re.IGNORECASE)
-
-        # 移除分辨率等技术标签
-        tech_tags = [
-            r'\.2160p', r'\.1080p', r'\.720p', r'\.4K', r'\.UHD',
-            r'\.WEB-?DL', r'\.WEBRip', r'\.BluRay', r'\.BDRip',
-            r'\.HEVC', r'\.x26[45]', r'\.H\.26[45]',
-            r'\.DDP', r'\.AAC', r'\.AC3', r'\.DTS', r'\.FLAC',
-            r'\.HDR', r'\.SDR', r'\.\d+fps', r'\.Remux', r'\.AVC',
-            r'\.-[A-Z][a-zA-Z]+$'  # 组名如 -HiveWeb
-        ]
-        for tag in tech_tags:
-            title_part = re.sub(tag, '', title_part, flags=re.IGNORECASE)
-
-        # 转换点号和下划线为空格
-        title_part = title_part.replace('.', ' ').replace('_', ' ').replace('-', ' ')
-
-        # 清理多余空格
-        title_part = re.sub(r'\s+', ' ', title_part).strip()
-
-        logger.debug(f'[年份分离] 英文标题清洗后: {title_part}')
-    else:
-        # 原有逻辑：清理标题末尾的残留符号
-        title_part = re.sub(r'[\(\[\.\s\-]+$', '', title_part).strip()
-
-    # 3. 最终清理
-    clean_title = title_part.strip('.-_[](){} ')
-
-    logger.debug(f'[年份分离] {original} -> 标题: {clean_title}, 年份: {year}')
-
-    return clean_title, year
-
-
-def parse_filename(filename: str) -> Tuple[str, int, Optional[int], Optional[int]]:
-    """
-    完整解析文件名，提取标题、年份、季号、集号
-
-    示例：
-    - "Sword.and.Beloved.2025.S01E23.2160p.WEB-DL.HEVC.strm"
-      -> ("Sword and Beloved", 2025, 1, 23)
-    - "Emiya-san.Chi.no.Kyou.no.Gohan.S01E13.2017.1080p.BluRay.strm"
-      -> ("Emiya san Chi no Kyou no Gohan", 2017, 1, 13)
-
-    返回：(标题, 年份, 季号, 集号)
-    """
-    original = filename
-    name = filename
-
-    # 1. 先移除标签（利用已有的 remove_tag）
-    name = remove_tag(name)
-
-    # 2. 移除文件扩展名
-    name = re.sub(r'\.(mkv|mp4|avi|mov|strm|ts|iso)$', '', name, flags=re.IGNORECASE)
-
-    # 3. ⭐ 先提取年份（在截断之前）
-    year = 0
-    year_match = re.search(r'[.\s\-_\(]([12][90]\d{2})(?:[.\s\-_\)]|$)', name)
-    if year_match:
-        year = int(year_match.group(1))
-        logger.debug(f'[文件名解析] 提取到年份: {year}')
-
-    # 4. 提取季集信息（会截断字符串，所以放在年份后面）
-    season_num = None
-    episode_num = None
-
-    # 匹配 S01E23 格式
-    se_match = re.search(r'[.\s\-_]S(\d{1,2})E(\d{1,3})', name, re.IGNORECASE)
-    if se_match:
-        season_num = int(se_match.group(1))
-        episode_num = int(se_match.group(2))
-        name = name[:se_match.start()]  # 移除季集及之后内容
-        logger.debug(f'[文件名解析] 提取到 S{season_num}E{episode_num}')
-    else:
-        # 匹配 S01 格式
-        s_match = re.search(r'[.\s\-_]S(\d{1,2})(?:[.\s\-_]|$)', name, re.IGNORECASE)
-        if s_match:
-            season_num = int(s_match.group(1))
-            name = name[:s_match.start()]
-            logger.debug(f'[文件名解析] 提取到 S{season_num}')
-
-    # 5. 如果前面没提取到年份，再试一次（处理特殊格式）
-    if year == 0:
-        year_match = re.search(r'[.\s\-_\(]([12][90]\d{2})(?:[.\s\-_\)]|$)', name)
-        if year_match:
-            year = int(year_match.group(1))
-            name = name[:year_match.start()]
-            logger.debug(f'[文件名解析] 二次提取到年份: {year}')
-    else:
-        # 年份已提取，从标题中移除年份部分
-        name = re.sub(r'[.\s\-_\(]' + str(year) + r'(?:[.\s\-_\)]|$)', '.', name)
-
-    # 6. 移除技术标签（从第一个技术关键词开始截断）
-    tech_pattern = r'[.\s\-_](2160p|1080p|720p|480p|4K|UHD|WEB-?DL|WEBRip|BluRay|BDRip|DVDRip|HDTV|HEVC|x26[45]|H\.26[45]|Remux|AVC|FLAC)'
-    tech_match = re.search(tech_pattern, name, re.IGNORECASE)
-    if tech_match:
-        name = name[:tech_match.start()]
-        logger.debug(f'[文件名解析] 移除技术标签后: {name}')
-
-    # 7. 判断是否为英文点号分隔格式
-    is_english_dotted = '.' in name and not re.search(r'[\u4e00-\u9fff]', name)
-
-    if is_english_dotted:
-        # 转换分隔符为空格
-        name = name.replace('.', ' ').replace('_', ' ').replace('-', ' ')
-    else:
-        # 中文或其他情况，只替换下划线
-        name = name.replace('_', ' ')
-
-    # 8. 清理多余空格和首尾空白
-    name = re.sub(r'\s+', ' ', name).strip()
-    name = name.strip('.-_[](){} ')
-
-    logger.info(
-        f'[文件名解析] "{original}" -> '
-        f'标题:"{name}", 年份:{year}, S{season_num}E{episode_num}'
-    )
-
-    return name, year, season_num, episode_num
-
-def remove_season(s: str):
-    '''
-    该步骤将文件名中, 类似季度的内容剔除
-
-    Shangri / 香格里拉.S01E01
-
-    将会变为
-
-    Shangri / 香格里拉.E01
-    '''
-    for p in season_partten:
-        s = re.sub(p, '', s)
-    return s.strip()
-
-
-def remove_episode(s: str):
-    '''
-    该步骤将文件名中, 类似剧集的内容剔除
-    Shangri / 香格里拉.E01
-    将会变为
-    Shangri / 香格里拉.
-    '''
-    for p in episode_partten:
-        s = re.sub(p, '', s)
-    return s.strip()
-
-
-def is_chinese_percentage_sufficient(text: str):
-    '''
-    用于判断字符串中 中文字符的比例是否至少占 25%
-    '''
-    chinese_pattern = re.compile(r'[\u4e00-\u9fff]')
-    chinese_chars = chinese_pattern.findall(text)
-    total_chars = len(text)
-    chinese_char_count = len(chinese_chars)
-    if total_chars > 0:
-        return chinese_char_count / total_chars >= 0.25
-    else:
-        return False
-
-
-def extract_season(text: str):
-    '''
-    用于提取字符串中的 季 信息
-    '''
-
-    # 匹配 第1季, 第二季 等
-    match = re.search(r'第([\d一二三四五六七八九零]{1,2})(季|部分|部)', text)
-    if match:
-        season_str = match.group(1)
-        if season_str.isdigit():
-            return int(season_str)
-        else:
-            # 中文数字转换为阿拉伯数字
-            season_number = 0
-            for char in season_str:
-                _a = chinese_to_number(char)
-                if _a is not None:
-                    season_number += _a
-            return season_number
-
-    for p in season_partten:
-        match = re.search(p, text)
-        if match:
-            if p == r'(First|Second|Third|Fourth|Fifth) Season':
-                return NUM_MAP.get(match.group(1), 1)
-            elif p == r'第([\d一二三四五六七八九零]{1,2})(季|部分|部)':
-                continue
-            elif p == r' (I{2,3})' or p == r' (I{1,3}V)' or p == r' (VI{2,3})':
-                return ROMA_MAP.get(match.group(1), 1)
-            else:
-                if match:
-                    return int(match.group(1))
-
-    # 未找到匹配项
-    return -1
-
-
-def find_common_substrings_in_all(
-    filenames: List[str], min_length: int = 3
-) -> List[str]:
-    common_substrings: List[str] = []
-
-    # 取第一个文件名作为初始比较基础
-    base_string = filenames[0]
-
-    for filename in filenames[1:]:
-        matcher = difflib.SequenceMatcher(None, base_string, filename)
-        blocks = matcher.get_matching_blocks()
-
-        # 每次匹配相似块，保留长度大于min_length的部分
-        for match in blocks:
-            if match.size > min_length:
-                A = match.a
-                B = match.size
-                substring = base_string[A : A + B]  # noqa: E203
-                if substring not in common_substrings:
-                    common_substrings.append(substring)
-
-    # 只保留在所有文件中都存在的相似部分
-    final_common_substrings: List[str] = []
-    for substring in common_substrings:
-        if all(substring in filename for filename in filenames):
-            final_common_substrings.append(substring)
-
-    logger.debug(f'【相似部分】：{final_common_substrings}')
-    return final_common_substrings
-
-
-def find_unique_parts_in_videos(directory: Path):
-    '''
-    用于提取某个路径中所有文件的公共相似部分
-    '''
-
-    video_ext = ['.mp4', '.mkv', '.avi', '.mov', '.flv']
-    files: List[Path] = [
-        file for file in directory.iterdir() if file.suffix in video_ext
-    ]
-    filenames: List[str] = [file.stem for file in files]
-
-    if len(filenames) < 2:
-        return None
-
-    # 找出所有文件的公共相似部分
-    common_parts = find_common_substrings_in_all(filenames)
-
-    return common_parts
-
-
-def remove_similar_part(common_parts: List[str], filename: str):
-    for common_part in common_parts:
-        if len(common_part) > 3:  # 确保只移除长度大于3的部分
-            pattern = re.escape(common_part)
-            filename = re.sub(pattern, '', filename).strip()
-    logger.debug(f'【移除相似部分】：{filename}')
-    return filename
-
-
-def remove_code(s: str) -> str:
-    for p in code_partten:
-        s = re.sub(p, '', s)
-    return s
-
-
-def extract_base_num(filename: str) -> Optional[float]:
-    match = re.search(r'S\d+E(\d+)', filename)
-    if match:
-        return float(match.group(1))
-    else:
-        return None
-
-
-def match_and_extract(input_string: str):
-    '''
-    用于提取字符串中的 季和集 信息
-    S01E01
-    '''
-
-    pattern = re.compile(r'S(\d+)E(\d+)')
-    match = pattern.search(input_string)
-
-    if match:
-        season = int(match.group(1))
-        episode = int(match.group(2))
-        return season, episode
-    else:
-        return None
-
-
-def extract_number(filename: str) -> Optional[float]:
-    match = re.search(
-        r'(\d+\.?\d+|[零一二三四五六七八九十百千万]+\.?[\.零一二三四五六七八九十百千万]+)',
-        filename,
-    )
-    if match:
-        r = match.group(1)
-        if r.isdigit():
-            return int(r)
-        else:
-            return chinese_to_arabic(r)
-    else:
-        return None
-
-
-def to_sim_max(all_similaritys: List[Dict[float, int]]):
-    max_key = float('-inf')
-    max_value = 1
-    for similaritys in all_similaritys:
-        _max_key = float('-inf')
-        _max_value = 1
-
-        for key, value in similaritys.items():
-            if key > _max_key:
-                _max_key = key
-                _max_value = value
-
-        if _max_key > max_key:
-            max_key = _max_key
-            max_value = _max_value
-
-    if max_key > 0.6:
-        season_id = max_value
-    else:
-        season_id = 1
-
-    return season_id
 
 
 def chinese_to_arabic(cn: str) -> int:
     unit = 0
     ldig = []
-
     for cndig in reversed(cn):
-        if cndig in cn_num:
-            num = cn_num[cndig]
+        if cndig in CN_NUM:
+            num = CN_NUM[cndig]
             if num == 10 or num == 100 or num == 1000 or num == 10000:
                 if num > unit:
                     unit = num
@@ -503,9 +45,8 @@ def chinese_to_arabic(cn: str) -> int:
                     num *= unit
                     unit = 0
                 ldig.append(num)
-    if unit == 10:  # 处理个位为0的情况，如 '十'
+    if unit == 10:
         ldig.append(10)
-
     val, tmp = 0, 0
     for x in reversed(ldig):
         if x == 10000:
@@ -517,92 +58,318 @@ def chinese_to_arabic(cn: str) -> int:
     return val
 
 
-def sanitize_variable(text: str) -> str:
+def _clean_title_case_insensitive(title: str):
+    lower_keywords = [kw.lower() for kw in KEYWORDS_TO_CLEAN]
+    j = '|'.join(re.escape(kw) for kw in lower_keywords)
+    keyword_regex = re.compile(j)
+    for pattern in BRACKET_PATTERNS:
+        matches = re.findall(pattern, title)
+        for match in matches:
+            if keyword_regex.search(match.lower()):
+                title = title.replace(match, '')
+    return title.strip()[1:-1] if title.strip().startswith('[') and title.strip().endswith(']') else title.strip()
+
+
+def remove_tag(title: str, skip=False):
+    s = title
+    if skip:
+        counts = {pattern: 0 for pattern in BRACKET_PATTERNS}
+
+        def replace_match(pattern, match):
+            counts[pattern] += 1
+            return match.group(0) if counts[pattern] == 2 else ''
+
+        for pattern in BRACKET_PATTERNS:
+            s = re.sub(pattern, lambda m: replace_match(pattern, m), s)
+    else:
+        for pattern in BRACKET_PATTERNS:
+            s = re.sub(pattern, '', s)
+
+    s = s.strip()
+    if not s:
+        s = _clean_title_case_insensitive(title)
+    return s.strip()
+
+
+def clean_noise(text: str) -> str:
+    """清洗标题中的噪音"""
+    # 动态生成扩展名正则
+    ext_pattern = r'\.(' + '|'.join([ext.lstrip('.') for ext in VIDEO_SUFFIX]) + r')$'
+    text = re.sub(ext_pattern, '', text, flags=re.IGNORECASE)
+
+    # 移除技术参数
+    for pat in CODE_PATTERNS:
+        text = re.sub(pat, ' ', text, flags=re.IGNORECASE)
+    # 移除组名 (-404, -Wiki 等)
+    text = re.sub(r'-[a-zA-Z0-9]+$', '', text)
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+def remove_season(s: str):
+    for p in SEASON_PATTERNS:
+        s = re.sub(p, '', s, flags=re.IGNORECASE)
+    return s.strip()
+
+
+def remove_episode(s: str):
+    for p in EPISODE_PATTERNS:
+        s = re.sub(p, '', s, flags=re.IGNORECASE)
+    return s.strip()
+
+
+def remove_code(s: str) -> str:
+    for p in CODE_PATTERNS:
+        s = re.sub(p, '', s, flags=re.IGNORECASE)
+    return s
+
+
+# ================= 核心识别逻辑 =================
+
+def extract_season(text: str):
+    # 优先匹配中文 "第x季"
+    match = re.search(r'第([\d一二三四五六七八九零]{1,2})(季|部分|部)', text)
+    if match:
+        season_str = match.group(1)
+        if season_str.isdigit():
+            return int(season_str)
+        else:
+            return chinese_to_arabic(season_str)
+
+    for p in SEASON_PATTERNS:
+        match = re.search(p, text, re.IGNORECASE)
+        if match:
+            if 'Season' in p:
+                if match.group(1) in NUM_MAP:
+                    return NUM_MAP[match.group(1)]
+                return int(match.group(1))
+            elif 'I' in p or 'V' in p:
+                return ROMA_MAP.get(match.group(1), 1)
+            else:
+                return int(match.group(1))
+    return -1
+
+
+def match_and_extract(input_string: str):
     """
-    清洗上下文变量，防止变量中包含的非法字符破坏路径结构。
-    特别是要移除 '/' 和 '\'，因为这些应该由模板结构控制。
+    提取季和集
     """
-    if not text:
-        return ""
-    # 替换路径分隔符和非法文件字符
-    text = str(text).replace('/', ' ').replace('\\', ' ')
-    text = text.replace(':', '：').replace('?', '？').replace('*', '') \
-        .replace('"', '').replace('<', '').replace('>', '').replace('|', '')
-    # 去除多余空格
-    return ' '.join(text.split())
+    pattern = re.compile(r'S(\d+)(?:E|EP)(\d+)', re.IGNORECASE)
+    match = pattern.search(input_string)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+
+    cn_pattern = re.search(r'第\s*(\d+|[零一二三四五六七八九十百千万]+)\s*[集话]', input_string)
+    if cn_pattern:
+        ep_str = cn_pattern.group(1)
+        episode = int(ep_str) if ep_str.isdigit() else chinese_to_arabic(ep_str)
+        season = extract_season(input_string)
+        if season == -1: season = 1
+        if episode > 0:
+            return season, episode
+
+    return None
+
+
+def extract_base_num(filename: str) -> Optional[float]:
+    match = re.search(r'S\d+(?:E|EP)(\d+)', filename, re.IGNORECASE)
+    if match:
+        return float(match.group(1))
+    return None
+
+
+def extract_number(filename: str) -> Optional[float]:
+    match = re.search(r'(\d+|[零一二三四五六七八九十百千万]+)', filename)
+    if match:
+        r = match.group(1)
+        return int(r) if r.isdigit() else chinese_to_arabic(r)
+    return None
+
+def is_weak_filename(filename: str) -> bool:
+    """
+    判断是否为弱文件名（不包含标题，只有集数信息）
+    例如: "01.mp4", "S01E02.mkv", "E05.strm"
+    """
+    stem = Path(filename).stem.upper()
+    # 1. 纯数字 (如 01, 02)
+    if re.fullmatch(r'\d+', stem):
+        return True
+    # 2. 纯集数格式 (如 E01, EP01)
+    if re.fullmatch(r'(?i)E(P)?\d+(\s*v\d+)?', stem):
+        return True
+    # 3. 纯季集格式 (如 S01E02, S1E1, S01EP02)
+    if re.fullmatch(r'(?i)S\d+E(P)?\d+', stem):
+        return True
+    # 4. 长度过短且不含中文
+    if len(stem) <= 4 and not re.search(r'[\u4e00-\u9fff]', stem):
+        return True
+    return False
+
+def is_season_name(filename: str) -> bool:
+    """
+    判断是否为季目录名
+    例如: "Show Name S01", "Show Name 第1季"
+    """
+    stem = Path(filename).stem
+    # 检查是否包含季号格式
+    for p in SEASON_PATTERNS:
+        if re.fullmatch(p, stem, re.IGNORECASE):
+            return True
+    if re.match(r'^\d{1,2}$', stem):
+        return True
+    return False
+
+# ================= 复杂文件名解析 =================
+
+def parse_filename(filename: str) -> Tuple[str, int, Optional[int], Optional[int]]:
+    """
+    解析文件名：标题, 年份, 季, 集
+    增强版：支持 S01-S02 格式分割，支持技术参数分割
+    """
+    original = filename
+    name = remove_tag(filename)
+
+    # 1. 移除扩展名
+    ext_list = [ext.lstrip('.') for ext in VIDEO_SUFFIX]
+    ext_regex = r'\.(' + '|'.join(ext_list) + r')$'
+    name = re.sub(ext_regex, '', name, flags=re.IGNORECASE)
+
+    # 2. 提取年份 (优先级最高)
+    year = 0
+    # 优化年份正则，避免匹配到分辨率如 1080 (19xx-20xx)
+    year_match = re.search(r'(?:[.\s\-_\(\[]|^)([12][90]\d{2})(?:[.\s\-_\)\]]|$)', name)
+    if year_match:
+        year = int(year_match.group(1))
+        # 暂时截断，后面可能还需要微调
+        title_part = name[:year_match.start()]
+    else:
+        title_part = name
+
+    # 3. 提取季集信息
+    season_num = None
+    episode_num = None
+
+    # Pattern A: S01E01 (标准季集)
+    se_match = re.search(r'[.\s\-_]S(\d{1,2})(?:E|EP)(\d{1,3})', name, re.IGNORECASE)
+
+    # Pattern B: S01-S02 (季度合集 - 常见于目录名)
+    s_range_match = re.search(r'[.\s\-_]S(\d{1,2})\s*-\s*S?(\d{1,2})', name, re.IGNORECASE)
+
+    # Pattern C: S01 (单季 - 常见于目录名)
+    s_only_match = re.search(r'[.\s\-_]S(\d{1,2})(?:$|[.\s\-_])', name, re.IGNORECASE)
+
+    if se_match:
+        # 命中 S01E01
+        season_num = int(se_match.group(1))
+        episode_num = int(se_match.group(2))
+        if se_match.start() < len(title_part):
+            title_part = title_part[:se_match.start()]
+
+    elif s_range_match:
+        # 命中 S01-S02 -> 视为第1季，且这是标题的边界
+        season_num = int(s_range_match.group(1))
+        if s_range_match.start() < len(title_part):
+            title_part = title_part[:s_range_match.start()]
+
+    elif s_only_match:
+        # 命中 S01
+        season_num = int(s_only_match.group(1))
+        if s_only_match.start() < len(title_part):
+            title_part = title_part[:s_only_match.start()]
+
+    else:
+        # Pattern D: 中文 第x集
+        cn_match = re.search(r'[.\s\-_]?第\s*(\d+|[零一二三四五六七八九十百千万]+)\s*[集话]', title_part)
+        if cn_match:
+            ep_val = cn_match.group(1)
+            episode_num = int(ep_val) if ep_val.isdigit() else chinese_to_arabic(ep_val)
+            season_num = extract_season(title_part) or 1
+            title_part = title_part[:cn_match.start()]
+
+    # 4. 【新增】兜底清洗：如果没找到年份也没找到季号，尝试用分辨率/技术参数截断
+    # 针对: "胆大党 1080P..." 这种既没年份也没S01的情况
+    if year == 0 and season_num is None:
+        # 匹配常见分辨率 1080P, 4K, 2160P, 720P
+        res_match = re.search(r'[.\s\-_](1080[PpIi]|4[Kk]|2160[Pp]|720[Pp])', title_part, re.IGNORECASE)
+        if res_match:
+            title_part = title_part[:res_match.start()]
+        else:
+            # 匹配编码 H264, AVC, HEVC
+            codec_match = re.search(r'[.\s\-_]([xXhH]\.?26[45]|HEVC|AVC)', title_part, re.IGNORECASE)
+            if codec_match:
+                title_part = title_part[:codec_match.start()]
+
+    # 5. 标准化清洗
+    title_part = title_part.replace('：', ' ').replace(':', ' ')
+    if '.' in title_part and not re.search(r'[\u4e00-\u9fff]', title_part):
+        title_part = title_part.replace('.', ' ').replace('_', ' ')
+    else:
+        title_part = title_part.replace('_', ' ')
+
+    title_part = re.sub(r'\s+', ' ', title_part).strip(' .-[]()')
+
+    logger.debug(f'[文件名解析] "{original}" -> "{title_part}", {year}, S{season_num}E{episode_num}')
+
+    return title_part, year, season_num, episode_num
 
 
 def extract_media_info(filename: str) -> Dict[str, str]:
-    """从文件名中提取分辨率、编码、来源等技术信息"""
+    """
+    基于 utils.MEDIA_MAPPING 提取详细技术信息
+    """
     info = {
-        "webSource": "",
-        "videoFormat": "",
-        "videoCodec": "",
-        "audioCodec": "",
-        "releaseGroup": "",
-        "edition": "",
-        "part": ""
+        "source": "", "video_codec": "", "audio_codec": "",
+        "resolution": "", "hdr": "", "fps": "", "channels": "",
+        "group": "", "part": ""
     }
 
     upper_name = filename.upper()
 
-    # Source
-    sources = {
-        'BLURAY': 'BluRay', 'REMUX': 'Remux', 'HDTV': 'HDTV',
-        'WEB-DL': 'WEB-DL', 'WEBRIP': 'WEBRip', 'DVD': 'DVD',
-        'BDRIP': 'BDRip'
-    }
-    for k, v in sources.items():
-        if k in upper_name:
-            info['webSource'] = v
-            break
+    for category, mapping in MEDIA_MAPPING.items():
+        detected = []
+        for standard_name, keywords_list in mapping.items():
+            for kw in keywords_list:
+                if kw.upper() in upper_name:
+                    detected.append(standard_name)
+                    break
 
-    # Resolution
+        if detected:
+            if category == 'source':
+                info['source'] = detected[0]
+            elif category == 'video_codec':
+                info['video_codec'] = ' '.join(detected)
+            elif category == 'audio_codec':
+                info['audio_codec'] = ' '.join(detected)
+            elif category == 'hdr':
+                info['hdr'] = ' '.join(detected)
+            elif category == 'quality_tag':
+                if info['video_codec']:
+                    info['video_codec'] += ' ' + ' '.join(detected)
+                else:
+                    info['video_codec'] = ' '.join(detected)
+
+    # 提取分辨率
     res_match = re.search(r'(2160[Pp]|4[Kk]|1080[PpIi]|720[Pp]|480[Pp]|576[Pp])', filename)
     if res_match:
-        info['videoFormat'] = res_match.group(1).lower()
+        info['resolution'] = res_match.group(1).lower()
 
-    # Video Codec
-    if re.search(r'[Hx].?264|AVC', upper_name):
-        info['videoCodec'] = 'x264'
-    elif re.search(r'[Hx].?265|HEVC', upper_name):
-        info['videoCodec'] = 'x265'
-    elif 'MPEG2' in upper_name:
-        info['videoCodec'] = 'mpeg2'
-    elif 'AV1' in upper_name:
-        info['videoCodec'] = 'av1'
-    elif 'VC-1' in upper_name or 'VC1' in upper_name:
-        info['videoCodec'] = 'vc1'
+    # 提取 FPS
+    fps_match = re.search(r'(\d{2,3})\s?FPS', upper_name)
+    if fps_match:
+        info['fps'] = f"{fps_match.group(1)}fps"
 
-    # Audio Codec
-    audio_map = {
-        'AAC': 'AAC', 'AC3': 'AC3', 'EAC3': 'EAC3', 'DDP': 'EAC3',
-        'DTS-HD': 'DTS-HD', 'DTS': 'DTS', 'TRUEHD': 'TrueHD',
-        'FLAC': 'FLAC', 'OPUS': 'Opus', 'MP3': 'MP3', 'ATMOS': 'Atmos'
-    }
-    for k, v in audio_map.items():
-        if k in upper_name:
-            info['audioCodec'] = v
-            break
+    # 提取声道
+    chan_match = re.search(r'([257]\.[01])', filename)
+    if chan_match:
+        info['channels'] = chan_match.group(1)
 
-    # Group
+    # 提取制作组
     group_match = re.search(r'-([a-zA-Z0-9_]+)(?:\[.*?\])?(?:\.[a-zA-Z0-9]{2,4})?$', filename)
     if group_match:
         grp = group_match.group(1)
-        if grp.upper() not in ['DL', 'RIP', 'H264', 'H265', 'HEVC', 'AAC', 'MKV', 'MP4']:
-            info['releaseGroup'] = grp
+        if grp.upper() not in ['DL', 'RIP', 'H264', 'H265', 'HEVC', 'AAC', 'MKV', 'MP4', 'STRM', 'ASS']:
+            info['group'] = grp
 
-    # Edition
-    if 'EXTENDED' in upper_name:
-        info['edition'] = 'Extended'
-    elif 'DIRECTOR' in upper_name:
-        info['edition'] = "Director's Cut"
-    elif 'UNCUT' in upper_name:
-        info['edition'] = 'Uncut'
-    elif 'REMASTERED' in upper_name:
-        info['edition'] = 'Remastered'
-
-    # Part / CD
+    # 提取分片
     part_match = re.search(r'(?:CD|PART|DISC)\s?(\d+)', upper_name)
     if part_match:
         info['part'] = f"CD{part_match.group(1)}"
@@ -610,44 +377,51 @@ def extract_media_info(filename: str) -> Dict[str, str]:
     return info
 
 
-def get_render_context(path: Path, info: Dict, season: int = None, episode: int = None) -> Dict:
-    """准备 Jinja2 渲染所需的上下文变量"""
-    tech_info = extract_media_info(path.name)
+# ================= 模板渲染相关 =================
 
-    # 基础 TMDB 信息
+def sanitize_variable(text: str) -> str:
+    if not text: return ""
+    text = str(text).replace('/', ' ').replace('\\', ' ')
+    text = text.replace(':', '：').replace('?', '？').replace('*', '') \
+        .replace('"', '').replace('<', '').replace('>', '').replace('|', '')
+    return ' '.join(text.split())
+
+
+def get_render_context(path: Path, info: Dict, season: int = None, episode: int = None) -> Dict:
+    tech = extract_media_info(path.name)
+
     raw_title = info.get('name') or info.get('title', '')
     raw_original_title = info.get('original_name') or info.get('original_title', '')
 
-    # 使用 cleaner.py 内部已有的 clean_noise 函数
     title = clean_noise(raw_title)
     original_title = clean_noise(raw_original_title)
 
-    # 年份
     date_str = info.get('release_date') or info.get('first_air_date') or '0000'
     year = date_str.split('-')[0]
     if year == '0000': year = ''
-
-    tmdb_id = str(info.get('id', ''))
 
     context = {
         'title': sanitize_variable(title),
         'en_title': sanitize_variable(original_title),
         'original_title': sanitize_variable(original_title),
         'year': year,
-        'tmdbid': tmdb_id,
+        'tmdbid': str(info.get('id', '')),
         'fileExt': path.suffix,
+
         # 技术参数
-        'webSource': sanitize_variable(tech_info['webSource']),
-        'videoFormat': sanitize_variable(tech_info['videoFormat']),
-        'videoCodec': sanitize_variable(tech_info['videoCodec']),
-        'audioCodec': sanitize_variable(tech_info['audioCodec']),
-        'releaseGroup': sanitize_variable(tech_info['releaseGroup']),
-        'edition': sanitize_variable(tech_info['edition']),
-        'part': sanitize_variable(tech_info['part']),
-        'customization': '',
+        'webSource': sanitize_variable(tech['source']),
+        'source': sanitize_variable(tech['source']),
+        'videoFormat': sanitize_variable(tech['resolution']),
+        'resolution': sanitize_variable(tech['resolution']),
+        'videoCodec': sanitize_variable(tech['video_codec']),
+        'audioCodec': sanitize_variable(tech['audio_codec']),
+        'releaseGroup': sanitize_variable(tech['group']),
+        'part': sanitize_variable(tech['part']),
+        'hdr': sanitize_variable(tech['hdr']),
+        'fps': sanitize_variable(tech['fps']),
+        'channels': sanitize_variable(tech['channels']),
     }
 
-    # 剧集特有
     if season is not None:
         context['season'] = season
         context['season_00'] = f"{season:02d}"
@@ -657,25 +431,69 @@ def get_render_context(path: Path, info: Dict, season: int = None, episode: int 
     if season is not None and episode is not None:
         context['season_episode'] = f"S{season:02d}E{episode:02d}"
     else:
-        # 如果获取不到季或集，给一个空字符串，防止报错
         context['season_episode'] = ""
 
     return context
 
 
 def render_path_template(template_str: str, context: Dict) -> Optional[Path]:
-    """渲染路径模板"""
     try:
-        logger.debug(f">>> [渲染路径] 正在渲染模板: [{template_str}]")
         env = Environment(loader=BaseLoader(), trim_blocks=True, lstrip_blocks=True)
         template = env.from_string(template_str)
         result = template.render(**context)
-
-        # 只清理绝对非法字符，保留路径分隔符 /
         result = result.replace(':', '：').replace('?', '？').replace('*', '') \
             .replace('"', '').replace('<', '').replace('>', '').replace('|', '')
-
         return Path(result.strip())
     except Exception as e:
         logger.error(f"[模板渲染错误] {e}")
         return None
+
+
+# ================= OLD =================
+
+def divide_by_year(filename: str) -> Tuple[str, int]:
+    t, y, _, _ = parse_filename(filename)
+    return t, y
+
+
+def to_sim_max(all_similaritys: List[Dict[float, int]]):
+    max_key = float('-inf')
+    max_value = 1
+    for similaritys in all_similaritys:
+        for key, value in similaritys.items():
+            if key > max_key:
+                max_key = key
+                max_value = value
+    return max_value if max_key > 0.6 else 1
+
+
+def find_unique_parts_in_videos(directory: Path):
+    files = [f for f in directory.iterdir() if f.suffix.lower() in VIDEO_SUFFIX]
+    filenames = [f.stem for f in files]
+    if len(filenames) < 2: return None
+
+    base = filenames[0]
+    matcher = difflib.SequenceMatcher(None, base, filenames[1])
+    match = matcher.find_longest_match(0, len(base), 0, len(filenames[1]))
+    if match.size > 3:
+        return [base[match.a: match.a + match.size]]
+    return None
+
+
+def remove_similar_part(common_parts: List[str], filename: str):
+    if not common_parts: return filename
+    for part in common_parts:
+        if len(part) > 3:
+            filename = filename.replace(part, '')
+    return filename.strip()
+
+
+def is_chinese_percentage_sufficient(text: str, threshold: float = 0.5) -> bool:
+    """
+    判断字符串中中文字符比例是否超过阈值。
+    用于搜索时决定是否剔除干扰的英文字符。
+    """
+    if not text:
+        return False
+    zh_count = len(re.findall(r'[\u4e00-\u9fff]', text))
+    return (zh_count / len(text)) > threshold
