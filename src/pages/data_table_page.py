@@ -302,6 +302,8 @@ class TableManager:
         batch_is_movie_text = settings.get('is_movie')
         batch_use_ai_text = settings.get('use_ai')
 
+        batch_scoped_cache = {}
+
         notify('正在后台进行批量处理，请稍候...')
 
         for row in rows:
@@ -315,7 +317,6 @@ class TableManager:
                     is_anime_orig = task_data.get('is_anime')
                     is_movie_orig = task_data.get('is_movie')
                     ai_used_orig = task_data.get('use_ai')
-                    tmdb_id_orig = task_data.get('tmdb_id')
                     season_id_orig = task_data.get('season_id')
                     offset_orig = task_data.get('episode_offset')
                 else:
@@ -323,11 +324,10 @@ class TableManager:
                     is_anime_orig = row.get('is_anime')
                     is_movie_orig = row.get('is_movie')
                     ai_used_orig = row.get('ai_used')
-                    tmdb_id_orig = row.get('tmdb_id')
                     season_id_orig = row.get('season')
                     offset_orig = row.get('episode_offset')
 
-                tmdb_id = batch_tmdb_id if batch_tmdb_id is not None else tmdb_id_orig
+                tmdb_id = batch_tmdb_id
                 season_id = int(batch_season_id) if batch_season_id else season_id_orig
                 offset = int(batch_offset) if batch_offset else offset_orig
                 if offset is None: offset = 0
@@ -357,7 +357,8 @@ class TableManager:
                     cus_season_id=season_id,
                     cus_tmdb_id=tmdb_id,
                     cus_offset=offset,
-                    use_ai=use_ai
+                    use_ai=use_ai,
+                    _scoped_cache=batch_scoped_cache  # <--- 传入临时缓存
                 )
 
                 if result is True:
@@ -627,6 +628,7 @@ async def handle_retry(ev: GenericEventArguments, is_batch: bool = False):
             cus_tmdb_id=tmdb_id,
             cus_offset=offset,
             use_ai=use_ai,
+            _scoped_cache={}
         )
         if not is_batch:
             notify('任务处理完成')

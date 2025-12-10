@@ -421,6 +421,7 @@ class Rename:
             cus_offset: Optional[int] = None,
             use_ai: Optional[bool] = None,
             _ai_attempted: bool = False,
+            _scoped_cache: Optional[Dict] = None,
     ):
         time.sleep(0.01)
 
@@ -852,6 +853,7 @@ class Rename:
             cus_offset: Optional[int] = None,
             use_ai: Optional[bool] = None,
             ai_attempted: bool = False,
+            _scoped_cache: Optional[Dict] = None,
     ):
         if not _uuid:
             _uuid = str(uuid.uuid4())
@@ -896,15 +898,17 @@ class Rename:
                 is_movie = False
 
             cache_key = str(path.parent.absolute())
-            filename = path.name
-            has_episode_pattern = extract_base_num(filename)
 
             from_ai_cache = False
 
             cached_data = None
-            with Rename._lock:
-                if cache_key in Rename._dir_cache:
-                    cached_data = Rename._dir_cache[cache_key]
+            if _scoped_cache is not None:
+                if cache_key in _scoped_cache:
+                    cached_data = _scoped_cache[cache_key]
+            else:
+                with Rename._lock:
+                    if cache_key in Rename._dir_cache:
+                        cached_data = Rename._dir_cache[cache_key]
 
             if is_weak and not cus_tmdb_id and not cus_name:
                 if cached_data:
@@ -965,13 +969,18 @@ class Rename:
                         is_movie_hint=is_movie
                     )
                     if not is_movie and path.parent != path.root:
-                        with Rename._lock:
-                            Rename._dir_cache[cache_key] = {
+                        if not is_movie and path.parent != path.root:
+                            new_cache_data = {
                                 'tmdb_id': str(info['id']),
                                 'name': name,
                                 'is_anime': is_anime,
                                 'is_movie': is_movie
                             }
+                            if _scoped_cache is not None:
+                                _scoped_cache[cache_key] = new_cache_data
+                            else:
+                                with Rename._lock:
+                                    Rename._dir_cache[cache_key] = new_cache_data
                 except Exception as e:
                     return self.error_reply(_uuid, str(e), path)
             else:
@@ -1040,13 +1049,17 @@ class Rename:
                 name, info, is_anime, is_movie = task_res
 
             if info and 'id' in info and path.parent != path.root and not is_movie:
-                with Rename._lock:
-                    Rename._dir_cache[cache_key] = {
-                        'tmdb_id': str(info['id']),
-                        'name': name,
-                        'is_anime': is_anime,
-                        'is_movie': is_movie
-                    }
+                new_cache_data = {
+                    'tmdb_id': str(info['id']),
+                    'name': name,
+                    'is_anime': is_anime,
+                    'is_movie': is_movie
+                }
+                if _scoped_cache is not None:
+                    _scoped_cache[cache_key] = new_cache_data
+                else:
+                    with Rename._lock:
+                        Rename._dir_cache[cache_key] = new_cache_data
 
             work_path = None
             season_id = 0
