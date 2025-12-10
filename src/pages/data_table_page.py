@@ -313,14 +313,12 @@ class TableManager:
 
                 task_data = get_task(uuid)
                 if task_data:
-                    name = task_data.get('name')
                     is_anime_orig = task_data.get('is_anime')
                     is_movie_orig = task_data.get('is_movie')
                     ai_used_orig = task_data.get('use_ai')
                     season_id_orig = task_data.get('season_id')
                     offset_orig = task_data.get('episode_offset')
                 else:
-                    name = row.get('name')
                     is_anime_orig = row.get('is_anime')
                     is_movie_orig = row.get('is_movie')
                     ai_used_orig = row.get('ai_used')
@@ -353,7 +351,7 @@ class TableManager:
                     _is_anime=is_anime,
                     _is_movie=is_movie,
                     _tuuid=uuid,
-                    cus_name=name,
+                    cus_name=None,
                     cus_season_id=season_id,
                     cus_tmdb_id=tmdb_id,
                     cus_offset=offset,
@@ -599,7 +597,6 @@ async def handle_retry(ev: GenericEventArguments, is_batch: bool = False):
         task_data = row_data
 
     path = task_data.get('path')
-    name = task_data.get('name')
     is_anime = task_data.get('is_anime')
     is_movie = task_data.get('is_movie')
     season_id = task_data.get('season_id')
@@ -623,7 +620,7 @@ async def handle_retry(ev: GenericEventArguments, is_batch: bool = False):
             _is_anime=is_anime,
             _is_movie=is_movie,
             _tuuid=uuid,
-            cus_name=name,
+            cus_name=None,
             cus_season_id=season_id,
             cus_tmdb_id=tmdb_id,
             cus_offset=offset,
