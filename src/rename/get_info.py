@@ -137,7 +137,10 @@ class Search:
         for i in range(retries):
             try:
                 tv = tmdb.TV(tmdb_id)
-                info = tv.info(language="zh-CN")
+                info = tv.info(
+                    language="zh-CN",
+                    append_to_response="credits,external_ids,content_ratings"
+                )
                 return info
             except Exception as e:
                 last_err = e
@@ -158,7 +161,10 @@ class Search:
         for i in range(retries):
             try:
                 movie = tmdb.Movies(tmdb_id)
-                info = movie.info(language="zh-CN")
+                info = movie.info(
+                    language="zh-CN",
+                    append_to_response="credits,external_ids,release_dates"
+                )
                 return info
             except Exception as e:
                 last_err = e
@@ -377,12 +383,15 @@ class Search:
                     return name, info
 
                 # --- API 搜不到，尝试网页搜兜底 ---
-                elif i == 0:  # 只在第一次尝试失败时调用网页搜，避免反复调用
+                elif i == 0:
                     web_id = self._search_tmdb_web(query, target_type="movie")
                     if web_id:
                         try:
                             movie = tmdb.Movies(web_id)
-                            info = movie.info(language="zh-CN")
+                            info = movie.info(
+                                language="zh-CN",
+                                append_to_response="credits,external_ids,release_dates"
+                            )
                             name = info["title"]
                             info["logo_path"] = self._get_logos(movie, "movie")
                             GLOBAL_MOVIE_CACHE[cache_key] = (name, info)
@@ -440,7 +449,10 @@ class Search:
                         if web_id:
                             try:
                                 tv = tmdb.TV(web_id)
-                                info = tv.info(language="zh-CN")
+                                info = tv.info(
+                                    language="zh-CN",
+                                    append_to_response="credits,external_ids,content_ratings"
+                                )
                                 name = info["name"]
                                 info["logo_path"] = self._get_logos(tv, "tv")
                                 GLOBAL_TV_CACHE[cache_key] = (name, info)

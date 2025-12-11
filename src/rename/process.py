@@ -1022,14 +1022,29 @@ class Rename:
 
             if not cus_tmdb_id:
                 search_candidates = []
-                search_candidates.append(rtpath_name)
-
+                split_parts = []
+                if '-' in rtpath_name:
+                    parts = re.split(r'\s+-\s+', rtpath_name)
+                    if len(parts) == 1 and re.search(r'[\u4e00-\u9fa5]-[a-zA-Z]', rtpath_name):
+                        parts = rtpath_name.split('-')
+                    if len(parts) > 1:
+                        for part in parts:
+                            clean_part = part.replace('.', ' ').strip()
+                            clean_part = re.sub(r'\s+', ' ', clean_part)
+                            if clean_part and len(clean_part) >= 2:
+                                split_parts.append(clean_part)
+                                logger.debug(f"[搜索增强] 提取分割关键词: '{clean_part}'")
+                for p in split_parts:
+                    if p not in search_candidates:
+                        search_candidates.append(p)
+                if rtpath_name and rtpath_name not in search_candidates:
+                    search_candidates.append(rtpath_name)
                 try:
                     name_no_brackets = re.sub(r'[\[【\(（].*?[\]】\)）]', '', rtpath_name)
                     name_no_brackets = re.sub(r'\s+', ' ', name_no_brackets).strip()
 
                     if name_no_brackets and name_no_brackets != rtpath_name:
-                        if len(name_no_brackets) >= 2:
+                        if len(name_no_brackets) >= 2 and name_no_brackets not in search_candidates:
                             search_candidates.append(name_no_brackets)
                             logger.debug(f"[搜索增强] 添加去括号关键词: '{name_no_brackets}'")
                 except Exception:
@@ -1061,16 +1076,6 @@ class Rename:
                                 )
                 except Exception as e:
                     logger.warning(f"[搜索增强] 解析上级目录名称出错: {e}")
-                if ' - ' in rtpath_name:
-                    parts = rtpath_name.split(' - ')
-                    for part in parts:
-                        clean_part = part.replace('.', ' ').strip()
-                        if clean_part and clean_part not in search_candidates:
-                            search_candidates.append(clean_part)
-                    if rtpath_name not in search_candidates:
-                        search_candidates.append(rtpath_name)
-                else:
-                    search_candidates.append(rtpath_name)
 
                 task_res = None
                 last_error = "未搜索到结果"
