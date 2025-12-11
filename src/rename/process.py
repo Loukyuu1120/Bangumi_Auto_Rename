@@ -423,6 +423,7 @@ class Rename:
             use_ai: Optional[bool] = None,
             _ai_attempted: bool = False,
             _scoped_cache: Optional[Dict] = None,
+            _ai_is_movie_hint: Optional[bool] = None,
     ):
         time.sleep(0.01)
 
@@ -437,7 +438,9 @@ class Rename:
             'cus_tmdb_id': cus_tmdb_id,
             'cus_offset': cus_offset,
             'use_ai': use_ai,
-            'ai_attempted': _ai_attempted
+            'ai_attempted': _ai_attempted,
+            '_scoped_cache': _scoped_cache or {},
+            'ai_is_movie_hint': _ai_is_movie_hint,
         }
 
         if path.is_file():
@@ -529,6 +532,7 @@ class Rename:
             path: Path,
             is_anime: Optional[bool] = None,
             is_movie: Optional[bool] = None,
+            ai_is_movie_hint: Optional[bool] = None,  # AI 提示，默认 None
     ) -> Union[Tuple[str, Dict, bool, bool], str]:
         time.sleep(0.005)
 
@@ -735,6 +739,9 @@ class Rename:
             else:
                 pos -= 0.4
 
+        if ai_is_movie_hint:
+            pos -= 0.4
+
         if pos > 0 or (is_movie is not None and not is_movie):
             logger.debug(f'[处理任务] 该文件可能为电视剧！(得分: {pos})')
             is_movie = False
@@ -827,14 +834,15 @@ class Rename:
                 return self.process(
                     path,
                     _is_anime=is_anime,
-                    _is_movie=ai_is_movie,
+                    _is_movie=None,
                     _tuuid=_uuid,
                     cus_name=ai_name,
                     cus_tmdb_id=ai_tmdb_id,
                     cus_offset=cus_offset,
                     cus_season_id=cus_season_id,
                     use_ai=use_ai,
-                    _ai_attempted=True
+                    _ai_attempted=True,
+                    _ai_is_movie_hint=ai_is_movie,
                 )
             else:
                 logger.warning("[AI处理] AI执行完毕，但未能推断出有效元数据")
@@ -855,6 +863,7 @@ class Rename:
             use_ai: Optional[bool] = None,
             ai_attempted: bool = False,
             _scoped_cache: Optional[Dict] = None,
+            ai_is_movie_hint: Optional[bool] = None,
     ):
         if not _uuid:
             _uuid = str(uuid.uuid4())
@@ -1059,7 +1068,7 @@ class Rename:
                     if idx > 0:
                         logger.info(f"[搜索重试] 尝试第 {idx + 1} 个关键词: {candidate_name}")
 
-                    res = self.check_task_type(_uuid, candidate_name, year, path, is_anime, is_movie)
+                    res = self.check_task_type(_uuid, candidate_name, year, path, is_anime, is_movie, ai_is_movie_hint)
 
                     if not isinstance(res, str):
                         task_res = res
