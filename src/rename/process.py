@@ -884,7 +884,7 @@ class Rename:
             effective_use_ai = use_ai if use_ai is not None else global_use_ai
             enable_secondary = cm.get_config('secondary_classification')
 
-            logger.debug(f'[处理任务] 开始处理{path.name}')
+            logger.info(f'[处理任务] 开始处理{path.name}')
 
             rtpath_name, year, detected_season, detected_episode = parse_filename(path.name)
             if cus_season_id is None and detected_season:
@@ -1025,6 +1025,21 @@ class Rename:
                             logger.debug(f"[搜索增强] 添加去括号关键词: '{name_no_brackets}'")
                 except Exception:
                     pass
+                try:
+                    parent = path.parent
+                    if parent != path.root:
+                        raw_parent_name = parent.name
+                        parent_clean, parent_year, _, _ = parse_filename(raw_parent_name)
+                        parent_clean = remove_tag(parent_clean).strip()
+                        if parent_clean and parent_clean != rtpath_name and len(parent_clean) >= 2:
+                            if parent_clean not in search_candidates:
+                                search_candidates.append(parent_clean)
+                                logger.debug(
+                                    f"[搜索增强] 添加父目录关键词: '{parent_clean}' "
+                                    f"(原父目录: '{raw_parent_name}', Year={parent_year})"
+                                )
+                except Exception as e:
+                    logger.warning(f"[搜索增强] 解析父目录名称出错: {e}")
                 if ' - ' in rtpath_name:
                     parts = rtpath_name.split(' - ')
                     for part in parts:
