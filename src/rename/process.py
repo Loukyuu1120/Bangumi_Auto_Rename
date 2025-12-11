@@ -1038,17 +1038,29 @@ class Rename:
                     parent = path.parent
                     if parent != path.root:
                         raw_parent_name = parent.name
-                        parent_clean, parent_year, _, _ = parse_filename(raw_parent_name)
-                        parent_clean = remove_tag(parent_clean).strip()
-                        if parent_clean and parent_clean != rtpath_name and len(parent_clean) >= 2:
-                            if parent_clean not in search_candidates:
-                                search_candidates.append(parent_clean)
+                        pname_cleaned = remove_tag(raw_parent_name).lower().strip()
+                        if is_season_name(pname_cleaned) and parent.parent != path.root:
+                            grandparent = parent.parent
+                            raw_candidate_name = grandparent.name
+                            candidate_name, candidate_year, _, _ = parse_filename(raw_candidate_name)
+                            logger.info(
+                                f"[搜索增强] 父目录 '{raw_parent_name}' 为季目录，"
+                                f"改用祖父目录 '{raw_candidate_name}' 作为搜索关键词"
+                            )
+                        else:
+                            raw_candidate_name = raw_parent_name
+                            candidate_name, candidate_year, _, _ = parse_filename(raw_parent_name)
+
+                        candidate_name = remove_tag(candidate_name).strip()
+                        if candidate_name and candidate_name != rtpath_name and len(candidate_name) >= 2:
+                            if candidate_name not in search_candidates:
+                                search_candidates.append(candidate_name)
                                 logger.debug(
-                                    f"[搜索增强] 添加父目录关键词: '{parent_clean}' "
-                                    f"(原父目录: '{raw_parent_name}', Year={parent_year})"
+                                    f"[搜索增强] 添加上级目录关键词: '{candidate_name}' "
+                                    f"(原目录名: '{raw_candidate_name}', Year={candidate_year})"
                                 )
                 except Exception as e:
-                    logger.warning(f"[搜索增强] 解析父目录名称出错: {e}")
+                    logger.warning(f"[搜索增强] 解析上级目录名称出错: {e}")
                 if ' - ' in rtpath_name:
                     parts = rtpath_name.split(' - ')
                     for part in parts:
