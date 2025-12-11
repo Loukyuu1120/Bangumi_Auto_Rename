@@ -1002,9 +1002,9 @@ class Rename:
                     logger.warning(f"[ID失效] ID {cus_tmdb_id} 查询失败: {e}，判定为脏数据，将使用文件名搜索...")
                     cus_tmdb_id = None
 
-                if not cus_tmdb_id:
-                    search_candidates = []
-                    search_candidates.append(rtpath_name)
+            if not cus_tmdb_id:
+                search_candidates = []
+                search_candidates.append(rtpath_name)
 
                 try:
                     name_no_brackets = re.sub(r'[\[【\(（].*?[\]】\)）]', '', rtpath_name)
