@@ -984,6 +984,15 @@ class Rename:
                         tmdb_id=int(cus_tmdb_id),
                         is_movie_hint=is_movie
                     )
+                    if extract_base_num(path.name) and is_movie:
+                        logger.warning(
+                            f"[ID冲突] 路径中的 TMDB ID {cus_tmdb_id} 返回的是电影 '{name}'，"
+                            f"但文件名 '{path.name}' 含有 SxxEyy/剧集特征，"
+                            f"判定该 ID 可能错误，将忽略此 ID，改用文件名搜索。"
+                        )
+                        cus_tmdb_id = None
+                        name = info = None
+                        is_movie = None
                     # ID 获取成功，信任它并写入缓存
                     if not is_movie and path.parent != path.root:
                         new_cache_data = {
