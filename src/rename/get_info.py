@@ -1,9 +1,9 @@
 import re
 import time
-import requests  # 新增
+import requests
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlencode, urljoin
-from bs4 import BeautifulSoup  # 新增
+from urllib.parse import urlencode
+from bs4 import BeautifulSoup
 
 import tmdbsimple as tmdb
 
@@ -98,7 +98,6 @@ class Search:
             logger.warning(f"[TMDB Web] 网页搜索发生异常: {e}")
 
         return None
-
 
     def _select_best_result(
             self,
@@ -376,7 +375,12 @@ class Search:
                     target = search.results[selected_idx]
                     name = target["title"]
                     movie = tmdb.Movies(target["id"])
-                    info = movie.info(language="zh-CN")
+
+                    info = movie.info(
+                        language="zh-CN",
+                        append_to_response="credits,external_ids,release_dates"
+                    )
+
                     info["logo_path"] = self._get_logos(movie, "movie")
 
                     GLOBAL_MOVIE_CACHE[cache_key] = (name, info)
@@ -438,7 +442,12 @@ class Search:
                         target = search.results[selected_idx]
                         name = target["name"]
                         tv = tmdb.TV(target["id"])
-                        info = tv.info(language="zh-CN")
+
+                        info = tv.info(
+                            language="zh-CN",
+                            append_to_response="credits,external_ids,content_ratings"
+                        )
+
                         info["logo_path"] = self._get_logos(tv, "tv")
 
                         GLOBAL_TV_CACHE[cache_key] = (name, info)
