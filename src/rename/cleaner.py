@@ -219,6 +219,34 @@ def extract_number(filename: str) -> Optional[float]:
     return None
 
 
+def extract_tmdb_id(text: str) -> Optional[str]:
+    """
+    从字符串中提取 TMDB ID
+    支持格式:
+    - {tmdb-12345}
+    - [tmdbid=12345]
+    - tmdb-12345
+    """
+    if not text:
+        return None
+
+    # 常见的 ID 标记格式
+    patterns = [
+        r'\{tmdb-(\d+)\}',  # {tmdb-12345}
+        r'\[tmdbid=(\d+)\]',  # [tmdbid=12345]
+        r'tmdb-(\d+)',  # tmdb-12345 (作为文件名一部分)
+        r'\{tmdbid-(\d+)\}',  # {tmdbid-12345}
+        r'\[tmdb-(\d+)\]'  # [tmdb-12345]
+    ]
+
+    for p in patterns:
+        match = re.search(p, text, re.IGNORECASE)
+        if match:
+            return match.group(1)
+
+    return None
+
+
 def is_weak_filename(filename: str) -> bool:
     """
     判断是否为弱文件名（不包含标题，只有集数信息）
@@ -257,6 +285,10 @@ def is_season_name(filename: str) -> bool:
 
     # 3. 季号范围 (S01-S02, Season 1-2)
     if re.fullmatch(r'(S|Season\s*)\d+\s*-\s*(S|Season\s*)?\d+', stem, re.IGNORECASE):
+        return True
+
+    # 4. 特别标记 (SP, OVA, Special, Specials)
+    if re.fullmatch(r'(SP|OVA|specials?)', stem, re.IGNORECASE):
         return True
 
     for p in SEASON_PATTERNS:

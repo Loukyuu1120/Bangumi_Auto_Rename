@@ -250,37 +250,52 @@ class AIClient:
     @staticmethod
     def build_metadata_prompt(context_data: Dict) -> str:
         """
-        构建元数据分析的提示词
+        构建元数据分析的提示词 (增强版)
 
         Args:
-            context_data: 包含 folder_name 和 file_names
+            context_data: 包含 folder_name, full_path, file_names 等
 
         Returns:
             提示词字符串
         """
         folder_name = context_data.get("folder_name", "Unknown")
+        full_path = context_data.get("full_path", "")  # [新增] 获取完整路径
         file_names = context_data.get("file_names", [])
         total_files = context_data.get("total_files", len(file_names))
 
         files_str = "\n".join([f"- {name}" for name in file_names])
 
         prompt = f"""
-请分析以下文件路径信息，请重视()里面的年份信息，推断该媒体对应的官方名称（Official Name）、发行年份和类型（TV或Movie）。
+    你是一个专业的媒体元数据分析专家。请分析以下文件路径信息，提取用于 TMDB 搜索的**核心元数据**。
 
-目录名称: 
-{folder_name}
+    主要分析名称: 
+    {folder_name}
 
-包含的文件 (共 {total_files} 个，仅列出部分):
-{files_str}
+    完整路径参考 (包含潜在的ID或父级目录信息):
+    {full_path}
 
-要求：
-1. 请提取最准确的官方名称（优先文件名中的名字，其次英文名，再次原名）。
-2. 如果可以确定，请提供发行年份。
-3. 根据文件名特征（如S01E01表示TV，年份+文件名表示Movie）判断是剧集还是电影。
-4. 如果文件名中包含明显的TMDB ID信息，请提取。
-5. 请给出你对这次推断的置信度 (High/Medium/Low)。
+    包含的文件 (共 {total_files} 个，仅列出部分):
+    {files_str}
 
-"""
+    请严格遵守以下步骤进行推断：
+
+    1. **提取 TMDB ID (最高优先级)**：
+       - 仔细检查【完整路径参考】和【文件名】。
+       - 查找 `{{tmdb-xxxx}}`、`[tmdbid=xxxx]` 或路径中的数字ID标记。
+       - 如果发现，提取它！这比推断名字更准确。
+
+    2. **清洗官方名称 (Official Name)**：
+       - 从【主要分析名称】中提取核心标题。
+       - **必须移除**：版本修饰词（如 "新编集版", "重制版", "Director's Cut"）、制作组信息、分辨率、语种等。
+       - **保留原名**：如果是中文名，保留中文；如果是英文，保留英文。**绝对禁止**将中文标题翻译成英文（例如不要把 "从零开始" 翻译成 "From Zero"）。
+
+    3. **确定年份**：
+       - 优先查找圆括号 `(xxxx)` 中的年份。如果【主要分析名称】里没有，去【完整路径参考】里找。
+
+    4. **判断类型**：
+       - 包含 SxxExx 为 TV，否则倾向于 Movie。
+
+    """
         return prompt
 
     @staticmethod
@@ -289,8 +304,8 @@ class AIClient:
         获取元数据分析的系统提示词
         """
         return (
-            "你是一个媒体文件元数据专家。你的任务是根据混乱的文件名和目录名，"
-            "精准识别出电影或剧集的标准名称和年份。你只输出JSON格式的结果。"
+            "你是一个严格的媒体文件元数据提取器。你的任务是从文件路径中提取用于数据库搜索的标准名称、年份和ID。"
+            "禁止意译标题，必须移除噪音词。你只输出纯 JSON 格式的结果，不要包含 Markdown 标记。"
         )
 
     @staticmethod

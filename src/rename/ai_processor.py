@@ -7,6 +7,7 @@ from .utils import VIDEO_SUFFIX
 from ..ai.client import AIClient
 from ..ai.models import AIAnalysisResult
 from ..ai.video_analyzer import VideoAnalyzer
+from ..rename.cleaner import is_season_name, is_weak_filename
 
 
 class AIProcessor:
@@ -79,50 +80,43 @@ class AIProcessor:
             logger.info("[AI搜索] AI功能未启用，跳过智能分析")
             return None
 
-        if path.is_file():
+        if context_hint:
+            target_name_for_ai = context_hint
+        elif path.is_file():
+            # 如果是弱文件名，逻辑保持不变，取父目录
             stem = path.stem
-            # 匹配纯数字 或 S01E01 格式
-            is_weak_name = stem.isdigit() or \
-                           len(stem) < 3 or \
-                           re.match(r'(?i)^s\d+e\d+', stem) or \
-                           re.match(r'(?i)^\d+(\.\d+)?$', stem)
-
+            is_weak_name = is_weak_filename(stem)
             if is_weak_name:
-                # 如果文件名太弱，必须借用父目录的名字
-                parent_name = path.parent.name
-
-                if re.match(r'^(season|series|s)\s*\d*$', parent_name.lower()) or \
-                        re.match(r'^(specials?|sp|ova)$', parent_name.lower()):
-                    folder_name = path.parent.parent.name
+                parent = path.parent
+                if is_season_name(parent.name):
+                    target_name_for_ai = parent.parent.name
                 else:
-                    folder_name = parent_name
+                    target_name_for_ai = parent.name
             else:
-                folder_name = stem
+                target_name_for_ai = stem
+        else:
+            target_name_for_ai = path.name
+        full_path_str = str(path.absolute())
 
+        if path.is_file():
             video_files = [path]
         else:
-            folder_name = path.name
             video_files = self._collect_video_files(path)
 
-        if context_hint:
-            folder_name = context_hint
-            logger.info(f"[AI搜索] 使用上下文提示覆盖文件夹名称{context_hint}")
-
         if not video_files:
-            logger.warning("[AI搜索] 未找到视频文件，无法进行AI元数据分析")
             return None
 
-        # 3. 提取文件名用于AI分析
         file_names_context = self._get_file_names_context(video_files)
 
         # 构造给AI的上下文数据
         context_data = {
-            "folder_name": folder_name,
-            "file_names": file_names_context,
+            "folder_name": target_name_for_ai,  # 主要分析对象
+            "full_path": full_path_str,         # 辅助信息：包含ID、完整层级
+            "file_names": file_names_context,   # 文件列表
             "total_files": len(video_files)
         }
 
-        logger.info(f"[AI搜索] 正在请求AI推断元数据: {folder_name} (参考文件数: {len(file_names_context)})")
+        logger.info(f"[AI搜索] 正在请求AI推断元数据: {target_name_for_ai}，共{len(video_files)}个视频文件")
 
         try:
             # 调用 AI Client 进行分析

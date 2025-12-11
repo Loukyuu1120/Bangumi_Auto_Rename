@@ -28,6 +28,7 @@ from .cleaner import (
     divide_by_year,
     extract_number,
     extract_season,
+    extract_tmdb_id,
     remove_episode,
     extract_base_num,
     match_and_extract,
@@ -888,6 +889,21 @@ class Rename:
             rtpath_name, year, detected_season, detected_episode = parse_filename(path.name)
             if cus_season_id is None and detected_season:
                 cus_season_id = detected_season
+            if not cus_tmdb_id:
+                extracted_id = extract_tmdb_id(path.name)
+
+                if not extracted_id:
+                    extracted_id = extract_tmdb_id(path.parent.name)
+
+                if not extracted_id and path.parent != path.root:
+                    pname = path.parent.name
+                    if is_season_name(remove_tag(pname).lower().strip()):
+                        if path.parent.parent != path.root:
+                            extracted_id = extract_tmdb_id(path.parent.parent.name)
+
+                if extracted_id:
+                    logger.info(f"[路径解析] 从路径中提取到 TMDB ID: {extracted_id}")
+                    cus_tmdb_id = extracted_id
 
             INVALID_NAMES = ['未知', 'unknown', 'none', 'null', 'tba', '未识别到官方名称', '待定']
             name_check = re.sub(r'[\W_]+', '', rtpath_name.replace(path.suffix, "") if path.suffix else rtpath_name)
