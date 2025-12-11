@@ -35,11 +35,13 @@ class TaskConfigDialog(ui.dialog):
                         on_change=lambda e: self._set_anime(e.value)
                     ).props('dense')
 
-                RedInput(
+                ui.textarea(
                     label='排除路径/文件名关键词 (支持正则)',
-                    placeholder='例如: sample|feature|.nfo|Thumbs.db',
+                    placeholder='例如:\nsample\nfeature\n.nfo', # 修改占位符提示
                     on_change=lambda e: self._set_exclude(e.value)
-                ).props('clearable outlined').classes('w-full').tooltip('匹配到的文件将被忽略')
+                ).props('clearable outlined rows=4').classes('w-full').tooltip(
+                    '支持一行一个关键词，或者使用 | 分隔'
+                )
 
             ui.separator().classes('q-mt-lg q-mb-sm')
 
@@ -61,10 +63,14 @@ class TaskConfigDialog(ui.dialog):
 def _compile_regex(pattern_str: str) -> Optional[re.Pattern]:
     if not pattern_str or not pattern_str.strip():
         return None
+    lines = [line.strip() for line in pattern_str.split('\n') if line.strip()]
+    if not lines:
+        return None
+    final_pattern_str = '|'.join(lines)
     try:
-        return re.compile(pattern_str, re.IGNORECASE)
+        return re.compile(final_pattern_str, re.IGNORECASE)
     except re.error as e:
-        logger.error(f"[手动任务] 正则表达式错误 '{pattern_str}': {e}")
+        logger.error(f"[手动任务] 正则表达式错误 '{final_pattern_str}': {e}")
         return None
 
 
