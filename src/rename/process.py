@@ -984,24 +984,27 @@ class Rename:
                         tmdb_id=int(cus_tmdb_id),
                         is_movie_hint=is_movie
                     )
+                    # ID 获取成功，信任它并写入缓存
                     if not is_movie and path.parent != path.root:
-                        if not is_movie and path.parent != path.root:
-                            new_cache_data = {
-                                'tmdb_id': str(info['id']),
-                                'name': name,
-                                'is_anime': is_anime,
-                                'is_movie': is_movie
-                            }
-                            if _scoped_cache is not None:
-                                _scoped_cache[cache_key] = new_cache_data
-                            else:
-                                with Rename._lock:
-                                    Rename._dir_cache[cache_key] = new_cache_data
+                        new_cache_data = {
+                            'tmdb_id': str(info['id']),
+                            'name': name,
+                            'is_anime': is_anime,
+                            'is_movie': is_movie
+                        }
+                        if _scoped_cache is not None:
+                            _scoped_cache[cache_key] = new_cache_data
+                        else:
+                            with Rename._lock:
+                                Rename._dir_cache[cache_key] = new_cache_data
                 except Exception as e:
-                    return self.error_reply(_uuid, str(e), path)
-            else:
-                search_candidates = []
-                search_candidates.append(rtpath_name)
+                    # ID 获取失败 (404等)，视为脏数据，重置 ID 并回退到下方搜索逻辑
+                    logger.warning(f"[ID失效] ID {cus_tmdb_id} 查询失败: {e}，判定为脏数据，将使用文件名搜索...")
+                    cus_tmdb_id = None
+
+                if not cus_tmdb_id:
+                    search_candidates = []
+                    search_candidates.append(rtpath_name)
 
                 try:
                     name_no_brackets = re.sub(r'[\[【\(（].*?[\]】\)）]', '', rtpath_name)
