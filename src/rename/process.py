@@ -918,9 +918,7 @@ class Rename:
             name_check = re.sub(r'[\W_]+', '', rtpath_name.replace(path.suffix, "") if path.suffix else rtpath_name)
             is_weak = is_weak_filename(name_check)
 
-            if is_weak:
-                logger.info(f"[智能判断] 文件名 '{path.name}' 判定为弱文件名，强制作为剧集(TV)处理。")
-                is_movie = False
+            if is_weak: logger.info(f"[智能判断] 文件名 '{path.name}' 判定为弱文件名，将尝试回溯父目录搜索。")
 
             cache_key = str(path.parent.absolute())
 

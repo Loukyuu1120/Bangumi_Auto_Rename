@@ -291,6 +291,10 @@ def is_season_name(filename: str) -> bool:
     if re.fullmatch(r'(SP|OVA|specials?)', stem, re.IGNORECASE):
         return True
 
+    # 5. 常见季号前缀
+    if re.match(r'(?i)^(Season|S)\s*\d+([ ._-]|$)', stem):
+        return True
+
     for p in SEASON_PATTERNS:
         # 尝试移除季号
         remain = re.sub(p, '', stem, flags=re.IGNORECASE).strip()
