@@ -25,33 +25,51 @@ class MonitorManager:
         monitor_service.stop()
 
     def start_from_config(self) -> None:
-        """根据当前配置启动监控（仅在程序启动时调用一次）"""
+        """根据当前配置启动监控"""
         if not cm.get_config("monitor_enabled"):
             logger.info("[监控管理器] 监控未启用，跳过启动")
             return
 
-        monitor_paths_conf = cm.get_config("monitor_paths") or []
+        monitor_configs = cm.get_config("monitor_paths") or []
         exclude_dirs_conf = cm.get_config("monitor_exclude_dirs") or []
 
-        # --- 配置解析 (兼容 JSON 字符串或列表) ---
-        monitor_paths_conf = self._parse_config_list(monitor_paths_conf)
+        # --- 统一格式化为列表 ---
+        if isinstance(monitor_configs, str):
+            # 兼容旧配置是纯字符串的情况
+            try:
+                monitor_configs = json.loads(monitor_configs)
+            except:
+                monitor_configs = [monitor_configs]
+
         exclude_dirs = self._parse_config_list(exclude_dirs_conf)
 
-        if not monitor_paths_conf:
+        if not monitor_configs:
             logger.warning("[监控管理器] monitor_paths 为空，未启动任何监控")
             return
 
-        # --- 整理有效路径 ---
-        valid_paths: List[Path] = []
-        for path_str in monitor_paths_conf:
+        # --- 整理路径和配置映射 ---
+        # 结构: {Path('/data/tv'): {'tv_format': '...', ...}}
+        valid_path_configs = {}
+
+        for item in monitor_configs:
+            path_str = ""
+            config_data = {}
+
+            if isinstance(item, str):
+                path_str = item
+            elif isinstance(item, dict):
+                path_str = item.get("path", "")
+                config_data = item  # 保留整个字典配置
+
             if not path_str:
                 continue
-            path = Path(path_str)
-            valid_paths.append(path)
+
+            path_obj = Path(path_str)
+            valid_path_configs[path_obj] = config_data
 
         # --- 调用 Service 统一启动 ---
-        # 即使只有一个路径，也传给 Service，由 Service 统一管理队列
-        monitor_service.start(valid_paths, exclude_dirs)
+        # 传入带有配置信息的字典
+        monitor_service.start(valid_path_configs, exclude_dirs)
 
     def restart_from_config(self) -> None:
         """根据当前配置重启监控（保存配置后调用）"""

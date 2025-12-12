@@ -96,142 +96,150 @@ class BatchEditDialog(ui.dialog):
 
 class TableManager:
     def __init__(self):
-        self.all_rows = []
+        self.cache: Dict[str, Dict] = {}
+        self.file_list: List[Path] = []
+
         self.filter_text = ''
         self.filter_status = '全部'
         self.filter_season = None
         self.table = None
         self.selected_rows = []
-
-        # 引用 UI 元素以便直接更新文本
         self.selection_label = None
 
-        # --- 分页参数 ---
         self.page = 1
         self.page_size = 100
         self.total_items = 0
 
+        self.is_fully_loaded = False # 标记是否已将所有文件载入缓存
+
+    def _read_task_file(self, file_path: Path) -> Optional[Dict]:
+        """读取单个文件并格式化，优先使用缓存"""
+        uuid = file_path.stem
+        if uuid in self.cache:
+            return self.cache[uuid]
+
+        try:
+            task_data = get_task(uuid)
+            if not task_data: return None
+
+            status = '失败' if task_data.get('error') else '成功'
+            error_msg = task_data.get('error', '')
+
+            row = {
+                'id': uuid, # 用于 key
+                'uuid': uuid,
+                'path': task_data.get('path', ''),
+                'target_path': task_data.get('target_path', ''),
+                'name': task_data.get('name', '未识别'),
+                'season': task_data.get('season_id', ''),
+                'status': status,
+                'error_msg': error_msg,
+                'is_anime': task_data.get('is_anime', False),
+                'is_movie': task_data.get('is_movie', False),
+                'ai_used': task_data.get('use_ai', False),
+                'tmdb_id': task_data.get('tmdb_id', ''),
+                'episode_offset': task_data.get('episode_offset', 0),
+                'value': '操作',
+                '_mtime': file_path.stat().st_mtime
+            }
+            self.cache[uuid] = row
+            return row
+        except Exception:
+            return None
+
     def load_data(self):
-        """加载数据并应用当前的过滤器"""
-        rows = []
+        """只扫描文件列表，不读取内容"""
         if not TASK_PATH.exists():
-            self.all_rows = []
-            self.filter_data()
+            self.file_list = []
+            self.total_items = 0
             return
 
-        sorted_files = sorted(
-            TASK_PATH.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True
+        try:
+            self.file_list = sorted(
+                TASK_PATH.glob('*.json'),
+                key=lambda x: x.stat().st_mtime,
+                reverse=True
+            )
+            self.is_fully_loaded = False
+        except Exception as e:
+            logger.error(f"File list error: {e}")
+            self.file_list = []
+
+    def get_current_page_data(self) -> List[Dict]:
+        """获取当前页数据"""
+
+        # 判断是否有过滤条件
+        has_filter = (
+                bool(self.filter_text) or
+                self.filter_status != '全部' or
+                bool(self.filter_season)
         )
-        for index, i in enumerate(sorted_files):
-            # 忽略非 json 文件
-            if i.suffix.lower() != '.json':
-                continue
 
-            try:
-                task_data = get_task(i.stem)
+        if not has_filter:
+            # === 模式 A：无过滤 (高性能后端分页) ===
+            self.total_items = len(self.file_list)
 
-                # 如果文件存在但内容为空或解析后为None
-                if not task_data:
-                    raise ValueError("文件内容为空")
+            # 计算切片
+            start = (self.page - 1) * self.page_size
+            end = start + self.page_size
 
-                if task_data.get('error'):
-                    status = '失败'
-                    error_msg = task_data['error']
-                else:
-                    status = '成功'
-                    error_msg = ''
+            # 越界修正
+            if start >= self.total_items:
+                start = 0
+                end = self.page_size
+                self.page = 1
 
-                source_path = task_data.get('path', '')
-                target_path = task_data.get('target_path', '')
-                tmdb_id = task_data.get('tmdb_id', '')
+            target_files = self.file_list[start:end]
+            rows = []
+            for f in target_files:
+                r = self._read_task_file(f)
+                if r: rows.append(r)
 
-                ai_used = task_data.get('use_ai', False)
+            return rows
 
-                rows.append(
-                    {
-                        'id': index,
-                        'uuid': task_data.get('uuid', i.stem),
-                        'path': source_path,
-                        'target_path': target_path,
-                        'name': task_data.get('name', '未识别'),
-                        'season': task_data.get('season_id', ''),
-                        'status': status,
-                        'error_msg': error_msg,
-                        'is_anime': task_data.get('is_anime', False),
-                        'is_movie': task_data.get('is_movie', False),
-                        'ai_used': ai_used,
-                        'tmdb_id': tmdb_id,
-                        'episode_offset': task_data.get('episode_offset', 0),
-                        'value': '操作',
-                    }
-                )
-            except Exception as e:
-                logger.error(f"Error loading task {i}: {e}")
-                rows.append({
-                    'id': index,
-                    'uuid': i.stem,
-                    'path': '文件损坏或格式错误',
-                    'target_path': '',
-                    'name': f'无法读取的任务 ({i.name})',
-                    'season': '',
-                    'status': '失败',
-                    'error_msg': f"文件读取错误: {str(e)}。请尝试删除此记录。",
-                    'is_anime': False,
-                    'is_movie': False,
-                    'ai_used': False,
-                    'tmdb_id': '',
-                    'episode_offset': 0,
-                    'value': '操作',
-                })
+        else:
+            # === 模式 B：有过滤 (需加载数据后内存过滤) ===
 
-        self.all_rows = rows
-        self.filter_data()
+            # 1. 懒加载：如果还没全量加载，现在加载
+            if not self.is_fully_loaded:
+                # 这里的性能瓶颈：首次搜索时需要读取所有文件
+                # 10000 个文件可能需要 2-5 秒
+                notify('正在加载所有记录以进行搜索，请稍候...', type='info')
+                for f in self.file_list:
+                    if f.stem not in self.cache:
+                        self._read_task_file(f)
+                self.is_fully_loaded = True
 
-    def get_filtered_rows(self):
-        """纯计算：根据当前条件返回过滤后的数据列表（不分页）"""
-        filtered = []
+            # 2. 内存过滤
+            filtered = []
+            txt = self.filter_text.lower().strip()
+            status = self.filter_status
+            season = str(self.filter_season).strip() if self.filter_season else ''
 
-        # 预处理条件
-        txt = str(self.filter_text).lower().strip() if self.filter_text else ''
-        status = self.filter_status
-        season = str(self.filter_season).strip() if (
-                self.filter_season is not None and str(self.filter_season).strip()) else ''
+            # 使用 list(self.cache.values()) 可能乱序，最好重新按时间排序
+            # 优化：如果 self.file_list 是有序的，按这个顺序去 cache 取比较好
+            for f in self.file_list:
+                row = self.cache.get(f.stem)
+                if not row: continue
 
-        for row in self.all_rows:
-            # 1. 文本
-            if txt:
-                r_name = str(row.get('name') or '').lower()
-                r_path = str(row.get('path') or '').lower()
-                if txt not in r_name and txt not in r_path:
+                # 文本过滤
+                if txt and (txt not in str(row['name']).lower() and txt not in str(row['path']).lower()):
+                    continue
+                # 状态过滤
+                if status != '全部' and row['status'] != status:
+                    continue
+                # 季号过滤
+                if season and str(row['season']).strip() != season:
                     continue
 
-            # 2. 状态
-            if status != '全部' and row.get('status') != status:
-                continue
+                filtered.append(row)
 
-            # 3. 季号
-            if season:
-                r_season = str(row.get('season')).strip() if row.get('season') is not None else ''
-                if r_season != season:
-                    continue
+            self.total_items = len(filtered)
 
-            filtered.append(row)
-
-        self.total_items = len(filtered)
-        return filtered
-
-    def get_current_page_data(self):
-        """获取当前页的数据切片"""
-        filtered = self.get_filtered_rows()
-
-        # 简单的越界保护
-        max_page = math.ceil(self.total_items / self.page_size) if self.page_size > 0 else 1
-        if self.page > max_page and max_page > 0:
-            self.page = max_page
-
-        start = (self.page - 1) * self.page_size
-        end = start + self.page_size
-        return filtered[start:end]
+            # 3. 内存分页
+            start = (self.page - 1) * self.page_size
+            end = start + self.page_size
+            return filtered[start:end]
 
     def filter_data(self):
         refresh_table_view.refresh()
@@ -379,12 +387,14 @@ class TableManager:
         path1 = TASK_PATH / f'{uuid}.json'
         path2 = RECORD_PATH / f'{uuid}.json'
 
-        if path1.exists():
-            path1.unlink()
-        if path2.exists():
-            path2.unlink()
+        if path1.exists(): path1.unlink()
+        if path2.exists(): path2.unlink()
 
-        self.all_rows = [row for row in self.all_rows if row['uuid'] != uuid]
+        if uuid in self.cache:
+            del self.cache[uuid]
+
+        self.file_list = [f for f in self.file_list if f.stem != uuid]
+        self.total_items = max(0, self.total_items - 1)
 
     def batch_delete(self):
         rows = list(self.selected_rows)
@@ -399,12 +409,15 @@ class TableManager:
         self.refresh_table()
 
     def refresh_table(self):
+        """刷新逻辑：重新扫描文件列表（检测外部变动），清空状态"""
         self.selected_rows = []
-        # 清空 UI 状态
-        self.update_selection_label()
         if self.table and self.table.selected:
             self.table.selected.clear()
-        self.load_data()
+        self.update_selection_label()
+
+        self.load_data()  # 重新扫描文件列表
+        # self.cache = {}
+
         refresh_table_view.refresh()
 
 

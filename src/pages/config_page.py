@@ -296,23 +296,9 @@ class ConfigPage(ui.dialog):
                                 "兼容模式: 使用轮询(Polling)，CPU占用稍高但绝对稳定，适合大批量文件或NFS挂载。"
                             )
                     elif cn == "monitor_paths":
-                        # config.json 里是列表，这里用多行文本每行一个路径
-                        current_value = cm.get_config(cn) or []
-                        if isinstance(current_value, list):
-                            text_value = "\n".join(current_value)
-                        else:
-                            text_value = str(current_value)
-
-                        ui.textarea(
-                            value=text_value,
-                            placeholder="每行一个要监控的完整目录路径，例如：\n/media/downloads/anime\n/media/downloads/movie",
-                            on_change=lambda e, c=cn: self._change(
-                                c,
-                                [line.strip() for line in (e.value or "").splitlines() if line.strip()],
-                            ),
-                        ).props("filled").props("rows=3").style(
-                            "flex-grow: 2"
-                        )
+                        # 添加监控目录编辑器
+                        with ui.column().style("flex-grow: 2"):
+                            self._render_monitor_paths_editor()
                     elif cn == "docker_mnt":
                         # 处理配置：支持从旧的字符串格式自动兼容为列表
                         current_val = cm.get_config(cn)
@@ -808,6 +794,93 @@ class ConfigPage(ui.dialog):
                 RedButton("关闭", on_click=dialog.close)
 
         dialog.open()
+
+    def _render_monitor_paths_editor(self):
+        """渲染监控路径编辑器"""
+        # 获取当前配置，兼容旧的字符串列表格式
+        current_data = cm.get_config("monitor_paths") or []
+
+        self.monitor_paths_data = []
+        for item in current_data:
+            if isinstance(item, str):
+                self.monitor_paths_data.append({"path": item, "tv_format": "", "movie_format": ""})
+            elif isinstance(item, dict):
+                # 补全字段
+                item.setdefault("tv_format", "")
+                item.setdefault("movie_format", "")
+                self.monitor_paths_data.append(item)
+
+        self.path_container = ui.column().classes("w-full gap-2")
+
+        def _refresh_list():
+            self.path_container.clear()
+            with self.path_container:
+                for idx, item in enumerate(self.monitor_paths_data):
+                    with ui.card().classes("w-full p-2 border-1 border-gray-200"):
+                        with ui.row().classes("w-full items-center gap-2"):
+                            # 路径输入框
+                            path_input = ui.input(
+                                label=f"监控路径 #{idx + 1}",
+                                value=item["path"],
+                                on_change=lambda e, i=idx: self._update_path_data(i, "path", e.value)
+                            ).props("filled dense").style("flex-grow: 1")
+
+                            # 选择文件夹按钮
+                            RedButton("📂",
+                                      on_click=lambda i=idx, inp=path_input: self._pick_folder_for_item(i, inp)).props(
+                                "dense flat")
+
+                            # 删除按钮
+                            RedButton("🗑️", on_click=lambda i=idx: _remove_path(i)).props("dense flat color=grey")
+
+                        # 高级配置折叠面板
+                        with ui.expansion("独立重命名模板设置 (点击展开)", icon="tune").classes(
+                                "w-full text-sm text-gray-600"):
+                            with ui.column().classes("w-full gap-2 p-2 bg-gray-50"):
+                                ui.label("留空则使用全局配置。变量与全局设置一致。").classes("text-xs text-gray-400")
+                                ui.input(
+                                    label="📺 剧集重命名模板 (TV)",
+                                    placeholder="全局默认",
+                                    value=item.get("tv_format", ""),
+                                    on_change=lambda e, i=idx: self._update_path_data(i, "tv_format", e.value)
+                                ).props("filled dense classes=w-full")
+
+                                ui.input(
+                                    label="🎬 电影重命名模板 (Movie)",
+                                    placeholder="全局默认",
+                                    value=item.get("movie_format", ""),
+                                    on_change=lambda e, i=idx: self._update_path_data(i, "movie_format", e.value)
+                                ).props("filled dense classes=w-full")
+
+        def _add_path():
+            self.monitor_paths_data.append({"path": "", "tv_format": "", "movie_format": ""})
+            _refresh_list()
+
+        def _remove_path(index):
+            if 0 <= index < len(self.monitor_paths_data):
+                self.monitor_paths_data.pop(index)
+                _refresh_list()
+
+        # 初始渲染
+        _refresh_list()
+
+        # 添加按钮
+        RedButton("➕ 添加监控目录", on_click=_add_path).props("outline classes=w-full dashed")
+
+    # 辅助方法：更新特定行的数据并同步回配置
+    def _update_path_data(self, index, key, value):
+        if 0 <= index < len(self.monitor_paths_data):
+            self.monitor_paths_data[index][key] = value
+            # 实时同步回 self.config，以便保存
+            setattr(self.config, "monitor_paths", self.monitor_paths_data)
+
+    # 辅助方法：为特定行选择文件夹
+    async def _pick_folder_for_item(self, index, input_element):
+        result = await local_file_picker("~", multiple=False)  # 这里改为单选比较安全
+        if result:
+            if isinstance(result, list): result = result[0]
+            input_element.value = result
+            self._update_path_data(index, "path", result)
 
 
 async def config_page() -> None:

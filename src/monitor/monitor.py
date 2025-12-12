@@ -5,14 +5,14 @@ import platform
 from pathlib import Path
 from threading import Event, Thread
 from queue import Queue, Empty
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver
+
 from ..rename.utils import VIDEO_SUFFIX
 from ..rename.process import Rename
 from ..config.config_manager import cm
-
 from ..logger import logger
 
 
@@ -84,9 +84,9 @@ class MonitorService:
         self.stop_event = Event()
         self.observer = None
         self.worker_thread = None
-        # self.rename_processor = Rename()
         self.is_running = False
         self.current_file: str | None = None
+        self.path_map: Dict[Path, Dict] = {}
         self.initialized = True
 
     # --- 核心辅助方法：统计文件数 ---
@@ -134,6 +134,7 @@ class MonitorService:
             try:
                 module = __import__(module_name, fromlist=[class_name])
                 ObserverClass = getattr(module, class_name)
+                # 简单测试一下实例化
                 test_obs = ObserverClass()
                 test_obs.stop()
                 return ObserverClass
@@ -142,12 +143,19 @@ class MonitorService:
 
         return None
 
-    def start(self, paths_to_monitor: list[Path], exclude_dirs: list[str]):
+    def start(self, path_configs: Dict[Path, Dict], exclude_dirs: list[str]):
+        """
+        启动监控
+        :param path_configs: 路径配置映射字典 {Path('/mnt/video'): {'tv_format': '...', ...}}
+        :param exclude_dirs: 排除目录列表
+        """
         if self.is_running:
             logger.warning("[监控] 服务已经在运行中")
             return
 
         self.stop_event.clear()
+        self.path_map = path_configs  # 保存配置
+        paths_to_monitor = list(path_configs.keys())
 
         # 1. 启动消费者线程
         self.worker_thread = Thread(
@@ -179,15 +187,20 @@ class MonitorService:
         if not use_polling:
             ObserverClass = self.__choose_observer()
             if not ObserverClass:
-                logger.info("[监控] 高效模式不可用，回退到轮询模式")
+                logger.info("[监控] 高效模式不可用(无法加载原生Observer)，回退到轮询模式")
                 use_polling = True
 
         if use_polling or ObserverClass is None:
             self.observer = PollingObserver(timeout=2)
             mode_name = "兼容模式(轮询)"
         else:
-            self.observer = ObserverClass()
-            mode_name = "高效模式(原生)"
+            try:
+                self.observer = ObserverClass()
+                mode_name = "高效模式(原生)"
+            except Exception as e:
+                logger.error(f"[监控] 实例化原生Observer失败: {e}，回退到轮询")
+                self.observer = PollingObserver(timeout=2)
+                mode_name = "兼容模式(轮询)"
 
         # 4. 添加监控路径
         event_handler = MonitorEventHandler(self.task_queue, exclude_dirs)
@@ -209,7 +222,7 @@ class MonitorService:
                 )
             except Exception as e:
                 logger.error(f"[监控] 启动失败: {e}")
-                if not use_polling:
+                if "轮询" not in mode_name:
                     logger.warning("[监控] 尝试紧急切换到轮询模式...")
                     try:
                         self.observer = PollingObserver(timeout=3)
@@ -259,11 +272,7 @@ class MonitorService:
         if options is None:
             options = {}
 
-        # 确保服务已初始化（即使未启动监控，队列线程也应准备好，
-        # 但通常建议 add_task 前先 start，或者至少确保 worker_thread 在运行）
         if not self.worker_thread or not self.worker_thread.is_alive():
-            # 如果监控没开，我们可以临时启动 worker 或者直接警告
-            # 为了简单起见，这里假设系统启动时 MonitorService 已经初始化
             logger.warning("[监控] 处理线程未运行，尝试启动...")
             self.stop_event.clear()
             self.worker_thread = Thread(
@@ -295,21 +304,52 @@ class MonitorService:
                     continue
 
                 self.current_file = file_path.name
-                use_ai = bool(cm.get_config("ai_enabled"))
+
+                # === 1. 初始化 custom_config，防止 UnboundLocalError ===
+                custom_config = {}
+
+                # === 2. 匹配路径配置 ===
+                # 遍历监控根目录，找到当前文件属于哪个根目录
+                if self.path_map:
+                    max_len = 0
+
+                    for root_path, cfg in self.path_map.items():
+                        try:
+                            if file_path.is_relative_to(root_path):
+                                if len(str(root_path)) > max_len:
+                                    max_len = len(str(root_path))
+                                    custom_config = cfg
+                        except Exception:
+                            pass
+
+                # === 3. 准备参数 ===
+                rename_kwargs = {}
+
+                # 提取配置中的模板
+                if custom_config.get("tv_format"):
+                    rename_kwargs["cus_tv_format"] = custom_config["tv_format"]
+                    logger.debug(f"[监控] 应用独立TV模板: {custom_config['tv_format']}")
+
+                if custom_config.get("movie_format"):
+                    rename_kwargs["cus_movie_format"] = custom_config["movie_format"]
+                    logger.debug(f"[监控] 应用独立Movie模板: {custom_config['movie_format']}")
 
                 # 提取覆盖参数
-                kwargs = {}
-                if "is_anime" in options:
-                    kwargs["_is_anime"] = options["is_anime"]
+                use_ai = bool(cm.get_config("ai_enabled"))
                 if "use_ai" in options:
                     use_ai = options["use_ai"]
 
-                # 还可以传递其他参数，如 tmdb_id 等，视 Rename.process 支持情况而定
+                # 合并 options 到 kwargs
+                rename_kwargs.update(options)
+                # 清理
+                rename_kwargs.pop("use_ai", None)
 
                 logger.info(
-                    f"[开始处理] {file_path.name} | AI: {use_ai} | Opts: {options}"
+                    f"[开始处理] {file_path.name} | AI: {use_ai} | HasCustomCfg: {bool(custom_config)}"
                 )
-                Rename().process(file_path, use_ai=use_ai, **kwargs)
+
+                # 执行重命名
+                Rename().process(file_path, use_ai=use_ai, **rename_kwargs)
 
             except Exception as e:
                 logger.error(f"[处理异常] {file_path.name}: {e}")
@@ -318,7 +358,7 @@ class MonitorService:
                 self.task_queue.task_done()
 
     def _wait_for_file_ready(
-        self, file_path: Path, timeout=10, check_interval=1.0
+            self, file_path: Path, timeout=10, check_interval=1.0
     ) -> bool:
         if not file_path.exists():
             return False

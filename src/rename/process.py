@@ -260,6 +260,7 @@ class Rename:
             info: Optional[Dict] = None,
             cus_offset: Optional[int] = None,
             cus_season_id: Optional[int] = None,
+            cus_tv_format: Optional[str] = None,
     ):
         time.sleep(0.005)
 
@@ -284,7 +285,7 @@ class Rename:
             if ignore_tag in item_suffix:
                 return
 
-        tv_rename_format = cm.get_config('tv_rename_format')
+        tv_rename_format = cus_tv_format if cus_tv_format else cm.get_config('tv_rename_format')
         ep = 0
         _idata = match_and_extract(item_name)
         if _idata:
@@ -424,6 +425,8 @@ class Rename:
             _ai_attempted: bool = False,
             _scoped_cache: Optional[Dict] = None,
             _ai_is_movie_hint: Optional[bool] = None,
+            cus_tv_format: Optional[str] = None,
+            cus_movie_format: Optional[str] = None,
     ):
         time.sleep(0.01)
 
@@ -441,6 +444,8 @@ class Rename:
             'ai_attempted': _ai_attempted,
             '_scoped_cache': _scoped_cache or {},
             'ai_is_movie_hint': _ai_is_movie_hint,
+            'cus_tv_format': cus_tv_format,
+            'cus_movie_format': cus_movie_format,
         }
 
         if path.is_file():
@@ -864,6 +869,8 @@ class Rename:
             ai_attempted: bool = False,
             _scoped_cache: Optional[Dict] = None,
             ai_is_movie_hint: Optional[bool] = None,
+            cus_tv_format: Optional[str] = None,
+            cus_movie_format: Optional[str] = None,
     ):
         if not _uuid:
             _uuid = str(uuid.uuid4())
@@ -979,6 +986,8 @@ class Rename:
                         if path.is_file() and path.suffix.lower() not in VIDEO_SUFFIX:
                             return
 
+            name = None
+            info = None
             if cus_name:
                 rtpath_name = cus_name
                 new_name, new_year, _, _ = parse_filename(cus_name)
@@ -998,7 +1007,6 @@ class Rename:
                             f"判定该 ID 可能错误，将忽略此 ID，改用文件名搜索。"
                         )
                         cus_tmdb_id = None
-                        name = info = None
                         is_movie = None
                     # ID 获取成功，信任它并写入缓存
                     if not is_movie and path.parent != path.root:
@@ -1137,7 +1145,7 @@ class Rename:
                     return self.error_reply(_uuid, "未找到电影信息", path)
 
                 first_year = info.get('release_date', '0000').split('-')[0]
-                movie_rename_format = cm.get_config('movie_rename_format')
+                movie_rename_format = cus_movie_format if cus_movie_format else cm.get_config('movie_rename_format')
 
                 use_template_ok = False
                 if movie_rename_format:
@@ -1190,7 +1198,7 @@ class Rename:
 
                 root_folder_name = f'{name} ({first_year})'
 
-                tv_rename_format = cm.get_config('tv_rename_format')
+                tv_rename_format = cus_tv_format if cus_tv_format else cm.get_config('tv_rename_format')
                 if tv_rename_format:
                     try:
                         dummy_ctx = get_render_context(path, info, 1, 1)
@@ -1220,7 +1228,7 @@ class Rename:
                     self.scraper.scrape_tv_show(work_path, info)
 
                 self._process_traditional(
-                    path, rtpath_name, work_path, season_id, info, cus_offset, cus_season_id
+                    path, rtpath_name, work_path, season_id, info, cus_offset, cus_season_id, cus_tv_format,
                 )
 
             final_tmdb_id = cus_tmdb_id if cus_tmdb_id else (str(info['id']) if info else None)
@@ -1253,6 +1261,7 @@ class Rename:
     def _process_traditional(
             self, path: Path, rtpath_name: str, work_path: Path, season_id: int, info: Optional[Dict] = None,
             cus_offset: Optional[int] = None, cus_season_id: Optional[int] = None,
+            cus_tv_format: Optional[str] = None,
     ):
         time.sleep(0.01)
         if path.is_file():
@@ -1266,6 +1275,7 @@ class Rename:
                 info,
                 cus_offset,
                 cus_season_id,
+                cus_tv_format,
             )
         else:
             logger.info(f"[处理任务] 开始对 [文件夹] {path.name}处理")
@@ -1283,6 +1293,7 @@ class Rename:
                             info,
                             cus_offset,
                             cus_season_id,
+                            cus_tv_format,
                         )
                 else:
                     self.process_sub(
@@ -1294,6 +1305,7 @@ class Rename:
                         info,
                         cus_offset,
                         cus_season_id,
+                        cus_tv_format,
                     )
 
     def error_reply(

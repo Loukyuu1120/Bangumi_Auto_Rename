@@ -11,6 +11,7 @@ from ..pages.data_table_page import refresh_table_view, manager
 from ..element.red import RedButton, RedToogle, RedInput, notify
 from ..component.local_file_picker import local_file_picker
 from ..rename.utils import VIDEO_SUFFIX
+from ..config.config_manager import cm
 
 
 class TaskConfigDialog(ui.dialog):
@@ -18,15 +19,19 @@ class TaskConfigDialog(ui.dialog):
         super().__init__()
         self.config = {
             'is_anime': True,
-            'exclude_keywords': ''
+            'exclude_keywords': '',
+            'cus_tv_format': '',
+            'cus_movie_format': ''
         }
-        _card_style = 'width: 500px; max-width: 90vw; max-height: 80vh; overflow-y: auto;'
+        # 稍微加宽一点以容纳更多配置
+        _card_style = 'width: 600px; max-width: 90vw; max-height: 85vh; overflow-y: auto;'
 
         with self, ui.card().style(_card_style).classes('flex column'):
             ui.label('任务配置').classes('text-h6 text-weight-bold q-mb-sm')
             ui.separator().classes('q-mb-md')
 
             with ui.column().classes('w-full q-gutter-y-md'):
+                # 1. 基础选项
                 with ui.row().classes('w-full justify-between items-center'):
                     ui.label('是否为动画类型').classes('text-subtitle1')
                     RedToogle(
@@ -35,13 +40,36 @@ class TaskConfigDialog(ui.dialog):
                         on_change=lambda e: self._set_anime(e.value)
                     ).props('dense')
 
+                # 2. 排除关键词
                 ui.textarea(
                     label='排除路径/文件名关键词 (支持正则)',
-                    placeholder='例如:\nsample\nfeature\n.nfo', # 修改占位符提示
+                    placeholder='例如:\nsample\nfeature\n.nfo',
                     on_change=lambda e: self._set_exclude(e.value)
-                ).props('clearable outlined rows=4').classes('w-full').tooltip(
+                ).props('clearable outlined rows=3').classes('w-full').tooltip(
                     '支持一行一个关键词，或者使用 | 分隔'
                 )
+
+                # 3. 高级配置：自定义模板
+                ui.separator().classes('q-my-sm')
+                with ui.expansion('自定义重命名模板', icon='tune').classes('w-full border rounded-lg'):
+                    with ui.column().classes('p-3 gap-3 w-full'):
+                        ui.label('留空则使用全局默认配置。仅对本次任务生效。').classes('text-xs text-gray-500')
+
+                        # 显示当前的全局默认值作为提示 (Placeholder)
+                        default_tv = cm.get_config('tv_rename_format') or "未设置"
+                        default_movie = cm.get_config('movie_rename_format') or "未设置"
+
+                        ui.input(
+                            label='📺 剧集重命名模板 (TV)',
+                            placeholder=f'全局默认: {default_tv}',
+                            on_change=lambda e: self._set_config('cus_tv_format', e.value)
+                        ).props('filled dense classes=w-full')
+
+                        ui.input(
+                            label='🎬 电影重命名模板 (Movie)',
+                            placeholder=f'全局默认: {default_movie}',
+                            on_change=lambda e: self._set_config('cus_movie_format', e.value)
+                        ).props('filled dense classes=w-full')
 
             ui.separator().classes('q-mt-lg q-mb-sm')
 
@@ -54,6 +82,9 @@ class TaskConfigDialog(ui.dialog):
 
     def _set_exclude(self, value: str) -> None:
         self.config['exclude_keywords'] = value
+
+    def _set_config(self, key: str, value: str) -> None:
+        self.config[key] = value
 
     def _handle_ok(self) -> None:
         self.close()
@@ -87,7 +118,9 @@ def _should_ignore(file_path: Path, pattern: Optional[re.Pattern]) -> bool:
 def _process_files_in_thread(
         paths: Sequence[str],
         is_anime: bool,
-        exclude_pattern: Optional[re.Pattern]
+        exclude_pattern: Optional[re.Pattern],
+        cus_tv_format: str,
+        cus_movie_format: str
 ) -> Tuple[int, int]:
     """
     这个函数将在单独的线程中运行，不会阻塞 UI
@@ -131,8 +164,17 @@ def _process_files_in_thread(
                 count_ignored += 1
                 continue
 
-            # 3. 加入队列
-            monitor_service.add_manual_task(f_path, {'is_anime': is_anime})
+            # 3. 准备参数
+            options = {'is_anime': is_anime}
+
+            # 如果有自定义模板，加入 options
+            if cus_tv_format and cus_tv_format.strip():
+                options['cus_tv_format'] = cus_tv_format.strip()
+            if cus_movie_format and cus_movie_format.strip():
+                options['cus_movie_format'] = cus_movie_format.strip()
+
+            # 4. 加入队列
+            monitor_service.add_manual_task(f_path, options)
             count_added += 1
 
     return count_added, count_ignored
@@ -155,6 +197,9 @@ async def pick_file() -> None:
 
     is_anime = config_result['is_anime']
     exclude_str = config_result['exclude_keywords']
+    cus_tv_format = config_result.get('cus_tv_format', '')
+    cus_movie_format = config_result.get('cus_movie_format', '')
+
     exclude_pattern = _compile_regex(exclude_str)
 
     # 4. 提示开始
@@ -165,12 +210,17 @@ async def pick_file() -> None:
             _process_files_in_thread,
             paths,
             is_anime,
-            exclude_pattern
+            exclude_pattern,
+            cus_tv_format,
+            cus_movie_format
         )
 
         msg = f'已将 {count_added} 个文件加入后台队列'
         if count_ignored > 0:
             msg += f' (忽略 {count_ignored} 个)'
+
+        if cus_tv_format or cus_movie_format:
+            msg += " (已应用自定义模板)"
 
         if count_added > 0:
             notify(msg, type='positive', timeout=5000)
