@@ -51,25 +51,35 @@ class TaskConfigDialog(ui.dialog):
 
                 # 3. 高级配置：自定义模板
                 ui.separator().classes('q-my-sm')
-                with ui.expansion('自定义重命名模板', icon='tune').classes('w-full border rounded-lg'):
+                with ui.expansion('覆盖配置', icon='tune').classes('w-full border rounded-lg q-mt-sm'):
                     with ui.column().classes('p-3 gap-3 w-full'):
-                        ui.label('留空则使用全局默认配置。仅对本次任务生效。').classes('text-xs text-gray-500')
+                        ui.label('以下选项留空或“默认”表示使用全局设置').classes('text-xs text-gray-500')
 
-                        # 显示当前的全局默认值作为提示 (Placeholder)
-                        default_tv = cm.get_config('tv_rename_format') or "未设置"
-                        default_movie = cm.get_config('movie_rename_format') or "未设置"
+                        # 1. 模板
+                        ui.input(label='📺 TV模板', on_change=lambda e: self._set_ov('tv_rename_format', e.value)).props(
+                            'filled dense')
+                        ui.input(label='🎬 Movie模板',
+                                 on_change=lambda e: self._set_ov('movie_rename_format', e.value)).props('filled dense')
 
-                        ui.input(
-                            label='📺 剧集重命名模板 (TV)',
-                            placeholder=f'全局默认: {default_tv}',
-                            on_change=lambda e: self._set_config('cus_tv_format', e.value)
-                        ).props('filled dense classes=w-full')
+                        # 2. 模式与覆盖
+                        with ui.row().classes('w-full'):
+                            ui.select(['默认', '硬链接', '软链接', '复制', '剪切'], label='模式', value='默认',
+                                      on_change=lambda e: self._set_ov('mode',
+                                                                       None if e.value == '默认' else e.value)).classes(
+                                'col q-mr-sm')
+                            ui.select(['默认', '从不覆盖', '总是覆盖', '保留最新'], label='覆盖', value='默认',
+                                      on_change=lambda e: self._set_ov('overwrite_mode',
+                                                                       None if e.value == '默认' else e.value)).classes(
+                                'col')
 
-                        ui.input(
-                            label='🎬 电影重命名模板 (Movie)',
-                            placeholder=f'全局默认: {default_movie}',
-                            on_change=lambda e: self._set_config('cus_movie_format', e.value)
-                        ).props('filled dense classes=w-full')
+                        # 3. 开关
+                        with ui.row().classes('w-full'):
+                            ui.select(['默认', '启用', '禁用'], label='刮削元数据', value='默认',
+                                      on_change=lambda e: self._set_ov('scrape_metadata',
+                                                                       self._to_bool(e.value))).classes('col q-mr-sm')
+                            ui.select(['默认', '启用', '禁用'], label='二级分类', value='默认',
+                                      on_change=lambda e: self._set_ov('secondary_classification',
+                                                                       self._to_bool(e.value))).classes('col')
 
             ui.separator().classes('q-mt-lg q-mb-sm')
 
@@ -89,6 +99,17 @@ class TaskConfigDialog(ui.dialog):
     def _handle_ok(self) -> None:
         self.close()
         self.submit(self.config)
+
+    def _set_ov(self, key, value):
+        if value == "" or value is None:
+            self.config['overrides'].pop(key, None)
+        else:
+            self.config['overrides'][key] = value
+
+    def _to_bool(self, val):
+        if val == '启用': return True
+        if val == '禁用': return False
+        return None
 
 
 def _compile_regex(pattern_str: str) -> Optional[re.Pattern]:
@@ -119,8 +140,7 @@ def _process_files_in_thread(
         paths: Sequence[str],
         is_anime: bool,
         exclude_pattern: Optional[re.Pattern],
-        cus_tv_format: str,
-        cus_movie_format: str
+        overrides: Dict[str, Any],
 ) -> Tuple[int, int]:
     """
     这个函数将在单独的线程中运行，不会阻塞 UI
@@ -165,13 +185,7 @@ def _process_files_in_thread(
                 continue
 
             # 3. 准备参数
-            options = {'is_anime': is_anime}
-
-            # 如果有自定义模板，加入 options
-            if cus_tv_format and cus_tv_format.strip():
-                options['cus_tv_format'] = cus_tv_format.strip()
-            if cus_movie_format and cus_movie_format.strip():
-                options['cus_movie_format'] = cus_movie_format.strip()
+            options = {'is_anime': is_anime, 'config_overrides': overrides}
 
             # 4. 加入队列
             monitor_service.add_manual_task(f_path, options)

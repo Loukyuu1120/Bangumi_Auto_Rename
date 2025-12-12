@@ -834,23 +834,82 @@ class ConfigPage(ui.dialog):
                             RedButton("🗑️", on_click=lambda i=idx: _remove_path(i)).props("dense flat color=grey")
 
                         # 高级配置折叠面板
-                        with ui.expansion("独立重命名模板设置 (点击展开)", icon="tune").classes(
-                                "w-full text-sm text-gray-600"):
+                        with ui.expansion("监控配置 (点击展开)", icon="settings").classes("w-full text-sm text-gray-600"):
                             with ui.column().classes("w-full gap-2 p-2 bg-gray-50"):
-                                ui.label("留空则使用全局配置。变量与全局设置一致。").classes("text-xs text-gray-400")
-                                ui.input(
-                                    label="📺 剧集重命名模板 (TV)",
-                                    placeholder="全局默认",
-                                    value=item.get("tv_format", ""),
-                                    on_change=lambda e, i=idx: self._update_path_data(i, "tv_format", e.value)
-                                ).props("filled dense classes=w-full")
+                                ui.label("💡 留空或不选表示使用全局默认设置").classes("text-xs text-gray-400 mb-1")
 
-                                ui.input(
-                                    label="🎬 电影重命名模板 (Movie)",
-                                    placeholder="全局默认",
-                                    value=item.get("movie_format", ""),
-                                    on_change=lambda e, i=idx: self._update_path_data(i, "movie_format", e.value)
-                                ).props("filled dense classes=w-full")
+                                # === 1. 重命名模板 ===
+                                with ui.row().classes("w-full gap-2"):
+                                    ui.input(label="📺 TV模板", value=item.get("tv_rename_format", ""),
+                                             on_change=lambda e, i=idx: self._update_path_data(i, "tv_rename_format", e.value)
+                                             ).props("filled dense").classes("flex-1")
+                                    ui.input(label="🎬 Movie模板", value=item.get("movie_rename_format", ""),
+                                             on_change=lambda e, i=idx: self._update_path_data(i, "movie_rename_format", e.value)
+                                             ).props("filled dense").classes("flex-1")
+
+                                # === 2. 行为控制 (Mode, Overwrite) ===
+                                with ui.row().classes("w-full gap-2"):
+                                    # 模式选择
+                                    current_mode = item.get("mode") or "默认"
+                                    ui.select(
+                                        options=["默认", "硬链接", "软链接", "复制", "剪切"],
+                                        value=current_mode,
+                                        label="重命名模式",
+                                        on_change=lambda e, i=idx: self._update_path_data(i, "mode", None if e.value == "默认" else e.value)
+                                    ).props("dense outlined").classes("flex-1")
+
+                                    # 覆盖模式
+                                    current_ov = item.get("overwrite_mode") or "默认"
+                                    ui.select(
+                                        options=["默认", "从不覆盖", "总是覆盖", "保留最新"],
+                                        value=current_ov,
+                                        label="覆盖模式",
+                                        on_change=lambda e, i=idx: self._update_path_data(i, "overwrite_mode", None if e.value == "默认" else e.value)
+                                    ).props("dense outlined").classes("flex-1")
+
+                                # === 3. 开关控制 (刮削, 二级分类) ===
+                                with ui.row().classes("w-full gap-4 items-center"):
+                                    # 刮削
+                                    meta_val = item.get("scrape_metadata")
+                                    meta_label = "默认" if meta_val is None else ("启用" if meta_val else "禁用")
+                                    ui.select(
+                                        options=["默认", "启用", "禁用"],
+                                        value=meta_label,
+                                        label="刮削元数据",
+                                        on_change=lambda e, i=idx: self._update_path_data(i, "scrape_metadata", True if e.value=="启用" else (False if e.value=="禁用" else None))
+                                    ).props("dense outlined").classes("w-32")
+
+                                    # 二级分类
+                                    sec_val = item.get("secondary_classification")
+                                    sec_label = "默认" if sec_val is None else ("启用" if sec_val else "禁用")
+                                    ui.select(
+                                        options=["默认", "启用", "禁用"],
+                                        value=sec_label,
+                                        label="二级分类",
+                                        on_change=lambda e, i=idx: self._update_path_data(i, "secondary_classification", True if e.value=="启用" else (False if e.value=="禁用" else None))
+                                    ).props("dense outlined").classes("w-32")
+
+                                # === 4. 图片类型 ===
+                                image_options = [
+                                    "poster", "backdrop", "background",
+                                    "banner", "logo", "clearart", "thumb"
+                                ]
+                                current_img_types = item.get("scrape_image_types")
+                                # 如果是 None，NiceGUI select多选模式可能显示为空，我们接受它为空，表示"未设置/Global"
+                                # 用户如果想选择，就会覆盖；如果全取消选择，变成空列表，save时存为None（回退Global）
+
+                                ui.select(
+                                    options=image_options,
+                                    multiple=True,
+                                    value=current_img_types,
+                                    label="刮削图片类型 (不选则使用全局设置)",
+                                    on_change=lambda e, i=idx: self._update_path_data(
+                                        i,
+                                        "scrape_image_types",
+                                        e.value if e.value else None # 如果列表非空则保存列表，空则保存None以使用全局配置
+                                    )
+                                ).props("use-chips dense outlined").classes("w-full")
+
 
         def _add_path():
             self.monitor_paths_data.append({"path": "", "tv_format": "", "movie_format": ""})

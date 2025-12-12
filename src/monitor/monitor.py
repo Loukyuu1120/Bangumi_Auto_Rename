@@ -324,25 +324,34 @@ class MonitorService:
 
                 # === 3. 准备参数 ===
                 rename_kwargs = {}
+                manual_overrides = options.get('config_overrides', {})
+                final_overrides = custom_config.copy()
+                if 'path' in final_overrides: del final_overrides['path']  # 移除无关字段
 
-                # 提取配置中的模板
-                if custom_config.get("tv_format"):
-                    rename_kwargs["cus_tv_format"] = custom_config["tv_format"]
-                    logger.debug(f"[监控] 应用独立TV模板: {custom_config['tv_format']}")
+                # 合并手动配置 (手动配置优先)
+                final_overrides.update(manual_overrides)
 
-                if custom_config.get("movie_format"):
-                    rename_kwargs["cus_movie_format"] = custom_config["movie_format"]
-                    logger.debug(f"[监控] 应用独立Movie模板: {custom_config['movie_format']}")
+                # 过滤掉 None 或 空值，确保 Rename._get_conf 能正确回退
+                final_overrides = {k: v for k, v in final_overrides.items() if v is not None and v != ""}
 
                 # 提取覆盖参数
                 use_ai = bool(cm.get_config("ai_enabled"))
                 if "use_ai" in options:
                     use_ai = options["use_ai"]
+                if 'is_anime' in options:
+                    rename_kwargs['_is_anime'] = options.pop('is_anime')
+                if 'is_movie' in options:
+                    rename_kwargs['_is_movie'] = options.pop('is_movie')
 
-                # 合并 options 到 kwargs
+                # 合并剩余 options (确保里面不再包含 Rename 不识别的参数)
                 rename_kwargs.update(options)
-                # 清理
+
+                # 清理已知不需要传给 rename 的参数
                 rename_kwargs.pop("use_ai", None)
+                rename_kwargs.pop("config_overrides", None)
+
+                # 重新加入正确的 config_overrides
+                rename_kwargs['config_overrides'] = final_overrides
 
                 logger.info(
                     f"[开始处理] {file_path.name} | AI: {use_ai} | HasCustomCfg: {bool(custom_config)}"

@@ -1,7 +1,7 @@
 import os
 import json
 import shutil
-from typing import Dict
+from typing import Dict, Optional, Any
 from pathlib import Path
 
 from ..logger import logger
@@ -11,19 +11,20 @@ from ..config.config_manager import cm
 from src.rename.utils import VIDEO_SUFFIX
 
 class Trans:
-    def __init__(self, R: Dict[Path, Path], uuid: str) -> None:
-        self.mode = cm.get_config('mode')
-        self.overwrite_mode = cm.get_config('overwrite_mode')
+    def __init__(self, R: Dict[Path, Path], uuid: str, config_overrides: Optional[Dict[str, Any]] = None) -> None:
         self.R = R
         self.uuid = uuid
 
+        def get_cfg(key):
+            if config_overrides and config_overrides.get(key) not in [None, ""]:
+                return config_overrides[key]
+            return cm.get_config(key)
+
+        self.mode = get_cfg('mode')
+        self.overwrite_mode = get_cfg('overwrite_mode')
+
     def _cleanup_old_targets_with_prefix(self) -> None:
-        """根据上一轮记录，删除旧目标文件及同前缀的相关文件，
-        额外：
-        - 删除所在 Season 目录里的 season.nfo
-        - 如果 Season 目录没有视频文件，则强行清空并删除；
-        - 如果是 Season 目录，且上级目录下没有包含视频文件的子目录，则强行清空并删除上级目录。
-        """
+        """根据上一轮记录，删除旧目标文件及同前缀的相关文件"""
         record_file = RECORD_PATH / f'{self.uuid}.json'
         if not record_file.exists():
             return
@@ -38,7 +39,6 @@ class Trans:
         if not old_map:
             return
 
-        # --- 获取当前任务的所有目标路径和目标目录，用于防误删 ---
         current_target_paths = set(self.R.values())
         current_target_dirs = set(p.parent for p in current_target_paths)
 
@@ -51,7 +51,6 @@ class Trans:
             except TypeError:
                 continue
 
-            # --- 如果旧目标路径存在于当前新任务中，说明是同一文件重做，跳过清理 ---
             if t in current_target_paths:
                 continue
 
@@ -59,18 +58,16 @@ class Trans:
             if not parent.exists() or not parent.is_dir():
                 continue
 
-            # 如果是 Season 目录，记录一下上级目录，后面用于“整部剧目录是否残留视频”的判断
             if parent.name.lower().startswith('season'):
                 possible_show_roots.add(parent.parent)
 
-            prefix = t.stem  # 旧目标文件名（不含后缀）的前缀
+            prefix = t.stem
 
             try:
                 for child in parent.iterdir():
                     if not child.is_file():
                         continue
 
-                    # 1) 删除同前缀文件：视频本体 + 相关元数据
                     if child.stem.startswith(prefix):
                         try:
                             logger.info(f'[处理迁移] 删除旧文件(含元数据): {child}')
@@ -79,7 +76,6 @@ class Trans:
                             logger.warning(f'[处理迁移] 删除文件失败 {child}: {e}')
                         continue
 
-                    # 2) 删除同目录的 season.nfo（不论前缀）
                     elif child.name.lower() == 'season.nfo':
                         if parent in current_target_dirs:
                             continue
@@ -94,31 +90,27 @@ class Trans:
             except Exception as e:
                 logger.warning(f'[处理迁移] 枚举目录失败 {parent}: {e}')
 
-        # 辅助函数：判断目录是否包含视频文件（递归）
         def has_video_files(directory: Path) -> bool:
             try:
-                for item in directory.rglob('*'): # 递归扫描所有子文件
+                for item in directory.rglob('*'):
                     if item.is_file() and item.suffix.lower() in VIDEO_SUFFIX:
                         return True
             except Exception:
                 pass
             return False
 
-        # 辅助函数：强制清理目录（删除里面剩余的 nfo/图片等垃圾文件，然后删目录）
         def force_cleanup_dir(directory: Path):
             try:
                 for item in directory.iterdir():
                     if item.is_file():
                         item.unlink()
                     elif item.is_dir():
-                        # 递归清理子目录
                         force_cleanup_dir(item)
                 directory.rmdir()
                 logger.info(f'[处理迁移] 已清理无视频目录: {directory}')
             except Exception as e:
                 logger.warning(f'[处理迁移] 清理目录失败 {directory}: {e}')
 
-        # 3) 从深到浅尝试删除已经没有视频文件的 Season 目录
         all_dirs = sorted(dirs_to_check, key=lambda p: len(p.parts), reverse=True)
         for d in all_dirs:
             if d in current_target_dirs:
@@ -131,7 +123,6 @@ class Trans:
             except Exception:
                 pass
 
-        # 4) 对可能的 show 根目录：如果下面已经没有任何“视频文件”，则删除整部剧目录
         for show_root in possible_show_roots:
             try:
                 if not show_root.exists() or not show_root.is_dir():
@@ -147,16 +138,13 @@ class Trans:
     def trans_file(self):
         path = RECORD_PATH / f'{self.uuid}.json'
 
-        # 在 复制 / 链接 模式下，先清理上一轮生成的旧内容
         if self.mode in ('复制', '链接'):
             self._cleanup_old_targets_with_prefix()
 
-        # 记录本次映射
         _R = {str(k): str(v) for k, v in self.R.items()}
         with path.open('w', encoding='utf-8') as f:
             json.dump(_R, f, ensure_ascii=False)
 
-        # 执行实际迁移
         for source_path, target_path in self.R.items():
             try:
                 if target_path.is_dir() or source_path.is_dir():
@@ -170,7 +158,7 @@ class Trans:
 
                     elif self.overwrite_mode == '总是覆盖':
                         logger.info(f'[处理迁移] 覆盖已存在文件: {target_path.name}')
-                        target_path.unlink()  # 删除旧文件以便重新生成
+                        target_path.unlink()
 
                     elif self.overwrite_mode == '保留最新':
                         try:
@@ -201,3 +189,4 @@ class Trans:
             except Exception as e:
                 logger.error(str(e))
                 return str(e)
+        return True

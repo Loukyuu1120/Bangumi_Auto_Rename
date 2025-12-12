@@ -126,7 +126,7 @@ def remove_code(s: str) -> str:
 # ================= 核心识别逻辑 =================
 
 def extract_season(text: str):
-    # 优先匹配中文 "第x季"
+    text = remove_code(text)
     match = re.search(r'第([\d一二三四五六七八九零]{1,2})(季|部分|部)', text)
     if match:
         season_str = match.group(1)
@@ -371,8 +371,7 @@ def parse_filename(filename: str) -> Tuple[str, int, Optional[int], Optional[int
             season_num = extract_season(title_part) or 1
             title_part = title_part[:cn_match.start()]
 
-    # 4. 【新增】兜底清洗：如果没找到年份也没找到季号，尝试用分辨率/技术参数截断
-    # 针对: "胆大党 1080P..." 这种既没年份也没S01的情况
+    # 4. 兜底清洗：如果没找到年份也没找到季号，尝试用分辨率/技术参数截断
     if year == 0 and season_num is None:
         # 匹配常见分辨率 1080P, 4K, 2160P, 720P
         res_match = re.search(r'[.\s\-_](1080[PpIi]|4[Kk]|2160[Pp]|720[Pp])', title_part, re.IGNORECASE)

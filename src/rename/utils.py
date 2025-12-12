@@ -104,8 +104,9 @@ ROMA_MAP = {'II': 2, 'III': 3, 'IV': 4, 'V': 5, 'VI': 6, 'VII': 7}
 CODE_PATTERNS = [
     r'(2160|1080|720|480|576)[pP]',
     r'x264|x265|h264|h265|hevc|avc|mpeg2|vp9|av1',
-    r'dts-hd|dts|truehd|atmos|ac3|aac|flac|opus|mp3|pcm',
+    r'(?i)(dts-?hd|dts|truehd|atmos|ac3|aac|flac|opus|mp3|pcm)(\W*\d+\.\d)?(audio|ch|channel)?',
+    r'(?i)\b\d{1,2}\.\d(audio|ch|channel|sound)\b',
     r'hdr|dv|dolby|10bit|8bit',
     r'remux|bluray|web-dl|webrip|hdtv|bdrip|dvdrip',
-    r'hq|(\d{2,3})\s?fps', # 匹配 FPS
+    r'hq|(\d{2,3})\s?fps',
 ]

@@ -6,7 +6,7 @@ import types
 import threading
 from pathlib import Path
 from difflib import SequenceMatcher
-from typing import Dict, List, Tuple, Union, Optional
+from typing import Dict, List, Tuple, Union, Optional, Any
 
 from jikanpy import Jikan
 from nicegui import app
@@ -88,19 +88,27 @@ class Rename:
                         def safe_emit(h_self, record):
                             try:
                                 msg = h_self.format(record)
-                                # 使用 call_from_background 确保 UI 更新在主线程
                                 try:
                                     app.call_from_background(h_self.log_element.push, msg)
                                 except Exception:
                                     pass
                             except Exception:
-                                pass  # 忽略错误防止循环
+                                pass
 
                         handler.emit = types.MethodType(safe_emit, handler)
                         handler._is_patched = True
                 Rename._logger_patched = True
             except Exception:
                 pass
+
+    @staticmethod
+    def _get_config_value(key: str, overrides: Optional[Dict[str, Any]] = None) -> Any:
+        """
+        统一获取配置的方法。
+        """
+        if overrides and overrides.get(key) not in [None, ""]:
+            return overrides[key]
+        return cm.get_config(key)
 
     def _get_category_folder(self, info: Dict, is_movie: bool, is_anime: bool) -> str:
         if not info:
@@ -147,46 +155,35 @@ class Rename:
             return "日韩剧"
         return "欧美剧"
 
-    def _process_accompanying_files(self, source_video_path: Path, target_video_path: Path):
+    def _process_accompanying_files(self, source_video_path: Path, target_video_path: Path,
+                                    config_overrides: Optional[Dict] = None):
         """
         处理伴随文件（字幕等）
-        source_video_path: 原视频路径 (例如 /downloads/Movie.mp4)
-        target_video_path: 新视频路径 (例如 /data/Movie/Movie.mp4)
         """
         try:
-            # 1. 获取允许的后缀列表
-            allowed_exts = cm.get_config('subtitle_extensions') or ['.ass', '.srt', '.sub']
+            # 使用统一配置获取方法
+            allowed_exts = self._get_config_value('subtitle_extensions', config_overrides) or ['.ass', '.srt', '.sub']
 
-            # 2. 获取源目录和视频的文件名主干
+            if isinstance(allowed_exts, str):
+                allowed_exts = [e.strip() for e in allowed_exts.split(',')]
+
             source_dir = source_video_path.parent
-            video_stem = source_video_path.stem  # "Movie"
+            video_stem = source_video_path.stem
 
-            # 3. 遍历源目录寻找匹配文件
             for sibling in source_dir.iterdir():
                 if sibling == source_video_path:
                     continue
                 if sibling.is_dir():
                     continue
 
-                # 检查后缀是否在允许列表中
                 if sibling.suffix.lower() not in allowed_exts:
                     continue
 
-                # 检查文件名是否以视频名开头
-                # 视频: S01E01.mp4 (stem: S01E01)
-                # 字幕: S01E01.zh.ass
                 if sibling.name.startswith(video_stem):
-                    # 提取剩余的后缀部分 (包括语言标记)
-                    # S01E01.zh.ass - S01E01 = .zh.ass
                     suffix_part = sibling.name[len(video_stem):]
-
-                    # 构造新的目标路径
-                    # 目标视频: .../Show/S01/NewName.mp4
-                    # 新字幕: .../Show/S01/NewName.zh.ass
                     new_sub_name = target_video_path.stem + suffix_part
                     target_sub_path = target_video_path.parent / new_sub_name
 
-                    # 加入重命名队列
                     self.R[sibling] = target_sub_path
                     logger.debug(f"[伴随文件] {sibling.name} -> {target_sub_path.name}")
 
@@ -196,7 +193,6 @@ class Rename:
     def get_season_id(
             self,
             tv_info: Dict,
-            work_path: Path,
             path: Path,
             titles: Optional[List[Dict]],
     ):
@@ -260,7 +256,7 @@ class Rename:
             info: Optional[Dict] = None,
             cus_offset: Optional[int] = None,
             cus_season_id: Optional[int] = None,
-            cus_tv_format: Optional[str] = None,
+            config_overrides: Optional[Dict] = None,
     ):
         time.sleep(0.005)
 
@@ -275,7 +271,8 @@ class Rename:
 
         n_item_name_l = item_name.replace(itme_path_main_name, '').lower()
 
-        enable_scrape = cm.get_config('scrape_metadata')
+        # 使用统一配置获取方法
+        enable_scrape = self._get_config_value('scrape_metadata', config_overrides)
 
         for ignore_dir in IGNORE_DIR:
             if ignore_dir in item_path.name:
@@ -285,7 +282,8 @@ class Rename:
             if ignore_tag in item_suffix:
                 return
 
-        tv_rename_format = cus_tv_format if cus_tv_format else cm.get_config('tv_rename_format')
+        # 使用统一配置获取方法
+        tv_rename_format = self._get_config_value('tv_rename_format', config_overrides)
         ep = 0
         _idata = match_and_extract(item_name)
         if _idata:
@@ -297,9 +295,9 @@ class Rename:
             for ex in EXTRA_TAG:
                 if re.search(rf'(?<!{p}){ex.lower()}(?!{p})', n_item_name_l):
                     t = work_path / 'extra'
-                    target_file = t / item_name # 提取变量
+                    target_file = t / item_name  # 提取变量
                     self.R[item_path] = target_file
-                    self._process_accompanying_files(item_path, target_file)
+                    self._process_accompanying_files(item_path, target_file, config_overrides)
                     logger.info(f'[处理任务] 处理完成{item_name} (Extra)')
                     return
 
@@ -307,9 +305,9 @@ class Rename:
                 if re.search(rf'(?<!{p}){s0.lower()}(?!{p})', item_name_l) or \
                         re.search(rf'(?<!{p}){s0.lower()}[\d]{{1,3}}(?!{p})', item_name_l):
                     t = work_path / 'Season0'
-                    target_file = t / item_name # 提取变量
+                    target_file = t / item_name  # 提取变量
                     self.R[item_path] = target_file
-                    self._process_accompanying_files(item_path, target_file)
+                    self._process_accompanying_files(item_path, target_file, config_overrides)
                     logger.info(f'[处理任务] 处理完成{item_name} (Season0)')
                     return
 
@@ -323,7 +321,7 @@ class Rename:
         if cus_offset is not None and cus_offset != 0:
             ep = ep + cus_offset
 
-        if tv_rename_format and info and ep > 0:
+        if tv_rename_format and info:
             ctx = get_render_context(item_path, info, int(season_id), int(ep))
             rel_path = render_path_template(tv_rename_format, ctx)
 
@@ -346,7 +344,7 @@ class Rename:
 
                 self.R[item_path] = target_file
                 logger.info(f'[自定义格式] 目标路径: {target_file}')
-                self._process_accompanying_files(item_path, target_file)
+                self._process_accompanying_files(item_path, target_file, config_overrides)
 
                 if enable_scrape:
                     try:
@@ -396,7 +394,7 @@ class Rename:
         ft = f'S{ss}E{ep_str}'
         target_file = t / f'{ft} - {item_name}'
         self.R[item_path] = target_file
-        self._process_accompanying_files(item_path, target_file)
+        self._process_accompanying_files(item_path, target_file, config_overrides)
 
         if enable_scrape and info and ep > 0:
             try:
@@ -425,8 +423,7 @@ class Rename:
             _ai_attempted: bool = False,
             _scoped_cache: Optional[Dict] = None,
             _ai_is_movie_hint: Optional[bool] = None,
-            cus_tv_format: Optional[str] = None,
-            cus_movie_format: Optional[str] = None,
+            config_overrides: Optional[Dict[str, Any]] = None
     ):
         time.sleep(0.01)
 
@@ -444,8 +441,7 @@ class Rename:
             'ai_attempted': _ai_attempted,
             '_scoped_cache': _scoped_cache or {},
             'ai_is_movie_hint': _ai_is_movie_hint,
-            'cus_tv_format': cus_tv_format,
-            'cus_movie_format': cus_movie_format,
+            'config_overrides': config_overrides,  # 传递全量覆盖配置
         }
 
         if path.is_file():
@@ -537,7 +533,7 @@ class Rename:
             path: Path,
             is_anime: Optional[bool] = None,
             is_movie: Optional[bool] = None,
-            ai_is_movie_hint: Optional[bool] = None,  # AI 提示，默认 None
+            ai_is_movie_hint: Optional[bool] = None,
     ) -> Union[Tuple[str, Dict, bool, bool], str]:
         time.sleep(0.005)
 
@@ -608,7 +604,6 @@ class Rename:
                 logger.debug(f"[TMDB搜索] 正在搜索TV (SxxExx模式): 关键词='{rtpath_name}', 年份={year}")
                 s1_name, s1_info = self.search.get_tv_info(rtpath_name, year)
 
-                # 尝试去除年份重试
                 if not s1_name and year != 0:
                     logger.debug(f"[TMDB搜索] TV带年份搜索失败，尝试去除年份: 关键词='{rtpath_name}'")
                     s1_name, s1_info = self.search.get_tv_info(rtpath_name, 0)
@@ -773,7 +768,7 @@ class Rename:
         return name, info, is_anime, is_movie
 
     def _attempt_ai_recovery(self, path, _uuid, is_anime, cus_offset, cus_season_id, use_ai, check_skip_dir=False,
-                             hint_name=None):
+                             hint_name=None, config_overrides=None):
         if self.ai_processor.ai_client.is_available():
             try:
                 if hint_name:
@@ -848,6 +843,7 @@ class Rename:
                     use_ai=use_ai,
                     _ai_attempted=True,
                     _ai_is_movie_hint=ai_is_movie,
+                    config_overrides=config_overrides
                 )
             else:
                 logger.warning("[AI处理] AI执行完毕，但未能推断出有效元数据")
@@ -869,8 +865,7 @@ class Rename:
             ai_attempted: bool = False,
             _scoped_cache: Optional[Dict] = None,
             ai_is_movie_hint: Optional[bool] = None,
-            cus_tv_format: Optional[str] = None,
-            cus_movie_format: Optional[str] = None,
+            config_overrides: Optional[Dict[str, Any]] = None,
     ):
         if not _uuid:
             _uuid = str(uuid.uuid4())
@@ -895,10 +890,11 @@ class Rename:
             if not self.search.TMDB_KEY:
                 return self.error_reply(_uuid, '无TMDB Key', path)
 
-            enable_scrape = cm.get_config('scrape_metadata')
-            global_use_ai = bool(cm.get_config('use_ai'))
+            # 使用统一配置获取方法
+            enable_scrape = self._get_config_value('scrape_metadata', config_overrides)
+            global_use_ai = bool(cm.get_config('use_ai'))  # use_ai 已经单独传递了，不需要 override
             effective_use_ai = use_ai if use_ai is not None else global_use_ai
-            enable_secondary = cm.get_config('secondary_classification')
+            enable_secondary = self._get_config_value('secondary_classification', config_overrides)
 
             logger.info(f'[处理任务] 开始处理{path.name}')
 
@@ -956,16 +952,13 @@ class Rename:
                     else:
                         logger.info(f"[目录缓存] 缓存为电影，不使用缓存")
                 else:
-                    # 缓存没命中，必须手动溯源
                     final_search_name = ""
 
                     if path.parent != path.root:
                         pname = path.parent.name
                         pname_cleaned = remove_tag(pname).lower().strip()
 
-                        # 判断父目录是否为季号
                         if is_season_name(pname_cleaned):
-                            # 是季号，找爷爷
                             if path.parent.parent != path.root:
                                 grandparent_name = path.parent.parent.name
                                 final_search_name, year, _, _ = parse_filename(grandparent_name)
@@ -974,7 +967,6 @@ class Rename:
                                 logger.warning(f"[溯源] 无法向上回溯，被迫使用季号目录: {pname}")
                                 final_search_name = pname
                         else:
-                            # 不是季号，直接用父目录
                             final_search_name, year, _, _ = parse_filename(pname)
                             logger.info(f"[溯源] 使用父目录: {final_search_name}")
 
@@ -1008,6 +1000,8 @@ class Rename:
                         )
                         cus_tmdb_id = None
                         is_movie = None
+                        name = None
+                        info = None
                     # ID 获取成功，信任它并写入缓存
                     if not is_movie and path.parent != path.root:
                         new_cache_data = {
@@ -1022,9 +1016,10 @@ class Rename:
                             with Rename._lock:
                                 Rename._dir_cache[cache_key] = new_cache_data
                 except Exception as e:
-                    # ID 获取失败 (404等)，视为脏数据，重置 ID 并回退到下方搜索逻辑
                     logger.warning(f"[ID失效] ID {cus_tmdb_id} 查询失败: {e}，判定为脏数据，将使用文件名搜索...")
                     cus_tmdb_id = None
+                    name = None
+                    info = None
 
             if not cus_tmdb_id:
                 search_candidates = []
@@ -1115,7 +1110,8 @@ class Rename:
                         ai_res = self._attempt_ai_recovery(
                             path, _uuid, is_anime, cus_offset, cus_season_id,
                             effective_use_ai, check_skip_dir=True,
-                            hint_name=hint_for_ai
+                            hint_name=hint_for_ai,
+                            config_overrides=config_overrides
                         )
                         if ai_res:
                             return ai_res
@@ -1145,7 +1141,9 @@ class Rename:
                     return self.error_reply(_uuid, "未找到电影信息", path)
 
                 first_year = info.get('release_date', '0000').split('-')[0]
-                movie_rename_format = cus_movie_format if cus_movie_format else cm.get_config('movie_rename_format')
+
+                # 使用统一配置获取方法
+                movie_rename_format = self._get_config_value('movie_rename_format', config_overrides)
 
                 use_template_ok = False
                 if movie_rename_format:
@@ -1198,7 +1196,8 @@ class Rename:
 
                 root_folder_name = f'{name} ({first_year})'
 
-                tv_rename_format = cus_tv_format if cus_tv_format else cm.get_config('tv_rename_format')
+                # 使用统一配置获取方法
+                tv_rename_format = self._get_config_value('tv_rename_format', config_overrides)
                 if tv_rename_format:
                     try:
                         dummy_ctx = get_render_context(path, info, 1, 1)
@@ -1220,7 +1219,7 @@ class Rename:
                 except:
                     pass
 
-                season_id = self.get_season_id(info, work_path, path, [{'title': name}])
+                season_id = self.get_season_id(info, path, [{'title': name}])
                 if cus_season_id:
                     season_id = int(cus_season_id)
 
@@ -1228,13 +1227,16 @@ class Rename:
                     self.scraper.scrape_tv_show(work_path, info)
 
                 self._process_traditional(
-                    path, rtpath_name, work_path, season_id, info, cus_offset, cus_season_id, cus_tv_format,
+                    path, rtpath_name, work_path, season_id, info, cus_offset, cus_season_id,
+                    config_overrides=config_overrides
                 )
 
             final_tmdb_id = cus_tmdb_id if cus_tmdb_id else (str(info['id']) if info else None)
             display_path = str(list(self.R.values())[0]) if self.R else str(work_path)
 
-            trans_result = Trans(self.R, _uuid).trans_file()
+            # 传递配置给 Trans (重要：确保 Trans 类支持接收此参数)
+            # 如果 trans.py 未修改，请务必修改 trans.py 接收第三个参数
+            trans_result = Trans(self.R, _uuid, config_overrides).trans_file()
 
             if trans_result is True:
                 with Rename._lock:
@@ -1261,7 +1263,7 @@ class Rename:
     def _process_traditional(
             self, path: Path, rtpath_name: str, work_path: Path, season_id: int, info: Optional[Dict] = None,
             cus_offset: Optional[int] = None, cus_season_id: Optional[int] = None,
-            cus_tv_format: Optional[str] = None,
+            config_overrides: Optional[Dict] = None,
     ):
         time.sleep(0.01)
         if path.is_file():
@@ -1275,7 +1277,7 @@ class Rename:
                 info,
                 cus_offset,
                 cus_season_id,
-                cus_tv_format,
+                config_overrides=config_overrides,
             )
         else:
             logger.info(f"[处理任务] 开始对 [文件夹] {path.name}处理")
@@ -1293,7 +1295,7 @@ class Rename:
                             info,
                             cus_offset,
                             cus_season_id,
-                            cus_tv_format,
+                            config_overrides=config_overrides,
                         )
                 else:
                     self.process_sub(
@@ -1305,7 +1307,7 @@ class Rename:
                         info,
                         cus_offset,
                         cus_season_id,
-                        cus_tv_format,
+                        config_overrides=config_overrides,
                     )
 
     def error_reply(
