@@ -24,8 +24,9 @@ class SystemMonitorPage:
         self.log_scroll = None
         self.log_container = None
 
-        # 缓存队列签名，防止频繁重绘
+        # 缓存
         self._last_queue_signature = None
+        self._last_paths_signature = None
 
         # 构建 UI
         self.build_ui()
@@ -33,7 +34,6 @@ class SystemMonitorPage:
         # 启动定时器
         ui.timer(2.0, self.update_status_indicators)
         ui.timer(1.0, self.update_queue_display)
-
         ui.timer(0.1, self.refresh_log_view, once=True)
 
     # --- 静态辅助方法 ---
@@ -60,21 +60,33 @@ class SystemMonitorPage:
 
     @staticmethod
     def get_active_monitor_paths():
+        """
+        获取当前配置的监控路径列表
+        兼容：
+        1. ['/path/a', '/path/b'] (旧格式)
+        2. [{'path': '/path/a', ...}, {'path': '/path/b', ...}] (新格式)
+        """
         paths = []
         try:
             raw_paths = cm.config.get('monitor_paths', [])
             if raw_paths and isinstance(raw_paths, list):
                 for p in raw_paths:
-                    if p and isinstance(p, str) and p.strip():
+                    # 情况1: 旧格式字符串
+                    if isinstance(p, str) and p.strip():
                         paths.append(p.strip())
+                    # 情况2: 新格式字典
+                    elif isinstance(p, dict) and p.get('path'):
+                        path_str = p.get('path')
+                        if isinstance(path_str, str) and path_str.strip():
+                            paths.append(path_str.strip())
+
             if not paths:
-                val = cm.config.get('source_dir')
-                if val: paths.append(str(val))
-            if not paths: return "未配置监控路径"
-            unique_paths = list(set(paths))
-            return ", ".join(unique_paths)
+                return []
+
+            unique_paths = sorted(list(set(paths)))
+            return unique_paths
         except Exception:
-            return "配置读取错误"
+            return []
 
     # --- UI 构建组件 ---
     def info_card(self, title, value, icon, color, subtext=None):
@@ -107,18 +119,28 @@ class SystemMonitorPage:
             # 2. 状态信息
             with ui.grid(columns=2).classes('w-full gap-4'):
                 # 监控卡片
-                with ui.card().classes('w-full p-0 no-shadow border-[1px]'):
+                with ui.card().classes('w-full p-0 no-shadow border-[1px] flex flex-col'):
                     with ui.row().classes('w-full p-2 bg-grey-1 border-b-[1px] items-center gap-2'):
                         ui.icon('folder_open', color='indigo')
                         ui.label('监控目录配置').classes('font-bold text-xs text-grey-8')
                         self.monitor_status_icon = ui.icon('circle', size='xs', color='grey-4')
-                    with ui.row().classes('w-full p-3 items-center justify-between'):
-                        with ui.column().classes('gap-1 w-3/4'):
-                            ui.label('监控路径').classes('text-xs text-grey-5')
-                            self.monitor_path_label = ui.label('读取中...').classes(
-                                'text-sm font-bold text-grey-8 break-all leading-tight')
+
+                    # 使用 flex-grow 让内容区填满，并处理溢出
+                    with ui.row().classes('w-full p-3 items-start justify-between flex-grow'):
+                        with ui.column().classes('w-3/4 gap-1'):
+                            ui.label('监控路径列表').classes('text-xs text-grey-5')
+                            # 使用 white-space: pre-wrap 支持换行，限制高度并允许滚动
+                            self.monitor_path_label = ui.label('读取中...').style(
+                                'white-space: pre-wrap; max-height: 80px; overflow-y: auto; display: block; width: 100%;'
+                            ).classes('text-sm font-bold text-grey-8 leading-tight')
+
+                        with ui.column().classes('items-end gap-1'):
                             self.monitor_status_text = ui.label('检查中...').classes(
                                 'text-xs font-bold text-grey-5 bg-grey-2 px-2 py-1 rounded')
+                            # 显示模式 (Inotify/Polling)
+                            monitor_mode = cm.config.get('monitor_mode', 'fast')
+                            mode_text = "高效模式" if monitor_mode == 'fast' else "兼容模式"
+                            ui.label(mode_text).classes('text-[10px] text-grey-4')
 
                 # TMDB 卡片
                 with ui.card().classes('w-full p-0 no-shadow border-[1px]'):
@@ -146,7 +168,7 @@ class SystemMonitorPage:
                             ui.label('正在处理').classes('font-bold text-blue-9 text-sm')
                         with ui.row().classes('w-full p-4 items-center justify-center h-[60px]'):
                             self.current_file_label = ui.label('无任务').classes(
-                                'text-grey-5 italic text-center break-all text-sm')
+                                'text-grey-5 italic text-center break-all text-sm line-clamp-2')
 
                     with ui.card().classes('w-full flex-grow p-0 no-shadow border-[1px] flex flex-col'):
                         with ui.row().classes('w-full p-2 bg-grey-2 items-center justify-between border-b-[1px]'):
@@ -228,7 +250,7 @@ class SystemMonitorPage:
                 color_class = 'text-green-400'
                 u_msg = msg.upper()
                 if 'DEBUG' in u_msg:
-                    color_class = 'text-gray-400'  # 注意 gray (Tailwind)
+                    color_class = 'text-gray-400'
                 elif 'WARN' in u_msg:
                     color_class = 'text-orange-400'
                 elif 'ERROR' in u_msg or 'CRITICAL' in u_msg:
@@ -243,12 +265,24 @@ class SystemMonitorPage:
 
     def update_status_indicators(self):
         try:
-            active_paths = self.get_active_monitor_paths()
-            if self.monitor_path_label:
-                self.monitor_path_label.text = active_paths
+            # 1. 更新监控路径显示
+            paths_list = self.get_active_monitor_paths()
 
+            # 使用签名检测是否有变化，减少重绘（虽然这里只是更新text）
+            current_paths_sig = str(paths_list)
+            if self.monitor_path_label and current_paths_sig != self._last_paths_signature:
+                if not paths_list:
+                    self.monitor_path_label.text = "未配置监控路径"
+                    self.monitor_path_label.classes(replace='text-sm italic text-orange-5')
+                else:
+                    # 将列表转换为换行符分隔的字符串，配合 white-space: pre-wrap 显示
+                    display_text = "\n".join([f"• {p}" for p in paths_list])
+                    self.monitor_path_label.text = display_text
+                    self.monitor_path_label.classes(replace='text-xs font-mono text-grey-8 leading-tight')
+                self._last_paths_signature = current_paths_sig
+
+            # 2. 更新运行状态
             is_running = False
-            has_paths = (active_paths != "未配置" and active_paths != "配置读取错误" and active_paths != "")
             monitor_enabled = cm.config.get('monitor_enabled', False)
 
             if hasattr(monitor_service, 'observer') and monitor_service.observer:
@@ -257,15 +291,19 @@ class SystemMonitorPage:
             if self.monitor_status_text and self.monitor_status_icon:
                 if is_running:
                     self.monitor_status_text.text = '运行中'
-                    self.monitor_status_text.classes(replace='text-white bg-green-6')
+                    self.monitor_status_text.classes(replace='text-white bg-green-6 px-2 py-1 rounded shadow-sm')
                     self.monitor_status_icon.props('color=green')
-                elif monitor_enabled and has_paths:
+                elif monitor_enabled and paths_list:
                     self.monitor_status_text.text = '启动中'
-                    self.monitor_status_text.classes(replace='text-white bg-orange-5')
+                    self.monitor_status_text.classes(replace='text-white bg-orange-5 px-2 py-1 rounded')
                     self.monitor_status_icon.props('color=orange')
+                elif not monitor_enabled:
+                    self.monitor_status_text.text = '已禁用'
+                    self.monitor_status_text.classes(replace='text-white bg-grey-5 px-2 py-1 rounded')
+                    self.monitor_status_icon.props('color=grey')
                 else:
                     self.monitor_status_text.text = '未启动'
-                    self.monitor_status_text.classes(replace='text-white bg-red-4')
+                    self.monitor_status_text.classes(replace='text-white bg-red-4 px-2 py-1 rounded')
                     self.monitor_status_icon.props('color=red')
         except Exception:
             pass
@@ -287,7 +325,7 @@ class SystemMonitorPage:
             if self.queue_count_badge:
                 self.queue_count_badge.text = str(len(items))
 
-            # 简单的差异检测优化，防止 NiceGUI Warning
+            # 简单的差异检测优化
             current_signature = f"{len(items)}_{items[0] if items else ''}"
             if current_signature == self._last_queue_signature:
                 return
@@ -312,6 +350,7 @@ class SystemMonitorPage:
                             ui.label(f'...还有 {len(items) - 50} 个任务').classes('text-xs text-grey-5 q-ml-md q-my-sm')
         except Exception:
             pass
+
 
 def info_page():
     """
