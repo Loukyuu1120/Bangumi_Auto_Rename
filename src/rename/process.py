@@ -1136,7 +1136,11 @@ class Rename:
             season_id = 0
             target_file = None
             if is_movie:
-                _WORK_PATH = self.ANIME_MOVIE_PATH if is_anime else self.MOVIE_PATH
+                custom_movie_dir = self._get_config_value('target_movie_dir', config_overrides)
+                if custom_movie_dir:
+                    _WORK_PATH = Path(custom_movie_dir)
+                else:
+                    _WORK_PATH = self.ANIME_MOVIE_PATH if is_anime else self.MOVIE_PATH
                 if not name:
                     return self.error_reply(_uuid, "未找到电影信息", path)
 
@@ -1182,10 +1186,14 @@ class Rename:
                     self.scraper.scrape_movie(target_file, info)
 
             else:
-                if is_anime:
-                    _WORK_PATH = self.ANIME_PATH
+                custom_tv_dir = self._get_config_value('target_tv_dir', config_overrides)
+                if custom_tv_dir:
+                     _WORK_PATH = Path(custom_tv_dir)
                 else:
-                    _WORK_PATH = self.BANGUMI_PATH
+                    if is_anime:
+                        _WORK_PATH = self.ANIME_PATH
+                    else:
+                        _WORK_PATH = self.BANGUMI_PATH
 
                 if not name:
                     return self.error_reply(_uuid, "未找到剧集信息", path)

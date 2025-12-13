@@ -20,8 +20,7 @@ class TaskConfigDialog(ui.dialog):
         self.config = {
             'is_anime': True,
             'exclude_keywords': '',
-            'cus_tv_format': '',
-            'cus_movie_format': ''
+            'overrides': {},
         }
         # 稍微加宽一点以容纳更多配置
         _card_style = 'width: 600px; max-width: 90vw; max-height: 85vh; overflow-y: auto;'
@@ -55,6 +54,17 @@ class TaskConfigDialog(ui.dialog):
                     with ui.column().classes('p-3 gap-3 w-full'):
                         ui.label('以下选项留空或“默认”表示使用全局设置').classes('text-xs text-gray-500')
 
+                        ui.label('📁 目标输出目录').classes('font-bold text-xs')
+                        with ui.row().classes('w-full gap-2'):
+                            ui.input(label='📺 TV目标目录',
+                                     placeholder='留空使用全局',
+                                     on_change=lambda e: self._set_ov('target_tv_dir', e.value)
+                                     ).props('filled dense').classes('flex-1')
+
+                            ui.input(label='🎬 Movie目标目录',
+                                     placeholder='留空使用全局',
+                                     on_change=lambda e: self._set_ov('target_movie_dir', e.value)
+                                     ).props('filled dense').classes('flex-1')
                         # 1. 模板
                         ui.input(label='📺 TV模板', on_change=lambda e: self._set_ov('tv_rename_format', e.value)).props(
                             'filled dense')
@@ -211,8 +221,7 @@ async def pick_file() -> None:
 
     is_anime = config_result['is_anime']
     exclude_str = config_result['exclude_keywords']
-    cus_tv_format = config_result.get('cus_tv_format', '')
-    cus_movie_format = config_result.get('cus_movie_format', '')
+    overrides = config_result.get('overrides', {})
 
     exclude_pattern = _compile_regex(exclude_str)
 
@@ -225,16 +234,15 @@ async def pick_file() -> None:
             paths,
             is_anime,
             exclude_pattern,
-            cus_tv_format,
-            cus_movie_format
+            overrides,
         )
 
         msg = f'已将 {count_added} 个文件加入后台队列'
         if count_ignored > 0:
             msg += f' (忽略 {count_ignored} 个)'
 
-        if cus_tv_format or cus_movie_format:
-            msg += " (已应用自定义模板)"
+        if overrides:
+            msg += " (已应用自定义配置)"
 
         if count_added > 0:
             notify(msg, type='positive', timeout=5000)

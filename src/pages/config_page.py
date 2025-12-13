@@ -803,11 +803,20 @@ class ConfigPage(ui.dialog):
         self.monitor_paths_data = []
         for item in current_data:
             if isinstance(item, str):
-                self.monitor_paths_data.append({"path": item, "tv_format": "", "movie_format": ""})
+                # 兼容旧格式，补全字典
+                self.monitor_paths_data.append({
+                    "path": item,
+                    "tv_format": "",
+                    "movie_format": "",
+                    "target_tv_dir": "",
+                    "target_movie_dir": ""
+                })
             elif isinstance(item, dict):
-                # 补全字段
+                # 补全可能缺少的字段
                 item.setdefault("tv_format", "")
                 item.setdefault("movie_format", "")
+                item.setdefault("target_tv_dir", "")
+                item.setdefault("target_movie_dir", "")
                 self.monitor_paths_data.append(item)
 
         self.path_container = ui.column().classes("w-full gap-2")
@@ -837,7 +846,28 @@ class ConfigPage(ui.dialog):
                         with ui.expansion("监控配置 (点击展开)", icon="settings").classes("w-full text-sm text-gray-600"):
                             with ui.column().classes("w-full gap-2 p-2 bg-gray-50"):
                                 ui.label("💡 留空或不选表示使用全局默认设置").classes("text-xs text-gray-400 mb-1")
+                                # === 0. 目标输出目录 (Priority) ===
+                                ui.label("📁 目标输出目录 (覆盖全局设置)").classes("font-bold text-xs mt-1")
+                                with ui.row().classes("w-full gap-2"):
+                                    # TV 目标目录
+                                    tv_dir_input = ui.input(
+                                        label="📺 电视剧目标目录",
+                                        value=item.get("target_tv_dir", ""),
+                                        placeholder="留空则使用全局配置",
+                                        on_change=lambda e, i=idx: self._update_path_data(i, "target_tv_dir", e.value)
+                                    ).props("filled dense").classes("flex-1")
+                                    RedButton("📂", on_click=lambda i=idx, inp=tv_dir_input: self._pick_folder_for_item(i, inp)).props("dense flat")
 
+                                    # Movie 目标目录
+                                    mv_dir_input = ui.input(
+                                        label="🎬 电影目标目录",
+                                        value=item.get("target_movie_dir", ""),
+                                        placeholder="留空则使用全局配置",
+                                        on_change=lambda e, i=idx: self._update_path_data(i, "target_movie_dir", e.value)
+                                    ).props("filled dense").classes("flex-1")
+                                    RedButton("📂", on_click=lambda i=idx, inp=mv_dir_input: self._pick_folder_for_item(i, inp)).props("dense flat")
+
+                                ui.separator().classes("my-1")
                                 # === 1. 重命名模板 ===
                                 with ui.row().classes("w-full gap-2"):
                                     ui.input(label="📺 TV模板", value=item.get("tv_rename_format", ""),
