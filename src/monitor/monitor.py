@@ -2,10 +2,12 @@ import time
 import os
 import re
 import platform
+import gc
 from pathlib import Path
 from threading import Event, Thread
 from queue import Queue, Empty
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+from nicegui import ui
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver
@@ -80,13 +82,17 @@ class MonitorService:
     def __init__(self):
         if self.initialized:
             return
-        self.task_queue = Queue()
+        # 限制队列大小，形成背压，防止生产者过快导致内存积压
+        self.task_queue = Queue(maxsize=500)
         self.stop_event = Event()
         self.observer = None
         self.worker_thread = None
         self.is_running = False
         self.current_file: str | None = None
         self.path_map: Dict[Path, Dict] = {}
+
+        self._timer: Optional[ui.timer] = None
+
         self.initialized = True
 
     # --- 核心辅助方法：统计文件数 ---
@@ -239,6 +245,19 @@ class MonitorService:
         else:
             logger.warning("[监控] 没有有效的监控目录，服务未启动监听")
 
+        # 5. 启动自动清理定时器 (保存引用以便后续取消)
+        if self._timer is None:
+            self._timer = ui.timer(86400.0, lambda: self._scheduled_cache_clear())
+            logger.info("[监控] 自动内存维护定时器已启动 (周期: 24小时)")
+
+    def _scheduled_cache_clear(self):
+        """执行定时的缓存清理任务"""
+        try:
+            count = Rename.clear_processed_cache()
+            logger.info(f"[定时任务] 自动清理了 {count} 条路径缓存记录")
+        except Exception as e:
+            logger.error(f"[定时任务] 缓存清理失败: {e}")
+
     def stop(self):
         """停止监控服务和处理线程"""
         logger.info("[监控] 正在接收停止指令...")
@@ -257,6 +276,12 @@ class MonitorService:
             self.worker_thread.join()
             self.worker_thread = None
             logger.info("[监控] 处理线程已停止")
+
+        # 3. 停止定时器
+        if self._timer:
+            self._timer.cancel()
+            self._timer = None
+            logger.info("[监控] 内存维护定时器已停止")
 
         self.is_running = False
         logger.info("[监控] 服务已完全停止")
@@ -286,6 +311,12 @@ class MonitorService:
 
     def _process_worker(self):
         logger.info("[处理线程] 启动成功，等待任务...")
+        rename_processor = Rename()
+        logger.debug("[处理线程] Rename 处理器已初始化")
+        # ============================================
+
+        processed_count = 0
+
         while not self.stop_event.is_set():
             try:
                 item = self.task_queue.get(timeout=1)
@@ -331,7 +362,7 @@ class MonitorService:
                 # 合并手动配置 (手动配置优先)
                 final_overrides.update(manual_overrides)
 
-                # 过滤掉 None 或 空值，确保 Rename._get_conf 能正确回退
+                # 过滤掉 None 或 空值
                 final_overrides = {k: v for k, v in final_overrides.items() if v is not None and v != ""}
 
                 # 提取覆盖参数
@@ -343,22 +374,24 @@ class MonitorService:
                 if 'is_movie' in options:
                     rename_kwargs['_is_movie'] = options.pop('is_movie')
 
-                # 合并剩余 options (确保里面不再包含 Rename 不识别的参数)
+                # 合并剩余 options
                 rename_kwargs.update(options)
-
-                # 清理已知不需要传给 rename 的参数
                 rename_kwargs.pop("use_ai", None)
                 rename_kwargs.pop("config_overrides", None)
-
-                # 重新加入正确的 config_overrides
                 rename_kwargs['config_overrides'] = final_overrides
 
                 logger.info(
                     f"[开始处理] {file_path.name} | AI: {use_ai} | HasCustomCfg: {bool(custom_config)}"
                 )
 
-                # 执行重命名
-                Rename().process(file_path, use_ai=use_ai, **rename_kwargs)
+                # === 优化点: 使用预先创建的实例调用 process ===
+                rename_processor.process(file_path, use_ai=use_ai, **rename_kwargs)
+                # ============================================
+
+                # 定期GC
+                processed_count += 1
+                if processed_count % 50 == 0:
+                    gc.collect()
 
             except Exception as e:
                 logger.error(f"[处理异常] {file_path.name}: {e}")

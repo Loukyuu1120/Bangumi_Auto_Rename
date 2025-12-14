@@ -4,6 +4,7 @@ import uuid
 import time
 import types
 import threading
+import gc
 from pathlib import Path
 from difflib import SequenceMatcher
 from typing import Dict, List, Tuple, Union, Optional, Any
@@ -53,6 +54,8 @@ class Rename:
     _processing_paths = set()
     _tmdb_search_cache: Dict[tuple, tuple] = {}
     _logger_patched = False
+    MAX_CACHE_SIZE = 500
+    CACHE_PURGE_COUNT = 100
 
     def __init__(self):
         self.BANGUMI_PATH = Path(cm.get_config('bangumi_path'))
@@ -100,6 +103,47 @@ class Rename:
                 Rename._logger_patched = True
             except Exception:
                 pass
+
+    @classmethod
+    def clear_processed_cache(cls) -> int:
+        """
+        手动清空已处理路径的缓存。
+        返回被清理的条目数量。
+        """
+        with cls._lock:
+            count = len(cls._processed_paths)
+            cls._processed_paths.clear()
+            gc.collect()
+            return count
+
+    @classmethod
+    def _safe_cache_update(cls, cache_dict: Dict, key: Any, value: Any, desc: str = "缓存"):
+        """
+        更新缓存前检查大小，如果超出限制，则移除最早加入的元素
+        """
+        with cls._lock:
+            if key in cache_dict:
+                del cache_dict[key]
+
+            cache_dict[key] = value
+
+            # 检查容量
+            if len(cache_dict) > cls.MAX_CACHE_SIZE:
+                try:
+                    keys_to_remove = []
+                    iterator = iter(cache_dict)
+                    for _ in range(cls.CACHE_PURGE_COUNT):
+                        try:
+                            keys_to_remove.append(next(iterator))
+                        except StopIteration:
+                            break
+
+                    for k in keys_to_remove:
+                        cache_dict.pop(k, None)
+
+                    logger.debug(f"[{desc}] 触发清理，移除旧条目 {len(keys_to_remove)} 个，当前剩余: {len(cache_dict)}")
+                except Exception as e:
+                    logger.warning(f"[{desc}] 清理失败: {e}")
 
     @staticmethod
     def _get_config_value(key: str, overrides: Optional[Dict[str, Any]] = None) -> Any:
@@ -579,8 +623,12 @@ class Rename:
                 s2_name, s2_info = self.search.get_movie_info(rtpath_name, 0)
 
             if s2_name:
-                with Rename._lock:
-                    Rename._tmdb_search_cache[(norm_name, year, "movie")] = (s2_name, s2_info)
+                self._safe_cache_update(
+                    Rename._tmdb_search_cache,
+                    (norm_name, year, "movie"),
+                    (s2_name, s2_info),
+                    "TMDB电影缓存"
+                )
 
             if not s2_name:
                 return f'[TMDB] 未搜索到电影信息 (强制Movie模式), 文件名: {rtpath_name}'
@@ -610,7 +658,12 @@ class Rename:
 
                 if s1_name:
                     with Rename._lock:
-                        Rename._tmdb_search_cache[tv_cache_key] = (s1_name, s1_info)
+                        self._safe_cache_update(
+                            Rename._tmdb_search_cache,
+                            tv_cache_key,
+                            (s1_name, s1_info),
+                            "TMDB剧集缓存"
+                        )
 
             if not s1_name or not s1_info:
                 return f'[TMDB] 未搜索到电视剧信息 (检测到SxxExx), 搜索词: {rtpath_name}'
@@ -818,13 +871,14 @@ class Rename:
                 )
 
                 cache_key = str(path.parent.absolute())
+                cache_data = {
+                    'tmdb_id': str(ai_tmdb_id) if ai_tmdb_id else None,
+                    'name': ai_name,
+                    'is_anime': is_anime,
+                    'is_movie': ai_is_movie
+                }
+                self._safe_cache_update(Rename._dir_cache, cache_key, cache_data, "AI目录缓存")
                 with Rename._lock:
-                    Rename._dir_cache[cache_key] = {
-                        'tmdb_id': str(ai_tmdb_id) if ai_tmdb_id else None,
-                        'name': ai_name,
-                        'is_anime': is_anime,
-                        'is_movie': ai_is_movie
-                    }
                     Rename._processing_paths.discard(str(path.resolve()))
 
                 logger.info(f"[缓存写入] AI元数据推断结果已缓存至: {path.parent.name}")
@@ -1013,8 +1067,7 @@ class Rename:
                         if _scoped_cache is not None:
                             _scoped_cache[cache_key] = new_cache_data
                         else:
-                            with Rename._lock:
-                                Rename._dir_cache[cache_key] = new_cache_data
+                            self._safe_cache_update(Rename._dir_cache, cache_key, new_cache_data, "目录缓存")
                 except Exception as e:
                     logger.warning(f"[ID失效] ID {cus_tmdb_id} 查询失败: {e}，判定为脏数据，将使用文件名搜索...")
                     cus_tmdb_id = None
@@ -1129,8 +1182,7 @@ class Rename:
                 if _scoped_cache is not None:
                     _scoped_cache[cache_key] = new_cache_data
                 else:
-                    with Rename._lock:
-                        Rename._dir_cache[cache_key] = new_cache_data
+                    self._safe_cache_update(Rename._dir_cache, cache_key, new_cache_data, "目录缓存")
 
             work_path = None
             season_id = 0
