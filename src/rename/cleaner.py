@@ -153,9 +153,10 @@ def match_and_extract(input_string: str):
     """
     提取季和集
     支持动漫格式 [01], [01v2] 等
+    支持纯集数格式 .EP01, E01 (默认为 S1)
     """
     # 1. 标准 S01E01 格式
-    pattern = re.compile(r'S(\d+)(?:E|EP)(\d+)', re.IGNORECASE)
+    pattern = re.compile(r'(?i)S(\d+)(?:E|EP)(\d+)')
     match = pattern.search(input_string)
     if match:
         return int(match.group(1)), int(match.group(2))
@@ -171,21 +172,29 @@ def match_and_extract(input_string: str):
             return season, episode
 
     # 3. 动漫方括号格式 [01], [12v2], 【03】
-    # 过滤掉常见的年份(19xx, 20xx) 和分辨率(720, 1080, 2160, 264, 265)
     brackets = re.findall(r'[\[【](\d{1,4})(?:[vV]\d)?[\]】]', input_string)
     valid_eps = []
     for val in brackets:
         num = int(val)
-        # 排除 480, 720, 1080, 2160 (分辨率) 以及 264, 265 (编码) 以及 年份
         if num not in [480, 576, 720, 1080, 2160, 264, 265] and not (1900 < num < 2100):
             valid_eps.append(num)
 
     if valid_eps:
-        # 通常取第一个有效的数字作为集数
         episode = valid_eps[0]
         season = extract_season(input_string)
         if season == -1: season = 1
         return season, episode
+
+    # 4. 纯集数格式 .EP19, E19, EP19 (没有 S 前缀的情况)
+    # 必须有分隔符或开头结尾，避免匹配到单词中的 E
+    pure_ep_match = re.search(r'(?i)(?:^|[.\s\-_\[\(\[])E(P)?(\d{1,4})(?:[vV]\d)?(?:$|[.\s\-_\]\)\]])', input_string)
+    if pure_ep_match:
+        episode = int(pure_ep_match.group(2))
+        # 排除年份和常见分辨率
+        if not (1900 < episode < 2100) and episode not in [480, 720, 1080, 2160]:
+            season = extract_season(input_string)
+            if season == -1: season = 1
+            return season, episode
 
     return None
 
@@ -193,7 +202,7 @@ def match_and_extract(input_string: str):
 def extract_base_num(filename: str) -> Optional[float]:
     """
     提取基础集数，用于 process_sub 的兜底逻辑
-    增强：支持动漫格式 [01]
+    增强：支持动漫格式 [01]，支持 .EP01
     """
     # 1. SxxExx 格式
     match = re.search(r'(?i)S\d+(?:E|EP)(\d+)', filename)
@@ -204,8 +213,14 @@ def extract_base_num(filename: str) -> Optional[float]:
     brackets = re.findall(r'[\[【](\d{1,4})(?:[vV]\d)?[\]】]', filename)
     for val in brackets:
         num = float(val)
-        # 同样的过滤逻辑
         if num not in [480, 576, 720, 1080, 2160, 264, 265] and not (1900 < num < 2100):
+            return num
+
+    # 3. 纯集数格式 .EP19
+    match_ep = re.search(r'(?i)(?:^|[.\s\-_])E(P)?(\d{1,4})(?:$|[.\s\-_])', filename)
+    if match_ep:
+        num = float(match_ep.group(2))
+        if not (1900 < num < 2100):
             return num
 
     return None
@@ -309,7 +324,7 @@ def is_season_name(filename: str) -> bool:
 def parse_filename(filename: str) -> Tuple[str, int, Optional[int], Optional[int]]:
     """
     解析文件名：标题, 年份, 季, 集
-    增强版：支持 S01-S02 格式分割，支持技术参数分割
+    增强版：支持 S01-S02 格式分割，支持 .EP19 格式
     """
     original = filename
     name = remove_tag(filename)
@@ -319,13 +334,11 @@ def parse_filename(filename: str) -> Tuple[str, int, Optional[int], Optional[int
     ext_regex = r'\.(' + '|'.join(ext_list) + r')$'
     name = re.sub(ext_regex, '', name, flags=re.IGNORECASE)
 
-    # 2. 提取年份 (优先级最高)
+    # 2. 提取年份
     year = 0
-    # 优化年份正则，避免匹配到分辨率如 1080 (19xx-20xx)
     year_match = re.search(r'(?:[.\s\-_\(\[]|^)([12][90]\d{2})(?:[.\s\-_\)\]]|$)', name)
     if year_match:
         year = int(year_match.group(1))
-        # 暂时截断，后面可能还需要微调
         title_part = name[:year_match.start()]
     else:
         title_part = name
@@ -334,30 +347,27 @@ def parse_filename(filename: str) -> Tuple[str, int, Optional[int], Optional[int
     season_num = None
     episode_num = None
 
-    # Pattern A: S01E01 (标准季集)
+    # Pattern A: S01E01
     se_match = re.search(r'[.\s\-_]S(\d{1,2})(?:E|EP)(\d{1,3})', name, re.IGNORECASE)
 
-    # Pattern B: S01-S02 (季度合集 - 常见于目录名)
+    # Pattern B: S01-S02
     s_range_match = re.search(r'[.\s\-_]S(\d{1,2})\s*-\s*S?(\d{1,2})', name, re.IGNORECASE)
 
-    # Pattern C: S01 (单季 - 常见于目录名)
+    # Pattern C: S01
     s_only_match = re.search(r'[.\s\-_]S(\d{1,2})(?:$|[.\s\-_])', name, re.IGNORECASE)
 
     if se_match:
-        # 命中 S01E01
         season_num = int(se_match.group(1))
         episode_num = int(se_match.group(2))
         if se_match.start() < len(title_part):
             title_part = title_part[:se_match.start()]
 
     elif s_range_match:
-        # 命中 S01-S02 -> 视为第1季，且这是标题的边界
         season_num = int(s_range_match.group(1))
         if s_range_match.start() < len(title_part):
             title_part = title_part[:s_range_match.start()]
 
     elif s_only_match:
-        # 命中 S01
         season_num = int(s_only_match.group(1))
         if s_only_match.start() < len(title_part):
             title_part = title_part[:s_only_match.start()]
@@ -371,14 +381,24 @@ def parse_filename(filename: str) -> Tuple[str, int, Optional[int], Optional[int
             season_num = extract_season(title_part) or 1
             title_part = title_part[:cn_match.start()]
 
-    # 4. 兜底清洗：如果没找到年份也没找到季号，尝试用分辨率/技术参数截断
+        # Pattern E: 纯 EP19 或 .EP19 (默认为 S1)
+        # 此逻辑放在最后，防止误判
+        if episode_num is None:
+            pure_ep_match = re.search(r'(?i)[.\s\-_]E(P)?(\d{1,4})(?:$|[.\s\-_])', title_part)
+            if pure_ep_match:
+                # 再次确认不是年份
+                temp_ep = int(pure_ep_match.group(2))
+                if not (1900 < temp_ep < 2100):
+                    episode_num = temp_ep
+                    season_num = extract_season(title_part) or 1
+                    title_part = title_part[:pure_ep_match.start()]
+
+    # 4. 兜底清洗
     if year == 0 and season_num is None:
-        # 匹配常见分辨率 1080P, 4K, 2160P, 720P
         res_match = re.search(r'[.\s\-_](1080[PpIi]|4[Kk]|2160[Pp]|720[Pp])', title_part, re.IGNORECASE)
         if res_match:
             title_part = title_part[:res_match.start()]
         else:
-            # 匹配编码 H264, AVC, HEVC
             codec_match = re.search(r'[.\s\-_]([xXhH]\.?26[45]|HEVC|AVC)', title_part, re.IGNORECASE)
             if codec_match:
                 title_part = title_part[:codec_match.start()]
