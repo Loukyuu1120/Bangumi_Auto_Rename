@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import List
 
+from nicegui import run
 from .monitor import monitor_service
 from ..config.config_manager import cm
 from ..logger import logger
@@ -71,11 +72,18 @@ class MonitorManager:
         # 传入带有配置信息的字典
         monitor_service.start(valid_path_configs, exclude_dirs)
 
-    def restart_from_config(self) -> None:
+    async def restart_from_config(self) -> None:
         """根据当前配置重启监控（保存配置后调用）"""
         logger.info("[监控管理器] 正在根据新配置重启监控...")
-        self._stop_all()
-        self.start_from_config()
+        await run.io_bound(self._do_restart_sync)
+
+    def _do_restart_sync(self) -> None:
+        """实际执行停止和启动的同步方法"""
+        try:
+            self._stop_all()
+            self.start_from_config()
+        except Exception as e:
+            logger.error(f"[监控管理器] 重启过程中发生错误: {e}")
 
     def _parse_config_list(self, config_val) -> List[str]:
         """辅助方法：处理可能是字符串也可能是列表的配置项"""

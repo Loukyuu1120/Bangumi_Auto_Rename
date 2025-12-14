@@ -47,7 +47,7 @@ jikan = Jikan()
 
 
 class Rename:
-    _lock = threading.Lock()
+    _lock = threading.RLock()
     _dir_cache = {}
     _ai_mapping_cache = {}
     _processed_paths = set()
@@ -332,7 +332,9 @@ class Rename:
         _idata = match_and_extract(item_name)
         if _idata:
             if cus_season_id is None:
-                season_id = int(_idata[0])
+                extracted_season = int(_idata[0])
+                if extracted_season > 0:
+                    season_id = extracted_season
             ep = _idata[1]
         else:
             p = r'[a-zA-Z0-9]'
@@ -619,7 +621,7 @@ class Rename:
                         s2_name, s2_info = None, None
 
             if not s2_name and year != 0:
-                logger.debug(f"[TMDB搜索] 电影带年份搜索失败，尝试去除年份: 关键词='{rtpath_name}'")
+                logger.info(f"[TMDB搜索] 电影带年份搜索失败，尝试去除年份: 关键词='{rtpath_name}'")
                 s2_name, s2_info = self.search.get_movie_info(rtpath_name, 0)
 
             if s2_name:
@@ -649,11 +651,11 @@ class Rename:
                     s1_name, s1_info = None, None
 
             if not s1_name:
-                logger.debug(f"[TMDB搜索] 正在搜索TV (SxxExx模式): 关键词='{rtpath_name}', 年份={year}")
+                logger.info(f"[TMDB搜索] 正在搜索TV (SxxExx模式): 关键词='{rtpath_name}', 年份={year}")
                 s1_name, s1_info = self.search.get_tv_info(rtpath_name, year)
 
                 if not s1_name and year != 0:
-                    logger.debug(f"[TMDB搜索] TV带年份搜索失败，尝试去除年份: 关键词='{rtpath_name}'")
+                    logger.info(f"[TMDB搜索] TV带年份搜索失败，尝试去除年份: 关键词='{rtpath_name}'")
                     s1_name, s1_info = self.search.get_tv_info(rtpath_name, 0)
 
                 if s1_name:
@@ -677,7 +679,7 @@ class Rename:
         logger.info('[处理任务] 未传入任务类型且无明确SxxExx特征，开始双向搜索判断！')
         pos = 0
         tv_cache_key = (norm_name, year, "tv")
-        logger.debug(f"[TMDB搜索] 双向搜索-尝试TV: 关键词='{rtpath_name}', 年份={year}")
+        logger.info(f"[TMDB搜索] 双向搜索-尝试TV: 关键词='{rtpath_name}', 年份={year}")
         with Rename._lock:
             s1_name, s1_info = Rename._tmdb_search_cache.get(tv_cache_key, (None, None))
 

@@ -408,7 +408,7 @@ class ConfigPage(ui.dialog):
     def _change(self, key: str, value: str) -> None:
         setattr(self.config, key, value)
 
-    def _handle_ok(self):
+    async def _handle_ok(self):
         # 验证URL配置项
         url_configs = ["ai_base_url", "gemini_base_url"]
         for url_config in url_configs:
@@ -440,9 +440,9 @@ class ConfigPage(ui.dialog):
             logger.info(f"[配置] 运行时日志级别已更新为 {cm.get_config('log_level')}")
         except Exception as e:
             logger.error(f"[配置] 更新运行时日志级别失败: {e}")
-        # 根据新配置重启监控
+
         try:
-            monitor_manager.restart_from_config()
+            await monitor_manager.restart_from_config()
             logger.info("[配置] 已根据新配置重启目录监控")
         except Exception as e:
             logger.error(f"[配置] 重启目录监控失败: {e}")

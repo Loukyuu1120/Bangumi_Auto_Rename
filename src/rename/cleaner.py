@@ -1,7 +1,7 @@
 import re
 import difflib
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Union
 from jinja2 import Environment, BaseLoader
 from ..logger import logger
 from .utils import (
@@ -125,7 +125,11 @@ def remove_code(s: str) -> str:
 
 # ================= 核心识别逻辑 =================
 
-def extract_season(text: str):
+def extract_season(text: str) -> int:
+    """
+    从文本中提取季号
+    返回: 季号(int), 未找到返回 -1
+    """
     text = remove_code(text)
     match = re.search(r'第([\d一二三四五六七八九零]{1,2})(季|部分|部)', text)
     if match:
@@ -138,22 +142,24 @@ def extract_season(text: str):
     for p in SEASON_PATTERNS:
         match = re.search(p, text, re.IGNORECASE)
         if match:
-            if 'Season' in p:
-                if match.group(1) in NUM_MAP:
-                    return NUM_MAP[match.group(1)]
-                return int(match.group(1))
-            elif 'I' in p or 'V' in p:
-                return ROMA_MAP.get(match.group(1), 1)
-            else:
-                return int(match.group(1))
+            try:
+                if 'Season' in p:
+                    if match.group(1) in NUM_MAP:
+                        return NUM_MAP[match.group(1)]
+                    return int(match.group(1))
+                elif 'I' in p or 'V' in p:
+                    return ROMA_MAP.get(match.group(1), 1)
+                else:
+                    return int(match.group(1))
+            except (ValueError, IndexError):
+                continue
     return -1
 
 
-def match_and_extract(input_string: str):
+def match_and_extract(input_string: str) -> Optional[Tuple[int, int]]:
     """
     提取季和集
-    支持动漫格式 [01], [01v2] 等
-    支持纯集数格式 .EP01, E01, EP19 (默认为 S1)
+    返回: (season, episode) 或者 None
     """
     # 1. 标准 S01E01 格式
     pattern = re.compile(r'(?i)S(\d+)(?:E|EP)(\d+)')
@@ -167,7 +173,7 @@ def match_and_extract(input_string: str):
         ep_str = cn_pattern.group(1)
         episode = int(ep_str) if ep_str.isdigit() else chinese_to_arabic(ep_str)
         season = extract_season(input_string)
-        if season == -1: season = 1
+        if season <= 0: season = 1
         if episode > 0:
             return season, episode
 
@@ -182,7 +188,7 @@ def match_and_extract(input_string: str):
     if valid_eps:
         episode = valid_eps[0]
         season = extract_season(input_string)
-        if season == -1: season = 1
+        if season <= 0: season = 1
         return season, episode
 
     # 4. 纯集数格式 .EP19, E19, EP19 (没有 S 前缀的情况)
@@ -193,7 +199,9 @@ def match_and_extract(input_string: str):
         # 排除年份和常见分辨率
         if not (1900 < episode < 2100) and episode not in [480, 720, 1080, 2160]:
             season = extract_season(input_string)
-            if season == -1: season = 1
+            # 【修复】强制兜底：如果找不到季号，默认为1，绝对不返回-1
+            if season <= 0:
+                season = 1
             return season, episode
 
     return None
@@ -217,7 +225,6 @@ def extract_base_num(filename: str) -> Optional[float]:
             return num
 
     # 3. 纯集数格式 .EP19 或 EP19
-    # 增加了 ^ 允许匹配开头
     match_ep = re.search(r'(?i)(?:^|[.\s\-_])E(P)?(\d{1,4})(?:$|[.\s\-_])', filename)
     if match_ep:
         num = float(match_ep.group(2))
@@ -378,7 +385,8 @@ def parse_filename(filename: str) -> Tuple[str, int, Optional[int], Optional[int
         if cn_match:
             ep_val = cn_match.group(1)
             episode_num = int(ep_val) if ep_val.isdigit() else chinese_to_arabic(ep_val)
-            season_num = extract_season(title_part) or 1
+            season_num = extract_season(title_part)
+            if season_num <= 0: season_num = 1
             title_part = title_part[:cn_match.start()]
 
         # Pattern E: 纯 EP19 或 .EP19 (默认为 S1)
@@ -388,7 +396,8 @@ def parse_filename(filename: str) -> Tuple[str, int, Optional[int], Optional[int
                 temp_ep = int(pure_ep_match.group(2))
                 if not (1900 < temp_ep < 2100):
                     episode_num = temp_ep
-                    season_num = extract_season(title_part) or 1
+                    season_num = extract_season(title_part)
+                    if season_num <= 0: season_num = 1
                     title_part = title_part[:pure_ep_match.start()]
 
     # 4. 兜底清洗
