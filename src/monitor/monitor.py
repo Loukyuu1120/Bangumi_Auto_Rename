@@ -3,6 +3,7 @@ import os
 import re
 import platform
 import gc
+import threading
 from pathlib import Path
 from threading import Event, Thread
 from queue import Queue, Empty
@@ -61,6 +62,8 @@ class MonitorEventHandler(FileSystemEventHandler):
 
         path_obj = Path(path_str)
         logger.info(f"[监控] {action_name}: {path_obj.name} -> 加入队列")
+        with monitor_service._count_lock:
+            monitor_service.logical_pending_count += 1
         self.task_queue.put((path_obj, {}))
         return True
 
@@ -84,6 +87,8 @@ class MonitorService:
             return
         # 限制队列大小，形成背压，防止生产者过快导致内存积压
         self.task_queue = Queue(maxsize=500)
+        self.logical_pending_count = 0
+        self._count_lock = threading.Lock()
         self.stop_event = Event()
         self.observer = None
         self.worker_thread = None
@@ -292,7 +297,15 @@ class MonitorService:
             for p in list(self.task_queue.queue)
         ]
 
-    def add_manual_task(self, path: Path, options: Dict[str, Any] = None):
+    def register_batch_count(self, count: int):
+        """
+        在开始扫描/添加任务前，批量注册待处理任务数
+        """
+        with self._count_lock:
+            self.logical_pending_count += count
+        logger.info(f"[计数器] 批量注册任务: +{count}, 当前待处理: {self.logical_pending_count}")
+
+    def add_manual_task(self, path: Path, options: Dict[str, Any] = None, increment_counter=False):
         """手动添加任务到处理队列"""
         if options is None:
             options = {}
@@ -307,6 +320,9 @@ class MonitorService:
             self.is_running = True
 
         logger.info(f"[手动任务] 添加: {path.name} 参数: {options}")
+        if increment_counter:
+            with self._count_lock:
+                self.logical_pending_count += 1
         self.task_queue.put((path, options))
 
     def _process_worker(self):
@@ -384,9 +400,12 @@ class MonitorService:
                     f"[开始处理] {file_path.name} | AI: {use_ai} | HasCustomCfg: {bool(custom_config)}"
                 )
 
-                # === 优化点: 使用预先创建的实例调用 process ===
+                # 复用实例调用 process
                 rename_processor.process(file_path, use_ai=use_ai, **rename_kwargs)
-                # ============================================
+
+                with self._count_lock:
+                    if self.logical_pending_count > 0:
+                        self.logical_pending_count -= 1
 
                 # 定期GC
                 processed_count += 1

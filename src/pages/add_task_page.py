@@ -157,6 +157,7 @@ def _process_files_in_thread(
     """
     count_added = 0
     count_ignored = 0
+    all_files_to_process = []  # 临时列表，用于存储扫描到的所有待处理文件
 
     logger.info(f"[手动任务] 开始后台扫描路径: {len(paths)} 个目标")
 
@@ -182,7 +183,7 @@ def _process_files_in_thread(
                 for file in files:
                     files_iterator.append(Path(root) / file)
 
-        # 遍历收集到的文件列表
+        # 过滤收集到的文件列表
         for f_path in files_iterator:
             # 1. 再次检查后缀（针对文件夹遍历的情况）
             if f_path.suffix.lower() not in VIDEO_SUFFIX:
@@ -194,12 +195,19 @@ def _process_files_in_thread(
                 count_ignored += 1
                 continue
 
-            # 3. 准备参数
-            options = {'is_anime': is_anime, 'config_overrides': overrides}
+            # 3. 符合条件，加入待处理列表
+            all_files_to_process.append(f_path)
 
-            # 4. 加入队列
-            monitor_service.add_manual_task(f_path, options)
-            count_added += 1
+    total_files = len(all_files_to_process)
+    logger.info(f"[手动任务] 扫描完成，共找到 {total_files} 个有效文件，准备添加任务...")
+
+    if total_files > 0:
+        monitor_service.register_batch_count(total_files)
+
+    for f_path in all_files_to_process:
+        options = {'is_anime': is_anime, 'config_overrides': overrides}
+        monitor_service.add_manual_task(f_path, options)
+        count_added += 1
 
     return count_added, count_ignored
 

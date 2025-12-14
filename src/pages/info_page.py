@@ -322,8 +322,12 @@ class SystemMonitorPage:
 
             # 2. 更新列表
             items = monitor_service.get_queue_list()
+            physical_count = len(items)
+            logical_count = getattr(monitor_service, 'logical_pending_count', 0)
+            display_count = max(physical_count, logical_count)
+
             if self.queue_count_badge:
-                self.queue_count_badge.text = str(len(items))
+                self.queue_count_badge.text = str(display_count)
 
             # 简单的差异检测优化
             current_signature = f"{len(items)}_{items[0] if items else ''}"
