@@ -153,7 +153,7 @@ def match_and_extract(input_string: str):
     """
     提取季和集
     支持动漫格式 [01], [01v2] 等
-    支持纯集数格式 .EP01, E01 (默认为 S1)
+    支持纯集数格式 .EP01, E01, EP19 (默认为 S1)
     """
     # 1. 标准 S01E01 格式
     pattern = re.compile(r'(?i)S(\d+)(?:E|EP)(\d+)')
@@ -186,7 +186,7 @@ def match_and_extract(input_string: str):
         return season, episode
 
     # 4. 纯集数格式 .EP19, E19, EP19 (没有 S 前缀的情况)
-    # 必须有分隔符或开头结尾，避免匹配到单词中的 E
+    # 增加了 ^ 表示允许匹配字符串开头
     pure_ep_match = re.search(r'(?i)(?:^|[.\s\-_\[\(\[])E(P)?(\d{1,4})(?:[vV]\d)?(?:$|[.\s\-_\]\)\]])', input_string)
     if pure_ep_match:
         episode = int(pure_ep_match.group(2))
@@ -202,7 +202,7 @@ def match_and_extract(input_string: str):
 def extract_base_num(filename: str) -> Optional[float]:
     """
     提取基础集数，用于 process_sub 的兜底逻辑
-    增强：支持动漫格式 [01]，支持 .EP01
+    增强：支持动漫格式 [01]，支持 .EP01 及 EP01
     """
     # 1. SxxExx 格式
     match = re.search(r'(?i)S\d+(?:E|EP)(\d+)', filename)
@@ -216,7 +216,8 @@ def extract_base_num(filename: str) -> Optional[float]:
         if num not in [480, 576, 720, 1080, 2160, 264, 265] and not (1900 < num < 2100):
             return num
 
-    # 3. 纯集数格式 .EP19
+    # 3. 纯集数格式 .EP19 或 EP19
+    # 增加了 ^ 允许匹配开头
     match_ep = re.search(r'(?i)(?:^|[.\s\-_])E(P)?(\d{1,4})(?:$|[.\s\-_])', filename)
     if match_ep:
         num = float(match_ep.group(2))
@@ -324,7 +325,6 @@ def is_season_name(filename: str) -> bool:
 def parse_filename(filename: str) -> Tuple[str, int, Optional[int], Optional[int]]:
     """
     解析文件名：标题, 年份, 季, 集
-    增强版：支持 S01-S02 格式分割，支持 .EP19 格式
     """
     original = filename
     name = remove_tag(filename)
@@ -382,11 +382,9 @@ def parse_filename(filename: str) -> Tuple[str, int, Optional[int], Optional[int
             title_part = title_part[:cn_match.start()]
 
         # Pattern E: 纯 EP19 或 .EP19 (默认为 S1)
-        # 此逻辑放在最后，防止误判
         if episode_num is None:
-            pure_ep_match = re.search(r'(?i)[.\s\-_]E(P)?(\d{1,4})(?:$|[.\s\-_])', title_part)
+            pure_ep_match = re.search(r'(?i)(?:^|[.\s\-_])E(P)?(\d{1,4})(?:$|[.\s\-_])', title_part)
             if pure_ep_match:
-                # 再次确认不是年份
                 temp_ep = int(pure_ep_match.group(2))
                 if not (1900 < temp_ep < 2100):
                     episode_num = temp_ep
