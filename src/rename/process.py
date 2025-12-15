@@ -857,7 +857,7 @@ class Rename:
                 self._safe_cache_update(Rename._dir_cache, cache_key, cache_data, "AI目录缓存")
                 with Rename._lock:
                     Rename._processing_paths.discard(str(path.resolve()))
-                logger.info(f"[缓存写入] Key={target_cache_dir.name} | 内容=Name:{ai_name}")
+                logger.debug(f"[缓存写入] Key={cache_key} | 内容=Name:{ai_name}")
 
                 return self.process(
                     path,
@@ -957,12 +957,10 @@ class Rename:
                 cache_key = str(path.parent.absolute())
 
             from_ai_cache = False
-
             cached_data = None
-            if _scoped_cache is not None:
-                if cache_key in _scoped_cache:
-                    cached_data = _scoped_cache[cache_key]
-            else:
+            if _scoped_cache is not None and cache_key in _scoped_cache:
+                cached_data = _scoped_cache[cache_key]
+            if not cached_data:
                 with Rename._lock:
                     if cache_key in Rename._dir_cache:
                         cached_data = Rename._dir_cache[cache_key]
