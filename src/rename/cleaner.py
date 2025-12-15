@@ -204,6 +204,16 @@ def match_and_extract(input_string: str) -> Optional[Tuple[int, int]]:
                 season = 1
             return season, episode
 
+    # 去除两端空格后，如果整个字符串就是 1-4 位数字
+    clean_str = input_string.strip()
+    if re.fullmatch(r'\d{1,4}', clean_str):
+        episode = int(clean_str)
+        # 排除像 1988, 2020 这样的年份，其他数字只要是纯的，都认为是集数
+        if not (1900 < episode < 2100):
+            season = extract_season(input_string)
+            if season <= 0: season = 1
+            return season, episode
+
     return None
 
 
@@ -228,6 +238,12 @@ def extract_base_num(filename: str) -> Optional[float]:
     match_ep = re.search(r'(?i)(?:^|[.\s\-_])E(P)?(\d{1,4})(?:$|[.\s\-_])', filename)
     if match_ep:
         num = float(match_ep.group(2))
+        if not (1900 < num < 2100):
+            return num
+
+    clean_str = filename.strip()
+    if re.fullmatch(r'\d{1,4}', clean_str):
+        num = float(clean_str)
         if not (1900 < num < 2100):
             return num
 
@@ -399,6 +415,13 @@ def parse_filename(filename: str) -> Tuple[str, int, Optional[int], Optional[int
                     season_num = extract_season(title_part)
                     if season_num <= 0: season_num = 1
                     title_part = title_part[:pure_ep_match.start()]
+            elif re.fullmatch(r'\d{1,4}', title_part.strip()):
+                temp_ep = int(title_part.strip())
+                if not (1900 < temp_ep < 2100):
+                    episode_num = temp_ep
+                    if season_num is None or season_num <= 0:
+                        season_num = 1
+                    title_part = ""
 
     # 4. 兜底清洗
     if year == 0 and season_num is None:
@@ -500,7 +523,24 @@ def sanitize_variable(text: str) -> str:
 
 
 def get_render_context(path: Path, info: Dict, season: int = None, episode: int = None) -> Dict:
+    # 1. 首先从文件名提取技术参数
     tech = extract_media_info(path.name)
+
+    # 2. 从父目录提取作为补充
+    parent_tech = extract_media_info(path.parent.name)
+
+    # 3. 如果父目录是纯季号目录 (如 "Season 1")，往往没写分辨率，尝试去祖父目录找
+    grandparent_tech = {}
+    if path.parent != path.root and is_season_name(path.parent.name) and path.parent.parent != path.root:
+        grandparent_tech = extract_media_info(path.parent.parent.name)
+
+    # 4. 智能合并元数据 (优先级: 文件本身 > 父目录 > 祖父目录)
+    for key in tech.keys():
+        if not tech[key]:
+            if parent_tech.get(key):
+                tech[key] = parent_tech[key]
+            elif grandparent_tech.get(key):
+                tech[key] = grandparent_tech[key]
 
     raw_title = info.get('name') or info.get('title', '')
     raw_original_title = info.get('original_name') or info.get('original_title', '')

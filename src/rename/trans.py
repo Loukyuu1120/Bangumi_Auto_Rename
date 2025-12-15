@@ -180,10 +180,12 @@ class Trans:
                     try:
                         os.link(source_path, target_path)
                     except Exception:
-                        logger.warning('[处理迁移] 无法创建硬链接, 尝试软链接...')
-                        os.symlink(source_path, target_path)
+                        logger.warning(f'[处理迁移] 硬链接失败，回退软链接: {source_path} -> {target_path}')
+                        src_str = str(source_path.absolute())
+                        os.symlink(src_str, target_path)
                 elif self.mode == '软链接':
-                    os.symlink(source_path, target_path)
+                    src_str = str(source_path.absolute())
+                    os.symlink(src_str, target_path)
                 else:
                     logger.error('[处理迁移] 模式错误！仅支持剪切, 复制, 链接')
             except Exception as e:

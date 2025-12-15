@@ -842,9 +842,12 @@ class Rename:
                 )
 
                 if is_season_name(path.parent.name) and path.parent.parent != path.root:
-                    cache_key = str(path.parent.parent.absolute())
+                    target_cache_dir = path.parent.parent
                 else:
-                    cache_key = str(path.parent.absolute())
+                    target_cache_dir = path.parent
+
+                cache_key = str(target_cache_dir.absolute())
+
                 cache_data = {
                     'tmdb_id': str(ai_tmdb_id) if ai_tmdb_id else None,
                     'name': ai_name,
@@ -854,10 +857,7 @@ class Rename:
                 self._safe_cache_update(Rename._dir_cache, cache_key, cache_data, "AI目录缓存")
                 with Rename._lock:
                     Rename._processing_paths.discard(str(path.resolve()))
-
-                logger.info(f"[缓存写入] AI元数据推断结果已缓存至: {path.parent.name}")
-                if check_skip_dir and path.is_dir() and ai_is_movie:
-                    return "SKIP_DIR_IS_MOVIE"
+                logger.info(f"[缓存写入] Key={target_cache_dir.name} | 内容=Name:{ai_name}")
 
                 return self.process(
                     path,
@@ -1012,10 +1012,24 @@ class Rename:
             name = None
             info = None
             if cus_name:
-                rtpath_name = cus_name
-                new_name, new_year, _, _ = parse_filename(cus_name)
-                if new_year > 0:
-                    rtpath_name, year = new_name, new_year
+                temp_name, temp_year, _, _ = parse_filename(cus_name)
+                if not temp_name and cus_name:
+                    rtpath_name = cus_name
+                else:
+                    rtpath_name = temp_name
+                    if temp_year > 0:
+                        year = temp_year
+                if year == 0 and (rtpath_name.isdigit() or is_weak_filename(rtpath_name)):
+                    logger.info(f"[年份补全] 名称 '{rtpath_name}' 缺少年份，尝试从目录结构获取...")
+                    _, p_year, _, _ = parse_filename(path.parent.name)
+                    if p_year > 0:
+                        year = p_year
+                    elif path.parent.parent != path.root:
+                         _, gp_year, _, _ = parse_filename(path.parent.parent.name)
+                         if gp_year > 0: year = gp_year
+
+                    if year > 0:
+                        logger.info(f"[年份补全] 已补全年份: {year}")
 
             if cus_tmdb_id:
                 try:
@@ -1108,6 +1122,22 @@ class Rename:
                                     )
                     except Exception as e:
                         logger.warning(f"[搜索增强] 解析上级目录名称出错: {e}")
+                if is_weak and is_movie is not True:
+                    try:
+                        sibling_count = 0
+                        if path.parent.is_dir():
+                            for f in path.parent.iterdir():
+                                if f.is_file() and f.suffix.lower() in VIDEO_SUFFIX:
+                                    sibling_count += 1
+                                    if sibling_count >= 3:
+                                        break
+
+                        if sibling_count >= 4:
+                            logger.info(f"[环境判断] 目录下检测到多个视频文件({sibling_count}+)，且当前为弱文件名，强制锁定为 [TV模式]")
+                            is_movie = False
+                            ai_is_movie_hint = False
+                    except Exception as e:
+                        logger.warning(f"[环境判断] 检查兄弟文件出错: {e}")
 
                 task_res = None
                 last_error = "未搜索到结果"
