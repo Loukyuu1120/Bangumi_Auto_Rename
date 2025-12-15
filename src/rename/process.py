@@ -53,7 +53,6 @@ class Rename:
     _processed_paths = set()
     _processing_paths = set()
     _tmdb_search_cache: Dict[tuple, tuple] = {}
-    _logger_patched = False
     MAX_CACHE_SIZE = 500
     CACHE_PURGE_COUNT = 100
 
@@ -73,36 +72,6 @@ class Rename:
 
         self.R = {}
         self.scraped_seasons = set()
-
-        self._patch_logger_safe()
-
-    def _patch_logger_safe(self):
-        """修复 NiceGUI 日志并发问题"""
-        if Rename._logger_patched or app is None:
-            return
-
-        with Rename._lock:
-            if Rename._logger_patched:
-                return
-
-            try:
-                for handler in logger.handlers:
-                    if hasattr(handler, 'log_element') and not getattr(handler, '_is_patched', False):
-                        def safe_emit(h_self, record):
-                            try:
-                                msg = h_self.format(record)
-                                try:
-                                    app.call_from_background(h_self.log_element.push, msg)
-                                except Exception:
-                                    pass
-                            except Exception:
-                                pass
-
-                        handler.emit = types.MethodType(safe_emit, handler)
-                        handler._is_patched = True
-                Rename._logger_patched = True
-            except Exception:
-                pass
 
     @classmethod
     def clear_processed_cache(cls) -> int:

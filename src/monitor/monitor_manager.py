@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import List
 
-from nicegui import run
+from nicegui import ui  # 移除 run
 from .monitor import monitor_service
 from ..config.config_manager import cm
 from ..logger import logger
@@ -13,11 +13,9 @@ from ..logger import logger
 class MonitorManager:
     """
     负责从配置中读取参数，并控制 MonitorService 的启停。
-    不再直接管理线程，而是委托给 MonitorService 单例。
     """
 
     def __init__(self) -> None:
-        # 这里不再需要维护 threads 列表，因为 Service 内部管理了
         pass
 
     def _stop_all(self) -> None:
@@ -36,7 +34,6 @@ class MonitorManager:
 
         # --- 统一格式化为列表 ---
         if isinstance(monitor_configs, str):
-            # 兼容旧配置是纯字符串的情况
             try:
                 monitor_configs = json.loads(monitor_configs)
             except:
@@ -49,9 +46,7 @@ class MonitorManager:
             return
 
         # --- 整理路径和配置映射 ---
-        # 结构: {Path('/data/tv'): {'tv_format': '...', ...}}
         valid_path_configs = {}
-
         for item in monitor_configs:
             path_str = ""
             config_data = {}
@@ -60,7 +55,7 @@ class MonitorManager:
                 path_str = item
             elif isinstance(item, dict):
                 path_str = item.get("path", "")
-                config_data = item  # 保留整个字典配置
+                config_data = item
 
             if not path_str:
                 continue
@@ -69,24 +64,31 @@ class MonitorManager:
             valid_path_configs[path_obj] = config_data
 
         # --- 调用 Service 统一启动 ---
-        # 传入带有配置信息的字典
+        # 这一步将在主线程执行，稍微阻塞一下 UI，但保证日志安全
         monitor_service.start(valid_path_configs, exclude_dirs)
 
     async def restart_from_config(self) -> None:
         """根据当前配置重启监控（保存配置后调用）"""
         logger.info("[监控管理器] 正在根据新配置重启监控...")
-        await run.io_bound(self._do_restart_sync)
+
+        try:
+            # 【核心修改】
+            # 移除 await run.io_bound(...)
+            # 直接在主线程同步执行，避免 slot cannot be determined 错误
+            self._do_restart_sync()
+
+            ui.notify("监控服务已根据新配置重启", type='positive')
+
+        except Exception as e:
+            logger.error(f"[监控管理器] 重启失败: {e}")
+            ui.notify(f"重启失败: {e}", type='negative')
 
     def _do_restart_sync(self) -> None:
         """实际执行停止和启动的同步方法"""
-        try:
-            self._stop_all()
-            self.start_from_config()
-        except Exception as e:
-            logger.error(f"[监控管理器] 重启过程中发生错误: {e}")
+        self._stop_all()
+        self.start_from_config()
 
     def _parse_config_list(self, config_val) -> List[str]:
-        """辅助方法：处理可能是字符串也可能是列表的配置项"""
         if isinstance(config_val, list):
             return config_val
         if isinstance(config_val, str):
