@@ -367,12 +367,28 @@ def parse_filename(filename: str) -> Tuple[str, int, Optional[int], Optional[int
 
     # 2. 提取年份
     year = 0
-    year_match = re.search(r'(?:[.\s\-_\(\[]|^)([12][90]\d{2})(?:[.\s\-_\)\]]|$)', name)
+    # 增加全角括号 （ 【 的支持
+    year_pattern = r'(?:[.\s\-_\(\[\（\【]|^)([12][90]\d{2})(?:[.\s\-_\)\]\）\】]|$)'
+
+    # 先尝试从原始文件名提取（最准确）
+    year_match = re.search(year_pattern, original)
     if year_match:
         year = int(year_match.group(1))
-        title_part = name[:year_match.start()]
+        # 如果在 name 里也能找到位置，用于截断标题
+        match_in_name = re.search(year_pattern, name)
+        if match_in_name:
+            title_part = name[:match_in_name.start()]
+        else:
+            # 如果原始有年份但清理后的name没有，说明年份被 remove_tag 删了，直接用 name
+            title_part = name
     else:
-        title_part = name
+        # 兜底：再从清理后的 name 找一次
+        year_match = re.search(year_pattern, name)
+        if year_match:
+            year = int(year_match.group(1))
+            title_part = name[:year_match.start()]
+        else:
+            title_part = name
 
     # 3. 提取季集信息
     season_num = None
@@ -380,10 +396,8 @@ def parse_filename(filename: str) -> Tuple[str, int, Optional[int], Optional[int
 
     # Pattern A: S01E01
     se_match = re.search(r'[.\s\-_]S(\d{1,2})(?:E|EP)(\d{1,3})', name, re.IGNORECASE)
-
     # Pattern B: S01-S02
     s_range_match = re.search(r'[.\s\-_]S(\d{1,2})\s*-\s*S?(\d{1,2})', name, re.IGNORECASE)
-
     # Pattern C: S01
     s_only_match = re.search(r'[.\s\-_]S(\d{1,2})(?:$|[.\s\-_])', name, re.IGNORECASE)
 
@@ -413,7 +427,7 @@ def parse_filename(filename: str) -> Tuple[str, int, Optional[int], Optional[int
             if season_num <= 0: season_num = 1
             title_part = title_part[:cn_match.start()]
 
-        # Pattern E: 纯 EP19 或 .EP19 (默认为 S1)
+        # Pattern E: 纯 EP19 或 .EP19
         if episode_num is None:
             pure_ep_match = re.search(r'(?i)(?:^|[.\s\-_])E(P)?(\d{1,4})(?:$|[.\s\-_])', title_part)
             if pure_ep_match:
@@ -449,8 +463,6 @@ def parse_filename(filename: str) -> Tuple[str, int, Optional[int], Optional[int
         title_part = title_part.replace('_', ' ')
 
     title_part = re.sub(r'\s+', ' ', title_part).strip(' .-[]()')
-
-    logger.debug(f'[文件名解析] "{original}" -> "{title_part}", {year}, S{season_num}E{episode_num}')
 
     return title_part, year, season_num, episode_num
 

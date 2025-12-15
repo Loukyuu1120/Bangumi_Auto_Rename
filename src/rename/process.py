@@ -1031,20 +1031,81 @@ class Rename:
 
             if cus_tmdb_id:
                 try:
+                    is_movie_hint = is_movie
+
+                    # 解析文件名获取年份和季集特征
+                    _t_name, _file_year, _s, _e = parse_filename(path.name)
+
+                    if is_movie_hint is None:
+                        if _s is not None or _e is not None:
+                            is_movie_hint = False # 有SxxExx，猜电视剧
+                        elif _file_year > 0:
+                            is_movie_hint = True  # 有年份无集数，猜电影
+
+                    # 2. 第一次请求
                     name, info, is_anime, is_movie = self.search.get_info_by_tmdb_id(
                         tmdb_id=int(cus_tmdb_id),
-                        is_movie_hint=is_movie
+                        is_movie_hint=is_movie_hint
                     )
-                    if extract_base_num(path.name) and is_movie:
-                        logger.warning(
-                            f"[ID冲突] 路径中的 TMDB ID {cus_tmdb_id} 返回的是电影 '{name}'，"
-                            f"但文件名 '{path.name}' 含有 SxxEyy/剧集特征，"
-                            f"判定该 ID 可能错误，将忽略此 ID，改用文件名搜索。"
-                        )
-                        cus_tmdb_id = None
-                        is_movie = None
-                        name = None
-                        info = None
+
+                    # 只有当文件名里明确有年份，且请求结果也有年份时，才进行校验
+                    if name and info and _file_year > 0:
+                        # 获取 TMDB 结果的年份
+                        tmdb_year = 0
+                        date_str = ""
+                        if is_movie:
+                            date_str = info.get('release_date', '')
+                        else:
+                            date_str = info.get('first_air_date', '')
+
+                        if date_str:
+                            try:
+                                tmdb_year = int(date_str.split('-')[0])
+                            except:
+                                pass
+
+                        # 校验逻辑：如果年份都有效，且差距超过 3 年 (考虑上映延迟等因素)
+                        if tmdb_year > 0 and abs(_file_year - tmdb_year) > 3:
+                            logger.warning(
+                                f"[ID校验] 文件年份({_file_year}) 与 TMDB ID 返回年份({tmdb_year}) 差距过大！"
+                                f"当前识别为: {'电影' if is_movie else '剧集'}。尝试切换类型重试..."
+                            )
+
+                            # 强制反转类型
+                            new_hint = not is_movie
+
+                            try:
+                                # 使用反转后的类型重新请求
+                                name_2, info_2, is_anime_2, is_movie_2 = self.search.get_info_by_tmdb_id(
+                                    tmdb_id=int(cus_tmdb_id),
+                                    is_movie_hint=new_hint # 强制指定新类型
+                                )
+
+                                # 检查第二次结果的年份
+                                tmdb_year_2 = 0
+                                date_str_2 = info_2.get('release_date', '') if is_movie_2 else info_2.get('first_air_date', '')
+                                if date_str_2:
+                                    try: tmdb_year_2 = int(date_str_2.split('-')[0])
+                                    except: pass
+
+                                # 如果第二次请求成功，且年份更接近 (或者第一次差距太大，第二次只要有结果就信第二次)
+                                if name_2 and info_2:
+                                    gap_1 = abs(_file_year - tmdb_year)
+                                    gap_2 = abs(_file_year - tmdb_year_2) if tmdb_year_2 > 0 else 999
+
+                                    # 如果第二次的年份差距明显更小，或者第二次也是合理的
+                                    if gap_2 < gap_1:
+                                        logger.info(f"[ID校验] 切换类型成功！修正为: {'电影' if is_movie_2 else '剧集'} ({name_2})")
+                                        name = name_2
+                                        info = info_2
+                                        is_anime = is_anime_2
+                                        is_movie = is_movie_2
+                                    else:
+                                        logger.warning(f"[ID校验] 切换类型后年份差距依然很大(Gap={gap_2})，保留原结果。")
+
+                            except Exception as e:
+                                logger.warning(f"[ID校验] 切换类型重试失败: {e}")
+
                     # ID 获取成功，信任它并写入缓存
                     if not is_movie and path.parent != path.root:
                         new_cache_data = {

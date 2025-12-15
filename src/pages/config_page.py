@@ -1,4 +1,4 @@
-import os
+import os, re
 from typing import Sequence
 from types import SimpleNamespace
 from pathlib import Path
@@ -479,6 +479,15 @@ class ConfigPage(ui.dialog):
         """
         遍历指定目录，将所有视频文件加入监控队列
         """
+        exclude_dirs_conf = cm.get_config("monitor_exclude_dirs") or []
+        exclude_patterns = []
+        for p in exclude_dirs_conf:
+            if p:
+                try:
+                    exclude_patterns.append(re.compile(p, re.IGNORECASE))
+                except:
+                    pass
+
         count = 0
         try:
             for cfg in scan_configs:
@@ -498,7 +507,19 @@ class ConfigPage(ui.dialog):
 
                 # 遍历目录
                 for root, dirs, files in os.walk(root_path):
-                    # 排除隐藏目录
+                    should_skip_dir = False
+                    root_str = str(Path(root)).replace('\\', '/')
+
+                    for pattern in exclude_patterns:
+                        if pattern.search(root_str):
+                            should_skip_dir = True
+                            break
+
+                    if should_skip_dir:
+                        dirs[:] = []
+                        logger.debug(f"[全量扫描] 跳过排除目录: {root}")
+                        continue
+
                     dirs[:] = [d for d in dirs if not d.startswith('.')]
 
                     for file in files:
@@ -507,7 +528,6 @@ class ConfigPage(ui.dialog):
                         file_path = Path(root) / file
 
                         if is_video_file(file):
-                            # 加入监控队列
                             monitor_service.add_manual_task(file_path, task_options)
                             count += 1
 
