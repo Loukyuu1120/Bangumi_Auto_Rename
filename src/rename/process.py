@@ -841,7 +841,10 @@ class Rename:
                     f"[AI处理] AI推断成功: Name={ai_name}, TMDB_ID={ai_tmdb_id}, Movie={ai_is_movie}"
                 )
 
-                cache_key = str(path.parent.absolute())
+                if is_season_name(path.parent.name) and path.parent.parent != path.root:
+                    cache_key = str(path.parent.parent.absolute())
+                else:
+                    cache_key = str(path.parent.absolute())
                 cache_data = {
                     'tmdb_id': str(ai_tmdb_id) if ai_tmdb_id else None,
                     'name': ai_name,
@@ -948,7 +951,10 @@ class Rename:
 
             if is_weak: logger.info(f"[智能判断] 文件名 '{path.name}' 判定为弱文件名，将尝试回溯父目录搜索。")
 
-            cache_key = str(path.parent.absolute())
+            if is_season_name(path.parent.name) and path.parent.parent != path.root:
+                cache_key = str(path.parent.parent.absolute())
+            else:
+                cache_key = str(path.parent.absolute())
 
             from_ai_cache = False
 
@@ -1074,33 +1080,34 @@ class Rename:
                             logger.debug(f"[搜索增强] 添加去括号关键词: '{name_no_brackets}'")
                 except Exception:
                     pass
-                try:
-                    parent = path.parent
-                    if parent != path.root:
-                        raw_parent_name = parent.name
-                        pname_cleaned = remove_tag(raw_parent_name).lower().strip()
-                        if is_season_name(pname_cleaned) and parent.parent != path.root:
-                            grandparent = parent.parent
-                            raw_candidate_name = grandparent.name
-                            candidate_name, candidate_year, _, _ = parse_filename(raw_candidate_name)
-                            logger.info(
-                                f"[搜索增强] 父目录 '{raw_parent_name}' 为季目录，"
-                                f"改用祖父目录 '{raw_candidate_name}' 作为搜索关键词"
-                            )
-                        else:
-                            raw_candidate_name = raw_parent_name
-                            candidate_name, candidate_year, _, _ = parse_filename(raw_parent_name)
-
-                        candidate_name = remove_tag(candidate_name).strip()
-                        if candidate_name and candidate_name != rtpath_name and len(candidate_name) >= 2:
-                            if candidate_name not in search_candidates:
-                                search_candidates.append(candidate_name)
-                                logger.debug(
-                                    f"[搜索增强] 添加上级目录关键词: '{candidate_name}' "
-                                    f"(原目录名: '{raw_candidate_name}', Year={candidate_year})"
+                if not cus_name:
+                    try:
+                        parent = path.parent
+                        if parent != path.root:
+                            raw_parent_name = parent.name
+                            pname_cleaned = remove_tag(raw_parent_name).lower().strip()
+                            if is_season_name(pname_cleaned) and parent.parent != path.root:
+                                grandparent = parent.parent
+                                raw_candidate_name = grandparent.name
+                                candidate_name, candidate_year, _, _ = parse_filename(raw_candidate_name)
+                                logger.info(
+                                    f"[搜索增强] 父目录 '{raw_parent_name}' 为季目录，"
+                                    f"改用祖父目录 '{raw_candidate_name}' 作为搜索关键词"
                                 )
-                except Exception as e:
-                    logger.warning(f"[搜索增强] 解析上级目录名称出错: {e}")
+                            else:
+                                raw_candidate_name = raw_parent_name
+                                candidate_name, candidate_year, _, _ = parse_filename(raw_parent_name)
+
+                            candidate_name = remove_tag(candidate_name).strip()
+                            if candidate_name and candidate_name != rtpath_name and len(candidate_name) >= 2:
+                                if candidate_name not in search_candidates:
+                                    search_candidates.append(candidate_name)
+                                    logger.debug(
+                                        f"[搜索增强] 添加上级目录关键词: '{candidate_name}' "
+                                        f"(原目录名: '{raw_candidate_name}', Year={candidate_year})"
+                                    )
+                    except Exception as e:
+                        logger.warning(f"[搜索增强] 解析上级目录名称出错: {e}")
 
                 task_res = None
                 last_error = "未搜索到结果"
