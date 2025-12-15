@@ -7,8 +7,7 @@ import threading
 from pathlib import Path
 from threading import Event, Thread
 from queue import Queue, Empty
-from typing import Dict, Any, Optional
-from nicegui import ui
+from typing import Dict, Any
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver
@@ -71,7 +70,6 @@ class MonitorEventHandler(FileSystemEventHandler):
 class MonitorService:
     """
     智能单例模式监控服务
-    支持自动切换 原生事件驱动(高效) / 轮询模式(兼容)
     """
 
     _instance = None
@@ -85,7 +83,6 @@ class MonitorService:
     def __init__(self):
         if self.initialized:
             return
-        # 限制队列大小，形成背压，防止生产者过快导致内存积压
         self.task_queue = Queue(maxsize=500)
         self.logical_pending_count = 0
         self._count_lock = threading.Lock()
@@ -96,11 +93,11 @@ class MonitorService:
         self.current_file: str | None = None
         self.path_map: Dict[Path, Dict] = {}
 
-        self._timer: Optional[ui.timer] = None
+        self.last_cache_clear_time = time.time()
+        self.CACHE_CLEAR_INTERVAL = 86400  # 24小时
 
         self.initialized = True
 
-    # --- 核心辅助方法：统计文件数 ---
     @staticmethod
     def count_directory_files(directory: Path, max_check: int = 10000) -> int:
         try:
@@ -114,7 +111,6 @@ class MonitorService:
             logger.debug(f"统计目录文件数量失败: {err}")
             return 0
 
-    # --- 检查系统限制 (Linux) ---
     @staticmethod
     def check_system_limits() -> dict:
         limits = {"max_user_watches": 8192}
@@ -127,7 +123,6 @@ class MonitorService:
             pass
         return limits
 
-    # --- 动态加载 Observer ---
     def __choose_observer(self):
         system = platform.system()
         observers_to_try = []
@@ -145,7 +140,6 @@ class MonitorService:
             try:
                 module = __import__(module_name, fromlist=[class_name])
                 ObserverClass = getattr(module, class_name)
-                # 简单测试一下实例化
                 test_obs = ObserverClass()
                 test_obs.stop()
                 return ObserverClass
@@ -155,17 +149,13 @@ class MonitorService:
         return None
 
     def start(self, path_configs: Dict[Path, Dict], exclude_dirs: list[str]):
-        """
-        启动监控
-        :param path_configs: 路径配置映射字典 {Path('/mnt/video'): {'tv_format': '...', ...}}
-        :param exclude_dirs: 排除目录列表
-        """
+        """启动监控"""
         if self.is_running:
             logger.warning("[监控] 服务已经在运行中")
             return
 
         self.stop_event.clear()
-        self.path_map = path_configs  # 保存配置
+        self.path_map = path_configs
         paths_to_monitor = list(path_configs.keys())
 
         # 1. 启动消费者线程
@@ -198,7 +188,7 @@ class MonitorService:
         if not use_polling:
             ObserverClass = self.__choose_observer()
             if not ObserverClass:
-                logger.info("[监控] 高效模式不可用(无法加载原生Observer)，回退到轮询模式")
+                logger.info("[监控] 高效模式不可用，回退到轮询模式")
                 use_polling = True
 
         if use_polling or ObserverClass is None:
@@ -250,10 +240,8 @@ class MonitorService:
         else:
             logger.warning("[监控] 没有有效的监控目录，服务未启动监听")
 
-        # 5. 启动自动清理定时器 (保存引用以便后续取消)
-        if self._timer is None:
-            self._timer = ui.timer(86400.0, lambda: self._scheduled_cache_clear())
-            logger.info("[监控] 自动内存维护定时器已启动 (周期: 24小时)")
+        # 【修改点3】移除定时器启动代码
+        logger.info("[监控] 自动内存维护机制已就绪 (周期: 24小时)")
 
     def _scheduled_cache_clear(self):
         """执行定时的缓存清理任务"""
@@ -267,7 +255,6 @@ class MonitorService:
         """停止监控服务和处理线程"""
         logger.info("[监控] 正在接收停止指令...")
 
-        # 1. 停止 Watchdog Observer
         if self.observer:
             if self.observer.is_alive():
                 self.observer.stop()
@@ -275,18 +262,13 @@ class MonitorService:
             self.observer = None
             logger.info("[监控] 目录监听器已停止")
 
-        # 2. 停止 Worker Thread
         if self.worker_thread and self.worker_thread.is_alive():
-            self.stop_event.set()  # 发送停止信号
+            self.stop_event.set()
             self.worker_thread.join()
             self.worker_thread = None
             logger.info("[监控] 处理线程已停止")
 
-        # 3. 停止定时器
-        if self._timer:
-            self._timer.cancel()
-            self._timer = None
-            logger.info("[监控] 内存维护定时器已停止")
+        # 【修改点4】移除定时器停止代码
 
         self.is_running = False
         logger.info("[监控] 服务已完全停止")
@@ -298,15 +280,11 @@ class MonitorService:
         ]
 
     def register_batch_count(self, count: int):
-        """
-        在开始扫描/添加任务前，批量注册待处理任务数
-        """
         with self._count_lock:
             self.logical_pending_count += count
         logger.info(f"[计数器] 批量注册任务: +{count}, 当前待处理: {self.logical_pending_count}")
 
     def add_manual_task(self, path: Path, options: Dict[str, Any] = None, increment_counter=False):
-        """手动添加任务到处理队列"""
         if options is None:
             options = {}
 
@@ -329,11 +307,15 @@ class MonitorService:
         logger.info("[处理线程] 启动成功，等待任务...")
         rename_processor = Rename()
         logger.debug("[处理线程] Rename 处理器已初始化")
-        # ============================================
 
         processed_count = 0
 
         while not self.stop_event.is_set():
+            current_time = time.time()
+            if current_time - self.last_cache_clear_time > self.CACHE_CLEAR_INTERVAL:
+                self._scheduled_cache_clear()
+                self.last_cache_clear_time = current_time
+
             try:
                 item = self.task_queue.get(timeout=1)
             except Empty:
@@ -351,15 +333,10 @@ class MonitorService:
                     continue
 
                 self.current_file = file_path.name
-
-                # === 1. 初始化 custom_config，防止 UnboundLocalError ===
                 custom_config = {}
 
-                # === 2. 匹配路径配置 ===
-                # 遍历监控根目录，找到当前文件属于哪个根目录
                 if self.path_map:
                     max_len = 0
-
                     for root_path, cfg in self.path_map.items():
                         try:
                             if file_path.is_relative_to(root_path):
@@ -369,19 +346,13 @@ class MonitorService:
                         except Exception:
                             pass
 
-                # === 3. 准备参数 ===
                 rename_kwargs = {}
                 manual_overrides = options.get('config_overrides', {})
                 final_overrides = custom_config.copy()
-                if 'path' in final_overrides: del final_overrides['path']  # 移除无关字段
-
-                # 合并手动配置 (手动配置优先)
+                if 'path' in final_overrides: del final_overrides['path']
                 final_overrides.update(manual_overrides)
-
-                # 过滤掉 None 或 空值
                 final_overrides = {k: v for k, v in final_overrides.items() if v is not None and v != ""}
 
-                # 提取覆盖参数
                 use_ai = bool(cm.get_config("ai_enabled"))
                 if "use_ai" in options:
                     use_ai = options["use_ai"]
@@ -390,7 +361,6 @@ class MonitorService:
                 if 'is_movie' in options:
                     rename_kwargs['_is_movie'] = options.pop('is_movie')
 
-                # 合并剩余 options
                 rename_kwargs.update(options)
                 rename_kwargs.pop("use_ai", None)
                 rename_kwargs.pop("config_overrides", None)
@@ -400,14 +370,12 @@ class MonitorService:
                     f"[开始处理] {file_path.name} | AI: {use_ai} | HasCustomCfg: {bool(custom_config)}"
                 )
 
-                # 复用实例调用 process
                 rename_processor.process(file_path, use_ai=use_ai, **rename_kwargs)
 
                 with self._count_lock:
                     if self.logical_pending_count > 0:
                         self.logical_pending_count -= 1
 
-                # 定期GC
                 processed_count += 1
                 if processed_count % 50 == 0:
                     gc.collect()
@@ -440,5 +408,4 @@ class MonitorService:
         return True
 
 
-# 全局单例实例
 monitor_service = MonitorService()
