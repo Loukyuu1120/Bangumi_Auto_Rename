@@ -269,13 +269,15 @@ def extract_tmdb_id(text: str) -> Optional[str]:
     if not text:
         return None
 
-    # 常见的 ID 标记格式
+    # 增强的正则列表，支持全角符号
     patterns = [
-        r'\{tmdb-(\d+)\}',  # {tmdb-12345}
-        r'\[tmdbid=(\d+)\]',  # [tmdbid=12345]
-        r'tmdb-(\d+)',  # tmdb-12345 (作为文件名一部分)
-        r'\{tmdbid-(\d+)\}',  # {tmdbid-12345}
-        r'\[tmdb-(\d+)\]'  # [tmdb-12345]
+        r'\{tmdb[-_]?(\d+)\}',       # {tmdb-12345}
+        r'｛tmdb[-_]?(\d+)｝',       # 全角 ｛tmdb-13363｝
+        r'\[tmdbid=(\d+)\]',         # [tmdbid=12345]
+        r'［tmdbid=(\d+)］',         # 全角
+        r'(?:^|[.\s\-_\[\(\｛])tmdb[-_]?(\d+)(?:$|[.\s\-_\]\)\｝])',  # tmdb-12345
+        r'\{tmdbid[-_]?(\d+)\}',
+        r'｛tmdbid[-_]?(\d+)｝'
     ]
 
     for p in patterns:
