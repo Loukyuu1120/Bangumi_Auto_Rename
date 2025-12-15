@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import List
 
-from nicegui import ui  # 移除 run
+from nicegui import ui, run
 from .monitor import monitor_service
 from ..config.config_manager import cm
 from ..logger import logger
@@ -72,10 +72,7 @@ class MonitorManager:
         logger.info("[监控管理器] 正在根据新配置重启监控...")
 
         try:
-            # 【核心修改】
-            # 移除 await run.io_bound(...)
-            # 直接在主线程同步执行，避免 slot cannot be determined 错误
-            self._do_restart_sync()
+            await run.io_bound(self._do_restart_sync)
 
             ui.notify("监控服务已根据新配置重启", type='positive')
 

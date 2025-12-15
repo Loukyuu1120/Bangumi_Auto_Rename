@@ -4,6 +4,7 @@ import re
 import platform
 import gc
 import threading
+import json
 from pathlib import Path
 from threading import Event, Thread
 from queue import Queue, Empty
@@ -13,6 +14,7 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver
 
 from ..rename.utils import VIDEO_SUFFIX
+from ..utils.path import TASK_PATH
 from ..rename.process import Rename
 from ..config.config_manager import cm
 from ..logger import logger
@@ -86,17 +88,123 @@ class MonitorService:
         self.task_queue = Queue(maxsize=500)
         self.logical_pending_count = 0
         self._count_lock = threading.Lock()
+        self._paused = False
         self.stop_event = Event()
         self.observer = None
         self.worker_thread = None
         self.is_running = False
         self.current_file: str | None = None
         self.path_map: Dict[Path, Dict] = {}
+        self.QUEUE_FILE = TASK_PATH / "saved_queue.json"
 
         self.last_cache_clear_time = time.time()
         self.CACHE_CLEAR_INTERVAL = 86400  # 24小时
 
         self.initialized = True
+
+    @property
+    def is_paused_state(self) -> bool:
+        return self._paused
+
+    def pause_processing(self):
+        """暂停处理线程，但监控继续（相当于暂存任务）"""
+        self._paused = True
+        logger.info("[控制] 任务处理已暂停 (新文件将进入队列等待)")
+
+    def resume_processing(self):
+        """恢复处理"""
+        self._paused = False
+        logger.info("[控制] 任务处理已恢复")
+
+    def clear_pending_tasks(self):
+        """清空等待队列"""
+        with self.task_queue.mutex:
+            self.task_queue.queue.clear()
+
+        with self._count_lock:
+            self.logical_pending_count = 0
+
+        logger.warning("[控制] 待处理队列已强制清空")
+
+    def has_saved_queue(self) -> bool:
+        return self.QUEUE_FILE.exists()
+
+    def save_queue_to_disk(self) -> int:
+        """
+        将当前队列中的所有任务保存到磁盘，并清空内存队列。
+        返回保存的任务数量。
+        """
+        # 1. 暂停处理，防止 worker 线程抢任务
+        self._paused = True
+
+        saved_items = []
+
+        # 2. 安全地抽干队列 (使用标准方法，避免死锁)
+        # 循环直到队列抛出 Empty 异常
+        while True:
+            try:
+                # get_nowait 是非阻塞的，且线程安全
+                item = self.task_queue.get_nowait()
+                path_obj, options = item
+
+                saved_items.append({
+                    "path": str(path_obj),
+                    "options": options
+                })
+                # 标记任务完成，维护 queue 内部计数
+                self.task_queue.task_done()
+            except Empty:
+                break
+
+        # 3. 重置逻辑计数器
+        with self._count_lock:
+            self.logical_pending_count = 0
+
+        # 4. 写入文件
+        if saved_items:
+            try:
+                with open(self.QUEUE_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(saved_items, f, indent=4, ensure_ascii=False)
+                logger.info(f"[任务保存] 已将 {len(saved_items)} 个任务保存到磁盘")
+            except Exception as e:
+                logger.error(f"[任务保存] 保存失败: {e}")
+        else:
+            logger.info("[任务保存] 队列为空，无需保存")
+
+        return len(saved_items)
+
+    def load_queue_from_disk(self) -> int:
+        if not self.QUEUE_FILE.exists():
+            return 0
+
+        count = 0
+        try:
+            with open(self.QUEUE_FILE, 'r', encoding='utf-8') as f:
+                saved_items = json.load(f)
+
+            if isinstance(saved_items, list):
+                for entry in saved_items:
+                    path_str = entry.get("path")
+                    options = entry.get("options", {})
+
+                    if path_str:
+                        path_obj = Path(path_str)
+                        # 即使文件不存在了也加进去吗？建议检查一下存在性
+                        if path_obj.exists():
+                            self.task_queue.put((path_obj, options))
+                            count += 1
+
+            with self._count_lock:
+                self.logical_pending_count += count
+
+            self.QUEUE_FILE.unlink()  # 加载成功后删除存档
+            logger.info(f"[任务恢复] 成功恢复 {count} 个任务")
+
+        except Exception as e:
+            logger.error(f"[任务恢复] 读取失败: {e}")
+
+        return count
+
 
     @staticmethod
     def count_directory_files(directory: Path, max_check: int = 10000) -> int:
@@ -311,6 +419,10 @@ class MonitorService:
         processed_count = 0
 
         while not self.stop_event.is_set():
+            if self._paused:
+                time.sleep(1)
+                continue
+
             current_time = time.time()
             if current_time - self.last_cache_clear_time > self.CACHE_CLEAR_INTERVAL:
                 self._scheduled_cache_clear()

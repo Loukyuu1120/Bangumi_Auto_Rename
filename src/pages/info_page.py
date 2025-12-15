@@ -2,7 +2,7 @@ import platform
 import time
 import asyncio
 import requests
-from nicegui import ui
+from nicegui import ui, run
 
 from ..utils.path import TASK_PATH
 from ..utils.utils import get_task
@@ -24,6 +24,10 @@ class SystemMonitorPage:
         self.log_scroll = None
         self.log_container = None
 
+        self.btn_pause_resume = None
+        self.btn_clear_queue = None
+        self.btn_save_queue = None
+        self.btn_load_queue = None
         # 缓存
         self._last_queue_signature = None
         self._last_paths_signature = None
@@ -97,6 +101,58 @@ class SystemMonitorPage:
                     ui.label(str(value)).classes(f'text-xl font-bold text-{color}-7')
                     if subtext: ui.label(subtext).classes('text-xs text-grey-5')
                 ui.icon(icon, size='2.5em', color=f'{color}-2')
+
+    def toggle_pause(self):
+        if monitor_service.is_paused_state:
+            monitor_service.resume_processing()
+            ui.notify('任务已恢复', type='positive')
+        else:
+            monitor_service.pause_processing()
+            ui.notify('任务已暂停 (新文件将暂存在队列中)', type='warning')
+        self.update_status_indicators()  # 立即刷新UI状态
+
+    def on_clear_queue(self):
+        monitor_service.clear_pending_tasks()
+        ui.notify('所有等待中的任务已清空', type='negative')
+        self.update_queue_display()  # 立即刷新列表
+
+    async def on_save_queue(self):
+        # 给按钮一个加载状态，提升体验
+        self.btn_save_queue.props('loading')
+
+        try:
+            count = await run.io_bound(monitor_service.save_queue_to_disk)
+
+            if count > 0:
+                ui.notify(f'已保存 {count} 个任务 (队列已暂存)', type='positive')
+            else:
+                ui.notify('队列为空，没有任务需要保存', type='info')
+
+            if not monitor_service.is_paused_state:
+                monitor_service.pause_processing()
+
+        except Exception as e:
+            ui.notify(f'保存失败: {str(e)}', type='negative')
+        finally:
+            self.btn_save_queue.props(remove='loading')
+            self.update_status_indicators()
+            self.update_queue_display()
+
+    async def on_load_queue(self):
+        self.btn_load_queue.props('loading')
+        try:
+            count = await run.io_bound(monitor_service.load_queue_from_disk)
+
+            if count > 0:
+                ui.notify(f'成功恢复 {count} 个任务', type='positive')
+            else:
+                ui.notify('未找到有效的存档文件', type='warning')
+        except Exception as e:
+            ui.notify(f'恢复失败: {str(e)}', type='negative')
+        finally:
+            self.btn_load_queue.props(remove='loading')
+            self.update_status_indicators()
+            self.update_queue_display()
 
     # --- 核心 UI 构建 ---
     def build_ui(self):
@@ -176,7 +232,32 @@ class SystemMonitorPage:
                                 ui.icon('hourglass_empty', color='orange-7')
                                 ui.label('等待队列').classes('font-bold text-grey-8 text-sm')
                                 self.queue_count_badge = ui.badge('0', color='orange')
-                            self.queue_scroll = ui.scroll_area().classes('w-full flex-grow p-2')
+
+                            # 控制按钮组
+                            with ui.row().classes('gap-1'):
+                                # 1. 恢复任务 (从磁盘)
+                                self.btn_load_queue = ui.button(icon='restore', on_click=self.on_load_queue) \
+                                    .props('flat dense size=sm round color=grey-5') \
+                                    .tooltip('从磁盘恢复上次保存的任务')
+
+                                # 2. 保存任务 (到磁盘)
+                                self.btn_save_queue = ui.button(icon='save', on_click=self.on_save_queue) \
+                                    .props('flat dense size=sm round color=blue-6') \
+                                    .tooltip('保存当前队列并清空 (重启后可恢复)')
+
+                                ui.separator().props('vertical').classes('mx-1')
+
+                                # 3. 暂停/继续
+                                self.btn_pause_resume = ui.button(icon='pause', on_click=self.toggle_pause) \
+                                    .props('flat dense size=sm round color=grey-7') \
+                                    .tooltip('暂停/恢复处理')
+
+                                # 4. 清空 (丢弃)
+                                self.btn_clear_queue = ui.button(icon='delete_forever', on_click=self.on_clear_queue) \
+                                    .props('flat dense size=sm round color=red-5') \
+                                    .tooltip('直接清空队列 (不保存)')
+
+                        self.queue_scroll = ui.scroll_area().classes('w-full flex-grow p-2')
 
                 # --- 右侧：日志 ---
                 with ui.card().classes('w-2/3 h-full p-0 no-shadow border-[1px] flex flex-col'):
@@ -287,6 +368,21 @@ class SystemMonitorPage:
 
             if hasattr(monitor_service, 'observer') and monitor_service.observer:
                 if monitor_service.observer.is_alive(): is_running = True
+
+            if self.btn_pause_resume:
+                if monitor_service.is_paused_state:
+                    self.btn_pause_resume.props('icon=play_arrow color=green-6')
+                    if self.current_file_label and self.current_file_label.text == '等待任务...':
+                        self.current_file_label.text = '任务已暂停'
+                        self.current_file_label.classes(replace='text-orange-5 italic text-sm')
+                else:
+                    self.btn_pause_resume.props('icon=pause color=grey-7')
+
+            if self.btn_load_queue:
+                if monitor_service.has_saved_queue():
+                    self.btn_load_queue.props('color=purple-6 disable=false')
+                else:
+                    self.btn_load_queue.props('color=grey-4 disable=true')
 
             if self.monitor_status_text and self.monitor_status_icon:
                 if is_running:
