@@ -84,7 +84,7 @@ class MonitorService:
     def __init__(self):
         if self.initialized:
             return
-        self.task_queue = Queue(maxsize=500)
+        self.task_queue = Queue(maxsize=0)
         self.logical_pending_count = 0
         self._count_lock = threading.Lock()
         self._paused = False
