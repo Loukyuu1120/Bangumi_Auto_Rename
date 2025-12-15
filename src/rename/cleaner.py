@@ -342,6 +342,12 @@ def is_season_name(filename: str) -> bool:
 
     return False
 
+def is_video_file(filename: str) -> bool:
+    """
+    判断文件是否为视频文件
+    """
+    suffix = Path(filename).suffix.lower()
+    return suffix in VIDEO_SUFFIX
 
 # ================= 复杂文件名解析 =================
 

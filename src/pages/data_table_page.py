@@ -11,6 +11,7 @@ from ..utils.utils import get_task
 from ..rename.process import Rename
 from ..utils.path import TASK_PATH, RECORD_PATH
 from ..logger import logger
+from ..monitor.monitor import monitor_service
 
 
 class BatchEditDialog(ui.dialog):
@@ -295,9 +296,6 @@ class TableManager:
             notify("没有需要处理的任务")
             return
 
-        count = 0
-        success_count = 0
-
         def get_bool_from_text(text):
             if text == '是' or text == '启用': return True
             if text == '否' or text == '禁用': return False
@@ -310,30 +308,32 @@ class TableManager:
         batch_is_movie_text = settings.get('is_movie')
         batch_use_ai_text = settings.get('use_ai')
 
-        batch_scoped_cache = {}
+        # 注册计数器，让监控页面能看到数量变化
+        monitor_service.register_batch_count(len(rows))
 
-        notify('正在后台进行批量处理，请稍候...')
+        notify(f'已将 {len(rows)} 个任务加入后台队列')
 
         for row in rows:
             try:
-                path = Path(row['path'])
                 uuid = row['uuid']
+                # 优先读取最新的 task 文件，如果没有则用表格里的旧数据
+                task_data = get_task(uuid) or row
 
-                task_data = get_task(uuid)
-                if task_data:
-                    is_anime_orig = task_data.get('is_anime')
-                    is_movie_orig = task_data.get('is_movie')
-                    ai_used_orig = task_data.get('use_ai')
-                    season_id_orig = task_data.get('season_id')
-                    offset_orig = task_data.get('episode_offset')
-                else:
-                    is_anime_orig = row.get('is_anime')
-                    is_movie_orig = row.get('is_movie')
-                    ai_used_orig = row.get('ai_used')
-                    season_id_orig = row.get('season')
-                    offset_orig = row.get('episode_offset')
+                path_str = task_data.get('path')
+                if not path_str: continue
 
-                tmdb_id = batch_tmdb_id
+                path = Path(path_str)
+
+                # 原有参数
+                is_anime_orig = task_data.get('is_anime')
+                is_movie_orig = task_data.get('is_movie')
+                ai_used_orig = task_data.get('use_ai')
+                season_id_orig = task_data.get('season_id')
+                offset_orig = task_data.get('episode_offset')
+
+                # 合并逻辑：如果有批量设置则使用，否则使用原参数
+                tmdb_id = batch_tmdb_id  # 批量没填就是 None
+
                 season_id = int(batch_season_id) if batch_season_id else season_id_orig
                 offset = int(batch_offset) if batch_offset else offset_orig
                 if offset is None: offset = 0
@@ -353,35 +353,31 @@ class TableManager:
                 else:
                     use_ai = ai_used_orig
 
-                result = await run.io_bound(
-                    Rename().process,
-                    path,
-                    _is_anime=is_anime,
-                    _is_movie=is_movie,
-                    _tuuid=uuid,
-                    cus_name=None,
-                    cus_season_id=season_id,
-                    cus_tmdb_id=tmdb_id,
-                    cus_offset=offset,
-                    use_ai=use_ai,
-                    _scoped_cache=batch_scoped_cache  # <--- 传入临时缓存
-                )
+                options = {
+                    'is_anime': is_anime,
+                    'is_movie': is_movie,
+                    'use_ai': use_ai,
+                    'cus_season_id': season_id,
+                    'cus_tmdb_id': tmdb_id,
+                    'cus_offset': offset,
+                    '_tuuid': uuid,  # 传入 UUID，保证覆盖原来的任务记录
+                    '_ai_attempted': False  # 重置 AI 尝试状态
+                }
 
-                if result is True:
-                    success_count += 1
-                else:
-                    logger.error(f"Batch process failed for {row.get('name')}: {result}")
+                # 加入队列
+                monitor_service.add_manual_task(path, options)
+
+                # [视觉反馈] 临时修改缓存状态，让用户感觉反应很快
+                if uuid in self.cache:
+                    self.cache[uuid]['status'] = '排队中'
+                    self.cache[uuid]['error_msg'] = '等待后台处理...'
 
             except Exception as e:
-                import traceback
-                logger.error(f"Batch process error for {row.get('uuid')}: {e}")
-                traceback.print_exc()
+                logger.error(f"Batch submit error for {row.get('uuid')}: {e}")
 
-            count += 1
-
-        notify(f'处理完成: 成功 {success_count}/{count}')
         self.selected_rows = []
-        ui.timer(1.0, self.do_refresh, once=True)
+        # 刷新一下表格，显示"排队中"状态
+        self.do_refresh()
 
     def delete_by_uuid(self, uuid: str):
         path1 = TASK_PATH / f'{uuid}.json'
@@ -415,9 +411,10 @@ class TableManager:
             self.table.selected.clear()
         self.update_selection_label()
 
-        self.load_data()  # 重新扫描文件列表
-        # self.cache = {}
+        self.cache.clear()
+        self.is_fully_loaded = False
 
+        self.load_data()
         refresh_table_view.refresh()
 
 
@@ -471,10 +468,11 @@ def refresh_table_view():
         '''
         <q-td :props="props" :class="{
             'bg-green-1 text-green-8': props.value === '成功',
-            'bg-red-1 text-red-8': props.value === '失败'
+            'bg-red-1 text-red-8': props.value === '失败',
+            'bg-blue-1 text-blue-8': props.value === '排队中'
         }">
             <div class="flex items-center justify-center">
-                <q-icon :name="props.value === '成功' ? 'check_circle' : 'error'" size="xs" class="q-mr-xs"/>
+                <q-icon :name="props.value === '成功' ? 'check_circle' : (props.value === '排队中' ? 'hourglass_empty' : 'error')" size="xs" class="q-mr-xs"/>
                 {{ props.value }}
                 <q-tooltip v-if="props.row.error_msg" content-style="font-size: 14px">{{ props.row.error_msg }}</q-tooltip>
             </div>
@@ -605,53 +603,47 @@ async def handle_retry(ev: GenericEventArguments, is_batch: bool = False):
     row_data = arg['row']
     uuid = row_data['uuid']
 
+    # 读取最新配置
     task_data = get_task(uuid)
     if not task_data:
         task_data = row_data
 
-    path = task_data.get('path')
-    is_anime = task_data.get('is_anime')
-    is_movie = task_data.get('is_movie')
-    season_id = task_data.get('season_id')
-    tmdb_id = task_data.get('tmdb_id')
-    offset = task_data.get('episode_offset')
-    use_ai = task_data.get('use_ai')
+    path_str = task_data.get('path')
+    if not path_str:
+        notify('路径无效', type='negative')
+        return
 
-    if not tmdb_id: tmdb_id = None
-    if not offset:
-        offset = None
-    else:
-        offset = int(offset)
+    path = Path(path_str)
+
+    # 提取参数
+    options = {
+        'is_anime': task_data.get('is_anime'),
+        'is_movie': task_data.get('is_movie'),
+        'use_ai': task_data.get('use_ai'),
+        'cus_season_id': task_data.get('season_id'),
+        'cus_tmdb_id': task_data.get('tmdb_id'),
+        'cus_offset': int(task_data.get('episode_offset', 0) or 0),
+        '_tuuid': uuid,
+        '_ai_attempted': False
+    }
 
     try:
         if not is_batch:
-            notify('正在后台重试任务...')
+            # 加入队列
+            monitor_service.add_manual_task(path, options, increment_counter=True)
 
-        await run.io_bound(
-            Rename().process,
-            Path(path),
-            _is_anime=is_anime,
-            _is_movie=is_movie,
-            _tuuid=uuid,
-            cus_name=None,
-            cus_season_id=season_id,
-            cus_tmdb_id=tmdb_id,
-            cus_offset=offset,
-            use_ai=use_ai,
-            _scoped_cache={}
-        )
-        if not is_batch:
-            notify('任务处理完成')
+            # 更新缓存状态
+            if uuid in manager.cache:
+                manager.cache[uuid]['status'] = '排队中'
+                manager.cache[uuid]['error_msg'] = '已加入处理队列'
+
+            notify('已加入后台处理队列')
+            refresh_table_view.refresh()
+
     except Exception as e:
-        import traceback
-        error_msg = f'重试失败: {str(e)}'
-        logger.error(error_msg)
-        traceback.print_exc()
+        logger.error(f'Retry failed: {e}')
         if not is_batch:
-            notify(error_msg)
-
-    if not is_batch:
-        manager.refresh_table()
+            notify(f'加入队列失败: {e}', type='negative')
 
 
 def handle_delete(ev: GenericEventArguments, is_notify: bool = True):

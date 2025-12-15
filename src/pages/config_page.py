@@ -1,13 +1,17 @@
+import os
 from typing import Sequence
 from types import SimpleNamespace
+from pathlib import Path
 
-from nicegui import ui
+from nicegui import ui, run
 
 from ..logger import logger, update_log_level_from_config
 from ..config.config_manager import CN_MAP, cm
 from ..element.red import RedButton, RedToogle
 from ..component.local_file_picker import local_file_picker
 from ..monitor.monitor_manager import monitor_manager
+from ..monitor.monitor import monitor_service
+from ..rename.cleaner import is_video_file
 
 
 class ConfigPage(ui.dialog):
@@ -420,6 +424,20 @@ class ConfigPage(ui.dialog):
                         type="negative",
                     )
                     return
+        # 提取需要立即扫描的目录配置
+        scan_targets = []
+        if hasattr(self.config, 'monitor_paths') and isinstance(self.config.monitor_paths, list):
+            # 遍历列表查找 scan_now 标记
+            for item in self.config.monitor_paths:
+                if isinstance(item, dict) and item.get('scan_now') is True:
+                    # 创建副本用于扫描任务（避免修改原配置影响保存）
+                    target_config = item.copy()
+                    # 从配置中移除临时的 scan_now 标记，确保不会被永久保存到 config.json
+                    del target_config['scan_now']
+                    scan_targets.append(target_config)
+
+                    # 重置当前配置中的标记，防止下次打开时开关还是开着的
+                    item['scan_now'] = False
 
         # 保存所有配置
         for cn in self.config.__dict__:
@@ -448,6 +466,59 @@ class ConfigPage(ui.dialog):
             logger.error(f"[配置] 重启目录监控失败: {e}")
             ui.notify(f"⚠️ 重启目录监控失败: {e}", type="warning")
         self.close()
+        if scan_targets:
+            ui.notify(f"🚀 已触发 {len(scan_targets)} 个目录的全量扫描...", type='info')
+            try:
+                await run.io_bound(self._execute_immediate_scans, scan_targets)
+                ui.notify(f"✅ 全量扫描已完成", type='positive')
+            except Exception as e:
+                logger.error(f"扫描出错: {e}")
+                ui.notify(f"扫描出错: {e}", type='negative')
+
+    def _execute_immediate_scans(self, scan_configs: list):
+        """
+        遍历指定目录，将所有视频文件加入监控队列
+        """
+        count = 0
+        try:
+            for cfg in scan_configs:
+                root_path_str = cfg.get('path')
+                if not root_path_str: continue
+
+                root_path = Path(root_path_str)
+                if not root_path.exists():
+                    logger.warning(f"[全量扫描] 目录不存在: {root_path}")
+                    continue
+
+                logger.info(f"[全量扫描] 开始扫描: {root_path}")
+
+                task_options = {
+                    "config_overrides": cfg
+                }
+
+                # 遍历目录
+                for root, dirs, files in os.walk(root_path):
+                    # 排除隐藏目录
+                    dirs[:] = [d for d in dirs if not d.startswith('.')]
+
+                    for file in files:
+                        if file.startswith('.'): continue
+
+                        file_path = Path(root) / file
+
+                        if is_video_file(file):
+                            # 加入监控队列
+                            monitor_service.add_manual_task(file_path, task_options)
+                            count += 1
+
+            if count > 0:
+                logger.info(f"[全量扫描] 扫描完成，已添加 {count} 个任务到队列")
+                # 这里不能直接调用 ui.notify，因为它在后台线程运行
+            else:
+                logger.info("[全量扫描] 扫描完成，未发现新任务")
+
+        except Exception as e:
+            logger.error(f"[全量扫描] 执行出错: {e}")
 
     def _get_current_ui_config(self) -> dict:
         """获取当前界面的配置（未保存的）"""
@@ -809,7 +880,8 @@ class ConfigPage(ui.dialog):
                     "tv_format": "",
                     "movie_format": "",
                     "target_tv_dir": "",
-                    "target_movie_dir": ""
+                    "target_movie_dir": "",
+                    "scan_now": False,
                 })
             elif isinstance(item, dict):
                 # 补全可能缺少的字段
@@ -817,6 +889,7 @@ class ConfigPage(ui.dialog):
                 item.setdefault("movie_format", "")
                 item.setdefault("target_tv_dir", "")
                 item.setdefault("target_movie_dir", "")
+                item.setdefault("scan_now", False)
                 self.monitor_paths_data.append(item)
 
         self.path_container = ui.column().classes("w-full gap-2")
@@ -845,6 +918,13 @@ class ConfigPage(ui.dialog):
                         # 高级配置折叠面板
                         with ui.expansion("监控配置 (点击展开)", icon="settings").classes("w-full text-sm text-gray-600"):
                             with ui.column().classes("w-full gap-2 p-2 bg-gray-50"):
+                                with ui.row().classes("w-full items-center justify-between bg-blue-50 p-2 rounded"):
+                                    ui.label("🚀 立即操作").classes("font-bold text-blue-800")
+                                    ui.switch(
+                                        "保存后立即全量扫描此目录",
+                                        value=item.get('scan_now', False),
+                                        on_change=lambda e, i=idx: self._update_path_data(i, "scan_now", e.value)
+                                    ).props("dense color=blue").tooltip("开启后，点击保存配置时会立即遍历该目录并将所有视频加入任务队列")
                                 ui.label("💡 留空或不选表示使用全局默认设置").classes("text-xs text-gray-400 mb-1")
                                 # === 0. 目标输出目录 (Priority) ===
                                 ui.label("📁 目标输出目录 (覆盖全局设置)").classes("font-bold text-xs mt-1")

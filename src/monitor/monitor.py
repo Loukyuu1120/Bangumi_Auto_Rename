@@ -13,7 +13,7 @@ from typing import Dict, Any
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver
 
-from ..rename.utils import VIDEO_SUFFIX
+from ..rename.cleaner import is_video_file
 from ..utils.path import TASK_PATH
 from ..rename.process import Rename
 from ..config.config_manager import cm
@@ -37,8 +37,7 @@ class MonitorEventHandler(FileSystemEventHandler):
     def _should_ignore(self, file_path_str: str) -> bool:
         if os.path.basename(file_path_str).startswith("."):
             return True
-        suffix = Path(file_path_str).suffix.lower()
-        if suffix not in VIDEO_SUFFIX:
+        if not is_video_file(file_path_str):
             return True
         for pattern in self.exclude_patterns:
             if pattern.search(file_path_str):
@@ -405,7 +404,7 @@ class MonitorService:
             self.worker_thread.start()
             self.is_running = True
 
-        logger.info(f"[手动任务] 添加: {path.name} 参数: {options}")
+        logger.debug(f"[手动任务] 添加: {path.name} 参数: {options}")
         if increment_counter:
             with self._count_lock:
                 self.logical_pending_count += 1
