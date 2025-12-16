@@ -113,6 +113,16 @@ class TableManager:
 
         self.is_fully_loaded = False # 标记是否已将所有文件载入缓存
 
+    def _scan_files_sync(self):
+        if not TASK_PATH.exists():
+            return []
+        # 这里的 glob 和 stat 是最耗时的
+        return sorted(
+            TASK_PATH.glob('*.json'),
+            key=lambda x: x.stat().st_mtime,
+            reverse=True
+        )
+
     def _read_task_file(self, file_path: Path) -> Optional[Dict]:
         """读取单个文件并格式化，优先使用缓存"""
         uuid = file_path.stem
@@ -148,23 +158,16 @@ class TableManager:
         except Exception:
             return None
 
-    def load_data(self):
-        """只扫描文件列表，不读取内容"""
-        if not TASK_PATH.exists():
-            self.file_list = []
-            self.total_items = 0
-            return
-
+    async def load_data(self):
+        """异步加载数据，不阻塞主线程"""
         try:
-            self.file_list = sorted(
-                TASK_PATH.glob('*.json'),
-                key=lambda x: x.stat().st_mtime,
-                reverse=True
-            )
+            self.file_list = await run.io_bound(self._scan_files_sync)
             self.is_fully_loaded = False
+            self.total_items = len(self.file_list)
         except Exception as e:
             logger.error(f"File list error: {e}")
             self.file_list = []
+            self.total_items = 0
 
     def get_current_page_data(self) -> List[Dict]:
         """获取当前页数据"""
@@ -280,9 +283,9 @@ class TableManager:
         # 实时更新左下角文字
         self.update_selection_label()
 
-    def do_refresh(self):
-        """点击刷新按钮 -> 重绘整个表格区域"""
-        self.load_data()
+    async def do_refresh(self):
+        notify('正在刷新列表...')
+        await self.load_data()
         refresh_table_view.refresh()
 
     def batch_retry_click(self):
@@ -377,7 +380,7 @@ class TableManager:
 
         self.selected_rows = []
         # 刷新一下表格，显示"排队中"状态
-        self.do_refresh()
+        await self.do_refresh()
 
     def delete_by_uuid(self, uuid: str):
         path1 = TASK_PATH / f'{uuid}.json'
@@ -543,8 +546,6 @@ def refresh_table_view():
 
 
 def create_table():
-    manager.load_data()
-
     def on_text_change(e):
         manager.filter_text = e.value
         manager.page = 1
@@ -589,6 +590,12 @@ def create_table():
             RedButton('批量删除', on_click=manager.batch_delete).props('color=red-6 icon=delete')
 
     refresh_table_view()
+    async def init_data():
+        ui.notify('正在加载任务列表...', type='info', position='center')
+        await manager.load_data()
+        refresh_table_view.refresh() # 数据加载完后，刷新表格显示
+
+    ui.timer(0, init_data, once=True)
 
 
 async def handle_edit(ev: GenericEventArguments):

@@ -38,7 +38,7 @@ class SystemMonitorPage:
         # 启动定时器
         ui.timer(2.0, self.update_status_indicators)
         ui.timer(1.0, self.update_queue_display)
-        ui.timer(1.0, self.refresh_log_view, once=True)
+        ui.timer(1.0, self.refresh_log_view)
 
     # --- 静态辅助方法 ---
     @staticmethod
@@ -296,8 +296,9 @@ class SystemMonitorPage:
             start_time = time.time()
             url = f"{base_url}/configuration?api_key={api_key}"
             response = await asyncio.to_thread(requests.get, url, timeout=8)
+            if self.tmdb_status_label.is_deleted:
+                return
             ping = (time.time() - start_time) * 1000
-
             if response.status_code == 200:
                 ui.notify(f'TMDB 连接成功: {int(ping)}ms', type='positive')
                 self.tmdb_status_label.text = f"正常 ({int(ping)}ms)"
@@ -322,7 +323,7 @@ class SystemMonitorPage:
     async def refresh_log_view(self):
         """刷新日志视图 (Async)"""
         try:
-            if not self.log_container:
+            if not self.log_container or self.log_container.is_deleted:
                 return
             logs = list(ui_log_history)
 
@@ -340,14 +341,11 @@ class SystemMonitorPage:
                     elif 'ERROR' in u_msg or 'CRITICAL' in u_msg:
                         color_class = 'text-red-500 font-bold'
                     ui.label(msg).classes(f'text-xs font-mono {color_class} break-all leading-tight')
-            try:
-                await asyncio.sleep(0.1)  # 让出控制权给 UI 渲染
-                if self.log_scroll:
-                    self.log_scroll.scroll_to(percent=1.0)
-            except RuntimeError:
-                pass
+            await asyncio.sleep(0.1)
+            if self.log_scroll and not self.log_scroll.is_deleted:
+                self.log_scroll.scroll_to(percent=1.0)
         except Exception as e:
-            ui.notify(f'日志刷新失败: {str(e)}', type='negative')
+            pass
 
     def update_status_indicators(self):
         try:
