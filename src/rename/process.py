@@ -1204,7 +1204,8 @@ class Rename:
                             else:
                                 raw_candidate_name = raw_parent_name
                                 candidate_name, candidate_year, _, _ = parse_filename(raw_parent_name)
-
+                            if candidate_year > 0 and year == 0:
+                                year = candidate_year
                             candidate_name = remove_tag(candidate_name).strip()
                             if candidate_name and candidate_name != rtpath_name and len(candidate_name) >= 2:
                                 if candidate_name not in search_candidates:
