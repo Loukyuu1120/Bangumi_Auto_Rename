@@ -21,7 +21,7 @@ class ConfigPage(ui.dialog):
         super().__init__()
         self.config = SimpleNamespace(**cm.config)
 
-        _s = "width: 60%; flex-wrap: nowrap; max-height: 80vh; overflow-y: auto;"
+        _s = "width: 100vw; height: 100vh; max-width: 100vw; max-height: 100vh; border-radius: 0; flex-wrap: nowrap; overflow-y: auto;"
         with self, ui.card().style(_s).classes("flex"):
             ui.label("配置").style("font-size: 20px; font-weight: bold")
             ui.separator()
@@ -406,66 +406,71 @@ class ConfigPage(ui.dialog):
                         ui.label("").style("min-width: 60px")
 
     def _open_secondary_rules_editor(self):
-        """打开二级分类规则编辑器"""
+        """打开二级分类规则编辑器 (垂直滚动版)"""
 
-        # 1. 获取当前规则，如果不存在则使用默认值
+        # 1. 获取当前规则
         current_rules = cm.get_config("secondary_rules")
         if not current_rules:
             current_rules = copy.deepcopy(DEFAULT_SECONDARY_RULES)
 
-        # 临时绑定到实例以便编辑，不直接修改 cm，直到点击保存
         self.editing_rules = current_rules
 
-        with ui.dialog() as dialog, ui.card().classes("w-[800px] h-[80vh] flex flex-col"):
-            with ui.row().classes("w-full justify-between items-center"):
-                ui.label("🎨 自定义二级分类规则").classes("text-h6")
-                ui.icon("help_outline", color="gray").tooltip(
-                    "规则按从上到下的顺序匹配。\n"
-                    "一旦匹配成功，文件将放入对应的文件夹。\n"
-                    "如果所有条件留空，则视为总是匹配（通常作为最后一项兜底）。"
-                )
+        # 全屏弹窗配置
+        with ui.dialog() as dialog, ui.card().classes(
+                "w-full h-full max-w-none max-h-none rounded-none flex flex-col p-0"):
+            # --- 顶部标题栏 ---
+            with ui.row().classes("w-full justify-between items-center p-4 shadow-sm z-10 bg-white"):
+                with ui.row().classes("items-center gap-2"):
+                    ui.label("🎨 自定义二级分类规则").classes("text-h6")
+                    ui.badge("编辑模式", color="blue-1").classes("text-blue-8")
 
-            ui.separator()
+                with ui.row().classes("gap-2"):
+                    # 顶部保存/关闭按钮，方便操作
+                    RedButton("取消", on_click=dialog.close).props("outline dense")
+                    RedButton("💾 保存规则", on_click=lambda: self._save_rules(dialog)).props("dense")
 
-            # 常用代码提示
-            with ui.expansion("📋 常用代码参考 (点击展开)", icon="info").classes(
-                    "w-full text-xs text-gray-500 bg-gray-50"):
-                with ui.grid(columns=2).classes("w-full gap-4 p-2"):
-                    ui.label(
-                        "类型(genre_ids):\n16:动漫, 99:纪录片, 10764:真人秀\n10767:脱口秀, 10762:儿童, 10402:音乐").style(
-                        "white-space: pre-wrap")
-                    ui.label(
-                        "国家或地区(origin_country):\nCN:中国, US:美国, JP:日本, KR:韩国\nGB:英国, HK:香港, TW:台湾").style(
-                        "white-space: pre-wrap")
+            # --- 主要内容区域 ---
+            with ui.scroll_area().classes("flex-grow w-full bg-gray-50 p-4"):
+                with ui.column().classes("w-full max-w-5xl mx-auto gap-8"):
+                    # 提示信息
+                    with ui.expansion("📋 常用匹配代码参考", icon="help").classes(
+                            "w-full bg-white border border-gray-200 rounded"):
+                        with ui.grid(columns=2).classes("w-full gap-4 p-4 text-xs text-gray-600"):
+                            ui.label("类型(genre_ids):\n16:动漫, 99:纪录片\n10764:真人秀, 10762:儿童").style(
+                                "white-space: pre-wrap")
+                            ui.label(
+                                "国家/地区(origin_country):\nCN:中国, US:美国, JP:日本\nGB:英国, HK:香港, TW:台湾").style(
+                                "white-space: pre-wrap")
 
-            # 选项卡
-            with ui.tabs().classes("w-full text-red-8") as tabs:
-                movie_tab = ui.tab("电影策略")
-                tv_tab = ui.tab("剧集策略")
+                    # === 电影策略区域 ===
+                    with ui.column().classes("w-full gap-2"):
+                        with ui.row().classes("items-center gap-2 mb-2"):
+                            ui.icon("movie", size="sm", color="blue")
+                            ui.label("电影策略 (Movie Strategy)").classes("text-lg font-bold text-gray-800")
 
-            with ui.tab_panels(tabs, value=movie_tab).classes("w-full flex-grow overflow-hidden"):
-                # === 电影面板 ===
-                with ui.tab_panel(movie_tab).classes("p-0 h-full flex flex-col"):
-                    self._render_rule_list_editor("movie")
+                        # 创建电影规则容器
+                        movie_container = ui.column().classes("w-full gap-3")
+                        self._render_rule_list_editor(movie_container, "movie")
 
-                # === 剧集面板 ===
-                with ui.tab_panel(tv_tab).classes("p-0 h-full flex flex-col"):
-                    self._render_rule_list_editor("tv")
+                    ui.separator().classes("my-2")
 
-            ui.separator()
+                    # === 剧集策略区域 ===
+                    with ui.column().classes("w-full gap-2"):
+                        with ui.row().classes("items-center gap-2 mb-2"):
+                            ui.icon("tv", size="sm", color="green")
+                            ui.label("剧集策略 (TV Strategy)").classes("text-lg font-bold text-gray-800")
 
-            with ui.row().classes("w-full justify-end gap-2"):
-                RedButton("恢复默认", on_click=lambda: self._reset_rules(dialog)).props("outline color=grey")
-                RedButton("取消", on_click=dialog.close).props("outline")
-                RedButton("保存规则", on_click=lambda: self._save_rules(dialog))
+                        # 创建剧集规则容器
+                        tv_container = ui.column().classes("w-full gap-3")
+                        self._render_rule_list_editor(tv_container, "tv")
+
+                    # 底部留白，方便滚动
+                    ui.label("").classes("h-10")
 
         dialog.open()
 
-    def _render_rule_list_editor(self, rule_type: str):
-        """渲染规则列表（可滚动区域）"""
-
-        # 容器：用于刷新列表
-        container = ui.column().classes("w-full flex-grow overflow-y-auto p-2 gap-2")
+    def _render_rule_list_editor(self, container, rule_type: str):
+        """渲染规则列表到指定容器"""
 
         def _refresh():
             container.clear()
@@ -473,83 +478,86 @@ class ConfigPage(ui.dialog):
 
             with container:
                 for idx, rule in enumerate(rules):
-                    with ui.card().classes("w-full p-2 border border-gray-200"):
-                        # --- 第一行：标题栏与操作 ---
-                        with ui.row().classes("w-full items-center gap-2"):
-                            # 序号
-                            ui.label(f"#{idx + 1}").classes("text-gray-400 text-xs font-mono w-6")
+                    # 使用卡片包裹每一条规则
+                    with ui.card().classes("w-full p-3 border border-gray-300 shadow-none hover:shadow-md transition"):
 
-                            # 文件夹名称输入
-                            ui.input(
-                                value=rule.get("name", ""),
-                                label="分类文件夹名称",
-                                placeholder="例如：华语电影",
-                                on_change=lambda e, i=idx: self._update_rule(rule_type, i, "name", e.value)
-                            ).props("dense outlined").style("width: 200px")
+                        # --- 第一行：标题与控制 ---
+                        with ui.row().classes("w-full items-center justify-between gap-4"):
+                            with ui.row().classes("items-center gap-2 flex-grow"):
+                                ui.label(f"#{idx + 1}").classes("text-gray-400 font-mono font-bold")
 
-                            ui.space()
+                                # 分类名称
+                                ui.input(
+                                    value=rule.get("name", ""),
+                                    label="分类文件夹名称",
+                                    placeholder="例如：华语电影",
+                                    on_change=lambda e, i=idx: self._update_rule(rule_type, i, "name", e.value)
+                                ).props("outlined dense").classes("w-64 font-bold")
 
-                            # 排序按钮
-                            if idx > 0:
-                                ui.button(icon="arrow_upward",
-                                          on_click=lambda i=idx: self._move_rule(rule_type, i, -1, _refresh)).props(
-                                    "flat dense round size=sm color=grey")
-                            if idx < len(rules) - 1:
-                                ui.button(icon="arrow_downward",
-                                          on_click=lambda i=idx: self._move_rule(rule_type, i, 1, _refresh)).props(
-                                    "flat dense round size=sm color=grey")
+                            # 操作按钮组
+                            with ui.row().classes("items-center"):
+                                if idx > 0:
+                                    ui.button(icon="arrow_upward",
+                                              on_click=lambda i=idx: self._move_rule(rule_type, i, -1, _refresh)).props(
+                                        "flat dense round size=sm color=grey").tooltip("上移")
+                                if idx < len(rules) - 1:
+                                    ui.button(icon="arrow_downward",
+                                              on_click=lambda i=idx: self._move_rule(rule_type, i, 1, _refresh)).props(
+                                        "flat dense round size=sm color=grey").tooltip("下移")
 
-                            # 删除按钮
-                            ui.button(icon="delete",
-                                      on_click=lambda i=idx: self._delete_rule(rule_type, i, _refresh)).props(
-                                "flat dense round size=sm color=red")
+                                ui.separator().props("vertical").classes("mx-2 h-6")
+                                ui.button(icon="delete",
+                                          on_click=lambda i=idx: self._delete_rule(rule_type, i, _refresh)).props(
+                                    "flat dense round size=sm color=red").tooltip("删除此规则")
 
-                        # --- 第二行：条件配置 ---
-                        conds = rule.get("conditions", {})
+                        # --- 第二行：条件配置 (网格布局，纯上下视觉) ---
+                        # 使用 bg-gray-50 让条件区域和标题区分开
+                        with ui.column().classes("w-full mt-2 p-3 bg-gray-50 rounded border border-gray-100"):
+                            ui.label("匹配条件 (留空则忽略该条件)").classes("text-xs text-gray-500 mb-1")
 
-                        with ui.row().classes("w-full gap-2 mt-2 items-center"):
-                            ui.label("匹配条件:").classes("text-xs font-bold text-gray-600 mt-2")
+                            conds = rule.get("conditions", {})
 
-                            # 类型 ID
-                            ui.input(
-                                value=conds.get("genre_ids", ""),
-                                label="类型ID (genre_ids)",
-                                placeholder="16, 10765",
-                                on_change=lambda e, i=idx: self._update_condition(rule_type, i, "genre_ids", e.value)
-                            ).props("dense filled").classes("flex-1").tooltip("TMDB的类型ID，多个用逗号分隔")
+                            # 2列网格，屏幕窄时自动变成1列
+                            with ui.grid(columns=2).classes("w-full gap-3"):
+                                # 1. 类型
+                                ui.input(
+                                    value=conds.get("genre_ids", ""),
+                                    label="类型ID (genre_ids)",
+                                    placeholder="例如: 16, 10765",
+                                    on_change=lambda e, i=idx: self._update_condition(rule_type, i, "genre_ids",
+                                                                                      e.value)
+                                ).props("filled dense").classes("w-full")
 
-                            # 国家
-                            ui.input(
-                                value=conds.get("origin_country", ""),
-                                label="国家代码 (country)",
-                                placeholder="CN, US",
-                                on_change=lambda e, i=idx: self._update_condition(rule_type, i, "origin_country",
-                                                                                  e.value)
-                            ).props("dense filled").classes("flex-1").tooltip("ISO 3166-1 国家代码")
+                                # 2. 国家或地区
+                                ui.input(
+                                    value=conds.get("origin_country", ""),
+                                    label="国家/地区代码 (country)",
+                                    placeholder="例如: CN, US",
+                                    on_change=lambda e, i=idx: self._update_condition(rule_type, i, "origin_country",
+                                                                                      e.value)
+                                ).props("filled dense").classes("w-full")
 
-                        with ui.row().classes("w-full gap-2 items-center"):
-                            ui.label("       ").classes("w-[50px]")  # 占位对齐
-                            # 语言
-                            ui.input(
-                                value=conds.get("original_language", ""),
-                                label="原始语言 (lang)",
-                                placeholder="zh, ja",
-                                on_change=lambda e, i=idx: self._update_condition(rule_type, i, "original_language",
-                                                                                  e.value)
-                            ).props("dense filled").classes("flex-1")
+                                # 3. 语言
+                                ui.input(
+                                    value=conds.get("original_language", ""),
+                                    label="语言 (language)",
+                                    placeholder="例如: zh, ja",
+                                    on_change=lambda e, i=idx: self._update_condition(rule_type, i, "original_language",
+                                                                                      e.value)
+                                ).props("filled dense").classes("w-full")
 
-                            # 后缀
-                            ui.input(
-                                value=conds.get("ext", ""),
-                                label="文件后缀 (ext)",
-                                placeholder="iso, bdmv",
-                                on_change=lambda e, i=idx: self._update_condition(rule_type, i, "ext", e.value)
-                            ).props("dense filled").classes("flex-1")
+                                # 4. 后缀
+                                ui.input(
+                                    value=conds.get("ext", ""),
+                                    label="后缀 (extension)",
+                                    placeholder="例如: iso",
+                                    on_change=lambda e, i=idx: self._update_condition(rule_type, i, "ext", e.value)
+                                ).props("filled dense").classes("w-full")
 
                 # 添加按钮
                 with ui.row().classes("w-full justify-center mt-2"):
-                    RedButton("➕ 添加新规则", on_click=lambda: self._add_rule(rule_type, _refresh)).props(
-                        "outline dashed w-full")
+                    RedButton(f"➕ 添加一条{rule_type}规则", on_click=lambda: self._add_rule(rule_type, _refresh)).props(
+                        "outline dashed w-full text-grey-8")
 
         _refresh()
 
