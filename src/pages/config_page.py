@@ -411,9 +411,9 @@ class ConfigPage(ui.dialog):
         # 1. 获取当前规则
         current_rules = cm.get_config("secondary_rules")
         if not current_rules:
-            current_rules = copy.deepcopy(DEFAULT_SECONDARY_RULES)
-
-        self.editing_rules = current_rules
+            self.editing_rules = copy.deepcopy(DEFAULT_SECONDARY_RULES)
+        else:
+            self.editing_rules = copy.deepcopy(current_rules)
 
         # 全屏弹窗配置
         with ui.dialog() as dialog, ui.card().classes(
@@ -600,9 +600,9 @@ class ConfigPage(ui.dialog):
 
     def _save_rules(self, dialog):
         # 保存到配置管理器
-        cm.set_config("secondary_rules", self.editing_rules)
-        # 同时更新 self.config 以便界面其他部分知道（虽然 secondary_rules 不在主界面显示）
-        setattr(self.config, "secondary_rules", self.editing_rules)
+        final_rules = copy.deepcopy(self.editing_rules)
+        cm.set_config("secondary_rules", final_rules)
+        setattr(self.config, "secondary_rules", final_rules)
         logger.info(f"[配置] 二级分类规则已更新")
         ui.notify("✅ 规则保存成功", type="positive")
         dialog.close()

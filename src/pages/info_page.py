@@ -349,6 +349,8 @@ class SystemMonitorPage:
 
     def update_status_indicators(self):
         try:
+            if not self.monitor_path_label or self.monitor_path_label.is_deleted:
+                return
             # 1. 更新监控路径显示
             paths_list = self.get_active_monitor_paths()
 
@@ -409,6 +411,8 @@ class SystemMonitorPage:
 
     def update_queue_display(self):
         try:
+            if not self.queue_scroll or self.queue_scroll.is_deleted:
+                return
             # 1. 更新当前任务
             cur = monitor_service.current_file
             if self.current_file_label:

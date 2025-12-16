@@ -284,9 +284,12 @@ class TableManager:
         self.update_selection_label()
 
     async def do_refresh(self):
-        notify('正在刷新列表...')
-        await self.load_data()
-        refresh_table_view.refresh()
+        try:
+            notify('正在刷新列表...')
+            await self.load_data()
+            refresh_table_view.refresh()
+        except Exception:
+            pass
 
     def batch_retry_click(self):
         if not self.selected_rows:
@@ -379,8 +382,10 @@ class TableManager:
                 logger.error(f"Batch submit error for {row.get('uuid')}: {e}")
 
         self.selected_rows = []
-        # 刷新一下表格，显示"排队中"状态
-        await self.do_refresh()
+        try:
+            await self.do_refresh()
+        except Exception:
+            pass
 
     def delete_by_uuid(self, uuid: str):
         path1 = TASK_PATH / f'{uuid}.json'
@@ -591,9 +596,13 @@ def create_table():
 
     refresh_table_view()
     async def init_data():
-        ui.notify('正在加载任务列表...', type='info', position='center')
-        await manager.load_data()
-        refresh_table_view.refresh() # 数据加载完后，刷新表格显示
+        try:
+            ui.notify('正在加载任务列表...', type='info', position='center')
+            await manager.load_data()
+            refresh_table_view.refresh()
+        except Exception:
+            pass
+
 
     ui.timer(0, init_data, once=True)
 
