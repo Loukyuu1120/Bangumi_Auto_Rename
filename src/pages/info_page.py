@@ -38,7 +38,7 @@ class SystemMonitorPage:
         # 启动定时器
         ui.timer(2.0, self.update_status_indicators)
         ui.timer(1.0, self.update_queue_display)
-        ui.timer(0.1, self.refresh_log_view, once=True)
+        ui.timer(1.0, self.refresh_log_view, once=True)
 
     # --- 静态辅助方法 ---
     @staticmethod
@@ -321,28 +321,33 @@ class SystemMonitorPage:
 
     async def refresh_log_view(self):
         """刷新日志视图 (Async)"""
-        if not self.log_container: return
+        try:
+            if not self.log_container:
+                return
+            logs = list(ui_log_history)
 
-        self.log_container.clear()
-        logs = list(ui_log_history)
+            self.log_container.clear()
 
-        with self.log_container:
-            for msg in logs:
-                color_class = 'text-green-400'
-                u_msg = msg.upper()
-                if 'DEBUG' in u_msg:
-                    color_class = 'text-gray-400'
-                elif 'WARN' in u_msg:
-                    color_class = 'text-orange-400'
-                elif 'ERROR' in u_msg or 'CRITICAL' in u_msg:
-                    color_class = 'text-red-500 font-bold'
-
-                ui.label(msg).classes(f'text-xs font-mono {color_class} break-all leading-tight')
-
-        await asyncio.sleep(0.1)
-
-        if self.log_scroll:
-            self.log_scroll.scroll_to(percent=1.0)
+            with self.log_container:
+                for msg in logs:
+                    color_class = 'text-green-400'
+                    # 简单的着色逻辑
+                    u_msg = msg.upper()
+                    if 'DEBUG' in u_msg:
+                        color_class = 'text-gray-400'
+                    elif 'WARN' in u_msg:
+                        color_class = 'text-orange-400'
+                    elif 'ERROR' in u_msg or 'CRITICAL' in u_msg:
+                        color_class = 'text-red-500 font-bold'
+                    ui.label(msg).classes(f'text-xs font-mono {color_class} break-all leading-tight')
+            try:
+                await asyncio.sleep(0.1)  # 让出控制权给 UI 渲染
+                if self.log_scroll:
+                    self.log_scroll.scroll_to(percent=1.0)
+            except RuntimeError:
+                pass
+        except Exception as e:
+            ui.notify(f'日志刷新失败: {str(e)}', type='negative')
 
     def update_status_indicators(self):
         try:
