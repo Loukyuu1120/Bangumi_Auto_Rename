@@ -110,3 +110,26 @@ CODE_PATTERNS = [
     r'remux|bluray|web-dl|webrip|hdtv|bdrip|dvdrip',
     r'hq|(\d{2,3})\s?fps',
 ]
+DEFAULT_SECONDARY_RULES = {
+    "movie": [
+        {"name": "演唱会", "conditions": {"genre_ids": "10402"}},
+        {"name": "蓝光原盘", "conditions": {"ext": "iso"}},
+        {"name": "纪录片电影", "conditions": {"genre_ids": "99"}},
+        {"name": "动漫电影", "conditions": {"genre_ids": "16", "origin_country": "JP"}},
+        {"name": "动画电影", "conditions": {"genre_ids": "16"}},
+        {"name": "华语电影", "conditions": {"original_language": "zh,cn,bo,za"}},
+        {"name": "外语电影", "conditions": {}}  # 兜底
+    ],
+    "tv": [
+        {"name": "儿童", "conditions": {"genre_ids": "10762"}},
+        {"name": "国漫", "conditions": {"genre_ids": "16", "origin_country": "CN,TW,HK"}},
+        {"name": "日番", "conditions": {"genre_ids": "16", "origin_country": "JP"}},
+        {"name": "美漫", "conditions": {"genre_ids": "16", "origin_country": "US,CA,GB,FR,DE"}},
+        {"name": "纪录片剧集", "conditions": {"genre_ids": "99"}},
+        {"name": "综艺", "conditions": {"genre_ids": "10764,10767"}},
+        {"name": "国产剧", "conditions": {"origin_country": "CN,TW,HK,SG"}},
+        {"name": "欧美剧", "conditions": {"origin_country": "US,FR,GB,DE,ES,IT,NL,PT,RU,UK"}},
+        {"name": "日韩剧", "conditions": {"origin_country": "JP,KP,KR,TH,IN,SG"}},
+        {"name": "其它", "conditions": {}} # 兜底
+    ]
+}

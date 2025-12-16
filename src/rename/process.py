@@ -126,7 +126,37 @@ class Rename:
     def _get_category_folder(self, info: Dict, is_movie: bool, is_anime: bool) -> str:
         if not info:
             return "未分类"
-
+        rules_config = self._get_config_value("secondary_rules")
+        if rules_config:
+            rule_type = "movie" if is_movie else "tv"
+            rules = rules_config.get(rule_type, [])
+            genre_ids = [str(g.get('id')) for g in info.get('genres', [])]
+            countries = []
+            if 'origin_country' in info:
+                countries = info.get('origin_country', [])
+            elif 'production_countries' in info:
+                countries = [c.get('iso_3166_1') for c in info.get('production_countries', [])]
+            original_language = info.get('original_language', '').lower()
+            for rule in rules:
+                conditions = rule.get("conditions", {})
+                if not conditions:
+                    return rule.get("name", "未分类")
+                match = True
+                if "genre_ids" in conditions and conditions["genre_ids"]:
+                    target_genres = [g.strip() for g in conditions["genre_ids"].split(',')]
+                    if not set(target_genres).intersection(set(genre_ids)):
+                        match = False
+                if match and "origin_country" in conditions and conditions["origin_country"]:
+                    target_countries = [c.strip().upper() for c in conditions["origin_country"].split(',')]
+                    if not set(target_countries).intersection(set(countries)):
+                        match = False
+                if match and "original_language" in conditions and conditions["original_language"]:
+                    target_langs = [l.strip().lower() for l in conditions["original_language"].split(',')]
+                    if original_language not in target_langs:
+                        match = False
+                if match:
+                    return rule.get("name")
+            return "其他"
         genres = info.get('genres', [])
         genre_ids = [g.get('id') for g in genres]
         original_language = info.get('original_language', '').lower()
@@ -145,6 +175,9 @@ class Rename:
             return original_language in ['ja', 'ko'] or \
                 any(c in ['JP', 'KR'] for c in countries)
 
+        def is_western_region():
+            return any(c in ['US', 'CA', 'GB', 'FR', 'DE', 'IT', 'ES'] for c in countries)
+
         if is_movie:
             if 16 in genre_ids or is_anime:
                 return "动画电影"
@@ -161,6 +194,8 @@ class Rename:
         if is_anime or 16 in genre_ids:
             if is_chinese_region():
                 return "国漫"
+            if is_western_region():
+                return "美漫"
             return "日漫"
         if is_chinese_region():
             return "国产剧"
