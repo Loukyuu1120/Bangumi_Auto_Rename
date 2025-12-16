@@ -10,6 +10,7 @@ from threading import Event, Thread
 from queue import Queue, Empty
 from typing import Dict, Any
 
+from nicegui import run
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver
 
@@ -255,100 +256,103 @@ class MonitorService:
 
         return None
 
-    def start(self, path_configs: Dict[Path, Dict], exclude_dirs: list[str]):
-        """启动监控"""
+    async def start(self, path_configs: Dict[Path, Dict], exclude_dirs: list[str]):
+        """启动监控 (异步防阻塞版)"""
         if self.is_running:
             logger.warning("[监控] 服务已经在运行中")
             return
 
-        self.stop_event.clear()
-        self.path_map = path_configs
-        paths_to_monitor = list(path_configs.keys())
+        # 定义内部同步函数，执行耗时操作
+        def _start_sync():
+            self.stop_event.clear()
+            self.path_map = path_configs
+            paths_to_monitor = list(path_configs.keys())
 
-        # 1. 启动消费者线程
-        self.worker_thread = Thread(
-            target=self._process_worker, daemon=True, name="RenameWorker"
-        )
-        self.worker_thread.start()
+            # 1. 启动消费者线程
+            if not self.worker_thread or not self.worker_thread.is_alive():
+                self.worker_thread = Thread(
+                    target=self._process_worker, daemon=True, name="RenameWorker"
+                )
+                self.worker_thread.start()
 
-        # 2. 智能选择监控模式
-        use_polling = False
-        total_files = 0
-        for path in paths_to_monitor:
-            if path.exists():
-                total_files += self.count_directory_files(path)
+            # 2. 智能选择监控模式 (这里有耗时的 count_directory_files)
+            use_polling = False
+            total_files = 0
+            for path in paths_to_monitor:
+                if path.exists():
+                    total_files += self.count_directory_files(path)
 
-        limits = self.check_system_limits()
-        max_watches = limits["max_user_watches"]
+            limits = self.check_system_limits()
+            max_watches = limits["max_user_watches"]
 
-        if platform.system() == "Linux" and total_files > max_watches * 0.8:
-            logger.warning(
-                f"[监控] 文件数量({total_files}) 接近系统限制({max_watches})，强制使用轮询模式"
-            )
-            use_polling = True
-
-        if cm.get_config("monitor_mode") == "compatibility":
-            use_polling = True
-
-        # 3. 实例化 Observer
-        ObserverClass = None
-        if not use_polling:
-            ObserverClass = self.__choose_observer()
-            if not ObserverClass:
-                logger.info("[监控] 高效模式不可用，回退到轮询模式")
+            if platform.system() == "Linux" and total_files > max_watches * 0.8:
+                logger.warning(
+                    f"[监控] 文件数量({total_files}) 接近系统限制({max_watches})，强制使用轮询模式"
+                )
                 use_polling = True
 
-        if use_polling or ObserverClass is None:
-            self.observer = PollingObserver(timeout=2)
-            mode_name = "兼容模式(轮询)"
-        else:
-            try:
-                self.observer = ObserverClass()
-                mode_name = "高效模式(原生)"
-            except Exception as e:
-                logger.error(f"[监控] 实例化原生Observer失败: {e}，回退到轮询")
+            if cm.get_config("monitor_mode") == "compatibility":
+                use_polling = True
+
+            # 3. 实例化 Observer
+            ObserverClass = None
+            if not use_polling:
+                ObserverClass = self.__choose_observer()
+                if not ObserverClass:
+                    logger.info("[监控] 高效模式不可用，回退到轮询模式")
+                    use_polling = True
+
+            if use_polling or ObserverClass is None:
                 self.observer = PollingObserver(timeout=2)
                 mode_name = "兼容模式(轮询)"
-
-        # 4. 添加监控路径
-        event_handler = MonitorEventHandler(self.task_queue, exclude_dirs)
-        monitored_count = 0
-        for path in paths_to_monitor:
-            if path.exists() and path.is_dir():
-                self.observer.schedule(event_handler, str(path), recursive=True)
-                logger.info(f"[监控] 已添加监控目录: {path}")
-                monitored_count += 1
             else:
-                logger.warning(f"[监控] 目录不存在，跳过: {path}")
+                try:
+                    self.observer = ObserverClass()
+                    mode_name = "高效模式(原生)"
+                except Exception as e:
+                    logger.error(f"[监控] 实例化原生Observer失败: {e}，回退到轮询")
+                    self.observer = PollingObserver(timeout=2)
+                    mode_name = "兼容模式(轮询)"
 
-        if monitored_count > 0:
-            try:
-                self.observer.start()
-                self.is_running = True
-                logger.info(
-                    f"[监控] 服务已启动，模式: [{mode_name}]，监控 {monitored_count} 个目录"
-                )
-            except Exception as e:
-                logger.error(f"[监控] 启动失败: {e}")
-                if "轮询" not in mode_name:
-                    logger.warning("[监控] 尝试紧急切换到轮询模式...")
-                    try:
-                        self.observer = PollingObserver(timeout=3)
-                        for path in paths_to_monitor:
-                            if path.exists() and path.is_dir():
-                                self.observer.schedule(
-                                    event_handler, str(path), recursive=True
-                                )
-                        self.observer.start()
-                        self.is_running = True
-                        logger.info("[监控] 紧急切换成功，当前运行于: [兼容模式]")
-                    except Exception as e2:
-                        logger.error(f"[监控] 紧急切换也失败了: {e2}")
-        else:
-            logger.warning("[监控] 没有有效的监控目录，服务未启动监听")
+            # 4. 添加监控路径
+            event_handler = MonitorEventHandler(self.task_queue, exclude_dirs)
+            monitored_count = 0
+            for path in paths_to_monitor:
+                if path.exists() and path.is_dir():
+                    self.observer.schedule(event_handler, str(path), recursive=True)
+                    logger.info(f"[监控] 已添加监控目录: {path}")
+                    monitored_count += 1
+                else:
+                    logger.warning(f"[监控] 目录不存在，跳过: {path}")
 
-        # 【修改点3】移除定时器启动代码
-        logger.info("[监控] 自动内存维护机制已就绪 (周期: 24小时)")
+            if monitored_count > 0:
+                try:
+                    self.observer.start()
+                    self.is_running = True
+                    logger.info(
+                        f"[监控] 服务已启动，模式: [{mode_name}]，监控 {monitored_count} 个目录"
+                    )
+                except Exception as e:
+                    logger.error(f"[监控] 启动失败: {e}")
+                    if "轮询" not in mode_name:
+                        logger.warning("[监控] 尝试紧急切换到轮询模式...")
+                        try:
+                            self.observer = PollingObserver(timeout=3)
+                            for path in paths_to_monitor:
+                                if path.exists() and path.is_dir():
+                                    self.observer.schedule(
+                                        event_handler, str(path), recursive=True
+                                    )
+                            self.observer.start()
+                            self.is_running = True
+                            logger.info("[监控] 紧急切换成功，当前运行于: [兼容模式]")
+                        except Exception as e2:
+                            logger.error(f"[监控] 紧急切换也失败了: {e2}")
+            else:
+                logger.warning("[监控] 没有有效的监控目录，服务未启动监听")
+
+        await run.io_bound(_start_sync)
+        logger.info("[监控] 启动流程已在后台完成")
 
     def _scheduled_cache_clear(self):
         """执行定时的缓存清理任务"""

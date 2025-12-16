@@ -23,7 +23,7 @@ class MonitorManager:
         logger.info("[监控管理器] 正在停止监控服务...")
         monitor_service.stop()
 
-    def start_from_config(self) -> None:
+    async def start_from_config(self) -> None:
         """根据当前配置启动监控"""
         if not cm.get_config("monitor_enabled"):
             logger.info("[监控管理器] 监控未启用，跳过启动")
@@ -65,25 +65,19 @@ class MonitorManager:
 
         # --- 调用 Service 统一启动 ---
         # 这一步将在主线程执行，稍微阻塞一下 UI，但保证日志安全
-        monitor_service.start(valid_path_configs, exclude_dirs)
+        await monitor_service.start(valid_path_configs, exclude_dirs)
 
     async def restart_from_config(self) -> None:
         """根据当前配置重启监控（保存配置后调用）"""
         logger.info("[监控管理器] 正在根据新配置重启监控...")
 
         try:
-            await run.io_bound(self._do_restart_sync)
-
+            self._stop_all()
+            await self.start_from_config()
             ui.notify("监控服务已根据新配置重启", type='positive')
-
         except Exception as e:
             logger.error(f"[监控管理器] 重启失败: {e}")
             ui.notify(f"重启失败: {e}", type='negative')
-
-    def _do_restart_sync(self) -> None:
-        """实际执行停止和启动的同步方法"""
-        self._stop_all()
-        self.start_from_config()
 
     def _parse_config_list(self, config_val) -> List[str]:
         if isinstance(config_val, list):

@@ -12,7 +12,7 @@ from .monitor.monitor_manager import monitor_manager
 async def startup_monitor():
     logger.info("正在后台启动监控服务...")
     try:
-        await run.io_bound(monitor_manager.start_from_config)
+        await monitor_manager.start_from_config()
         logger.info("监控服务启动流程已在后台完成")
     except Exception as e:
         logger.error(f"监控服务启动失败: {e}")

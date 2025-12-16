@@ -597,7 +597,7 @@ def create_table():
     refresh_table_view()
     async def init_data():
         try:
-            ui.notify('正在加载任务列表...', type='info', position='center')
+            ui.notify('正在加载任务列表...', type='info', position='top')
             await manager.load_data()
             refresh_table_view.refresh()
         except Exception:

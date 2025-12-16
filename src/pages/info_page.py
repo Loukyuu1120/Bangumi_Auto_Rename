@@ -28,17 +28,26 @@ class SystemMonitorPage:
         self.btn_clear_queue = None
         self.btn_save_queue = None
         self.btn_load_queue = None
-        # 缓存
+
+        self.card_total = None
+        self.card_success = None
+        self.card_fail = None
+        self._cached_stats = (0, 0, 0)
+
         self._last_queue_signature = None
         self._last_paths_signature = None
 
-        # 构建 UI
+        # 构建 UI (此时会用到 _cached_stats)
         self.build_ui()
 
         # 启动定时器
+        ui.timer(5.0, self.refresh_stats_bg)
         ui.timer(2.0, self.update_status_indicators)
         ui.timer(1.0, self.update_queue_display)
         ui.timer(1.0, self.refresh_log_view)
+
+    async def refresh_stats_bg(self):
+        self._cached_stats = await run.io_bound(self.get_stats)
 
     # --- 静态辅助方法 ---
     @staticmethod
@@ -102,14 +111,14 @@ class SystemMonitorPage:
                     if subtext: ui.label(subtext).classes('text-xs text-grey-5')
                 ui.icon(icon, size='2.5em', color=f'{color}-2')
 
-    def toggle_pause(self):
+    async def toggle_pause(self):
         if monitor_service.is_paused_state:
             monitor_service.resume_processing()
             ui.notify('任务已恢复', type='positive')
         else:
             monitor_service.pause_processing()
             ui.notify('任务已暂停 (新文件将暂存在队列中)', type='warning')
-        self.update_status_indicators()  # 立即刷新UI状态
+        await self.update_status_indicators()  # 立即刷新UI状态
 
     def on_clear_queue(self):
         monitor_service.clear_pending_tasks()
@@ -135,7 +144,7 @@ class SystemMonitorPage:
             ui.notify(f'保存失败: {str(e)}', type='negative')
         finally:
             self.btn_save_queue.props(remove='loading')
-            self.update_status_indicators()
+            await self.update_status_indicators()
             self.update_queue_display()
 
     async def on_load_queue(self):
@@ -151,8 +160,18 @@ class SystemMonitorPage:
             ui.notify(f'恢复失败: {str(e)}', type='negative')
         finally:
             self.btn_load_queue.props(remove='loading')
-            self.update_status_indicators()
+            await self.update_status_indicators()
             self.update_queue_display()
+
+    def info_card_dynamic(self, title, value, icon, color, subtext=None):
+        with ui.card().classes('w-full p-3 no-shadow border-[1px]'):
+            with ui.row().classes('items-center justify-between w-full'):
+                with ui.column().classes('gap-0'):
+                    ui.label(title).classes('text-grey-7 text-xs')
+                    lbl_val = ui.label(str(value)).classes(f'text-xl font-bold text-{color}-7')
+                    lbl_sub = ui.label(subtext or '').classes('text-xs text-grey-5')
+                ui.icon(icon, size='2.5em', color=f'{color}-2')
+        return (lbl_val, lbl_sub)
 
     # --- 核心 UI 构建 ---
     def build_ui(self):
@@ -161,15 +180,15 @@ class SystemMonitorPage:
         except Exception:
             pass
 
-        total, success, fail = self.get_stats()
+        total, success, fail = self._cached_stats
         success_rate = (success / total * 100) if total > 0 else 0
 
         with ui.column().classes('w-full h-full p-4 gap-4 scroll bg-slate-50'):
             # 1. 顶部统计卡片
             with ui.grid(columns=4).classes('w-full gap-4'):
-                self.info_card('总任务数', total, 'list_alt', 'blue')
-                self.info_card('重命名成功', success, 'check_circle', 'green', f'成功率: {success_rate:.1f}%')
-                self.info_card('失败/异常', fail, 'warning', 'red')
+                self.card_total = self.info_card_dynamic('总任务数', '0', 'list_alt', 'blue')
+                self.card_success = self.info_card_dynamic('重命名成功', '0', 'check_circle', 'green', '成功率: 0%')
+                self.card_fail = self.info_card_dynamic('失败/异常', '0', 'warning', 'red')
                 self.info_card('运行环境', f"Py {platform.python_version()}", 'memory', 'purple', platform.system())
 
             # 2. 状态信息
@@ -347,8 +366,19 @@ class SystemMonitorPage:
         except Exception as e:
             pass
 
-    def update_status_indicators(self):
+    async def update_status_indicators(self):
         try:
+            total, success, fail = self._cached_stats
+            success_rate = (success / total * 100) if total > 0 else 0
+            if self.card_total and not self.card_total[0].is_deleted:
+                self.card_total[0].text = str(total)
+
+            if self.card_success and not self.card_success[0].is_deleted:
+                self.card_success[0].text = str(success)
+                self.card_success[1].text = f'成功率: {success_rate:.1f}%'
+
+            if self.card_fail and not self.card_fail[0].is_deleted:
+                self.card_fail[0].text = str(fail)
             if not self.monitor_path_label or self.monitor_path_label.is_deleted:
                 return
             # 1. 更新监控路径显示
