@@ -435,7 +435,7 @@ class ConfigPage(ui.dialog):
                         "类型(genre_ids):\n16:动漫, 99:纪录片, 10764:真人秀\n10767:脱口秀, 10762:儿童, 10402:音乐").style(
                         "white-space: pre-wrap")
                     ui.label(
-                        "国家(origin_country):\nCN:中国, US:美国, JP:日本, KR:韩国\nGB:英国, HK:香港, TW:台湾").style(
+                        "国家或地区(origin_country):\nCN:中国, US:美国, JP:日本, KR:韩国\nGB:英国, HK:香港, TW:台湾").style(
                         "white-space: pre-wrap")
 
             # 选项卡
