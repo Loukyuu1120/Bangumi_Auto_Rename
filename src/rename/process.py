@@ -1052,8 +1052,7 @@ class Rename:
                     rtpath_name = temp_name
                     if temp_year > 0:
                         year = temp_year
-                if year == 0 and (rtpath_name.isdigit() or is_weak_filename(rtpath_name)):
-                    logger.info(f"[年份补全] 名称 '{rtpath_name}' 缺少年份，尝试从目录结构获取...")
+                if year == 0:
                     _, p_year, _, _ = parse_filename(path.parent.name)
                     if p_year > 0:
                         year = p_year
@@ -1062,7 +1061,7 @@ class Rename:
                          if gp_year > 0: year = gp_year
 
                     if year > 0:
-                        logger.info(f"[年份补全] 已补全年份: {year}")
+                        logger.info(f"[年份补全] 已从目录结构补全年份: {year}")
 
             if cus_tmdb_id:
                 try:
