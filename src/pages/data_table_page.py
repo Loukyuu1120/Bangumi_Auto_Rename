@@ -127,11 +127,16 @@ class TableManager:
         检查缓存是否过期，如果过期则清空并释放内存。
         该方法由 UI 定时器调用。
         """
-        # 如果缓存为空，不需要处理
+        # 如果缓存和文件列表都已经为空，说明已经清理过了，直接返回，避免重复日志
         if not self.cache and not self.file_list:
             return
-        if time.time() - self.last_access_time > self.CACHE_TTL:
-            logger.info("[任务列表] 页面闲置超时，自动清理内存缓存...")
+
+        # 计算当前空闲了多久
+        idle_duration = time.time() - self.last_access_time
+        # 只有空闲时间超过设定值 (300秒) 才清理
+        if idle_duration > self.CACHE_TTL:
+            logger.info(f"[任务列表] 页面闲置超时 ({int(idle_duration)}s > {self.CACHE_TTL}s)，自动清理内存缓存...")
+            # 清空数据引用
             self.cache.clear()
             self.file_list = []
             self.is_fully_loaded = False
@@ -146,7 +151,7 @@ class TableManager:
                 except Exception:
                     pass
 
-            logger.info("[任务列表] 内存清理完成")
+            logger.info("[任务列表] 内存清理完成，资源已释放")
 
     def _scan_files_sync(self):
         if not TASK_PATH.exists():
@@ -172,9 +177,12 @@ class TableManager:
             status = '失败' if task_data.get('error') else '成功'
             error_msg = task_data.get('error', '')
             ts = task_data.get('timestamp')
-            if not ts:
-                ts = file_path.stat().st_mtime
-            time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))
+            try:
+                if not ts:
+                    ts = file_path.stat().st_mtime
+                time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(float(ts)))
+            except Exception:
+                time_str = "Unknown Time"
 
             row = {
                 'id': uuid,
@@ -218,74 +226,87 @@ class TableManager:
     def get_current_page_data(self) -> List[Dict]:
         self.keep_alive()  # 翻页算活跃
 
-        has_filter = (
-                bool(self.filter_text) or
-                self.filter_status != '全部' or
-                bool(self.filter_season)
-        )
-
-        if not has_filter:
-            # === 模式 A：无过滤 ===
-            # 即使被清理了，load_data 会在外部被调用，或者在这里防御性检查
-            if not self.file_list and self.total_items == 0:
-                # 这里的 total_items 可能还没更新，通常 refresh 流程会先调 load_data
-                return []
-
-            self.total_items = len(self.file_list)  # 确保总数正确
-
-            start = (self.page - 1) * self.page_size
-            end = start + self.page_size
-
-            if start >= self.total_items:
-                start = 0
-                end = self.page_size
-                self.page = 1
-
-            target_files = self.file_list[start:end]
-            rows = []
-            for f in target_files:
-                r = self._read_task_file(f)
-                if r: rows.append(r)
-
-            return rows
-
-        else:
-            # === 模式 B：有过滤 (需加载数据) ===
-
-            # 1. 懒加载：如果还没全量加载，现在加载
-            if not self.is_fully_loaded:
-                notify('正在加载所有记录以进行搜索，请稍候...', type='info')
-                for f in self.file_list:
-                    # 读取所有文件进入 cache
-                    if f.stem not in self.cache:
-                        self._read_task_file(f)
-                self.is_fully_loaded = True
-
-            # 2. 内存过滤
-            filtered = []
-            txt = self.filter_text.lower().strip()
+        try:
+            # 1. 预处理过滤条件
+            # 使用 (self.filter_text or '') 防止 NoneType 错误
+            txt = (self.filter_text or '').lower().strip()
             status = self.filter_status
             season = str(self.filter_season).strip() if self.filter_season else ''
 
-            # 直接遍历 file_list 保证顺序
-            for f in self.file_list:
-                row = self.cache.get(f.stem)
-                if not row: continue
+            has_filter = (
+                    bool(txt) or
+                    status != '全部' or
+                    bool(season)
+            )
 
-                if txt and (txt not in str(row['name']).lower() and txt not in str(row['path']).lower()):
-                    continue
-                if status != '全部' and row['status'] != status:
-                    continue
-                if season and str(row['season']).strip() != season:
-                    continue
+            if not has_filter:
+                # === 模式 A：无过滤 ===
+                if not self.file_list and self.total_items == 0:
+                    return []
 
-                filtered.append(row)
+                self.total_items = len(self.file_list)  # 确保总数正确
 
-            self.total_items = len(filtered)
+                start = (self.page - 1) * self.page_size
+                end = start + self.page_size
 
-            start = (self.page - 1) * self.page_size
-            end = start + self.page_size
-            return filtered[start:end]
+                if start >= self.total_items:
+                    start = 0
+                    end = self.page_size
+                    self.page = 1
+
+                target_files = self.file_list[start:end]
+                rows = []
+                for f in target_files:
+                    r = self._read_task_file(f)
+                    if r: rows.append(r)
+
+                return rows
+
+            else:
+                # === 模式 B：有过滤 (需加载数据) ===
+
+                # 1. 懒加载：如果还没全量加载，现在加载
+                if not self.is_fully_loaded:
+                    notify('正在加载所有记录以进行搜索，请稍候...', type='info')
+                    for f in self.file_list:
+                        if f.stem not in self.cache:
+                            self._read_task_file(f)
+                    self.is_fully_loaded = True
+
+                # 2. 内存过滤
+                filtered = []
+
+                # 直接遍历 file_list 保证顺序
+                for f in self.file_list:
+                    row = self.cache.get(f.stem)
+                    if not row: continue
+
+                    # 名字/路径搜索
+                    if txt:
+                        name_match = str(row.get('name', '')).lower()
+                        path_match = str(row.get('path', '')).lower()
+                        if txt not in name_match and txt not in path_match:
+                            continue
+
+                    # 状态过滤
+                    if status != '全部' and row.get('status') != status:
+                        continue
+
+                    # 季号过滤
+                    if season and str(row.get('season', '')).strip() != season:
+                        continue
+
+                    filtered.append(row)
+
+                self.total_items = len(filtered)
+
+                start = (self.page - 1) * self.page_size
+                end = start + self.page_size
+                return filtered[start:end]
+
+        except Exception as e:
+            logger.error(f"获取分页数据出错: {e}")
+            return []
 
     def batch_retry_click(self):
         self.keep_alive()
@@ -577,6 +598,7 @@ def refresh_table_view():
 
 
 def create_table():
+    manager.keep_alive()
     def on_text_change(e):
         manager.keep_alive()
         manager.filter_text = e.value
@@ -665,18 +687,24 @@ async def handle_retry(ev: GenericEventArguments, is_batch: bool = False):
 
     path = Path(path_str)
 
-    options = {
-        'is_anime': task_data.get('is_anime'),
-        'is_movie': task_data.get('is_movie'),
-        'use_ai': task_data.get('use_ai'),
-        'cus_season_id': task_data.get('season_id'),
-        'cus_tmdb_id': task_data.get('tmdb_id'),
-        'cus_offset': int(task_data.get('episode_offset', 0) or 0),
-        '_tuuid': uuid,
-        '_ai_attempted': False
-    }
-
     try:
+        raw_offset = task_data.get('episode_offset', 0)
+        try:
+            safe_offset = int(raw_offset) if raw_offset is not None else 0
+        except (ValueError, TypeError):
+            safe_offset = 0
+
+        options = {
+            'is_anime': task_data.get('is_anime'),
+            'is_movie': task_data.get('is_movie'),
+            'use_ai': task_data.get('use_ai'),
+            'cus_season_id': task_data.get('season_id'),
+            'cus_tmdb_id': task_data.get('tmdb_id'),
+            'cus_offset': safe_offset,
+            '_tuuid': uuid,
+            '_ai_attempted': False
+        }
+
         if not is_batch:
             monitor_service.add_manual_task(path, options, increment_counter=True)
             if uuid in manager.cache:
