@@ -1,6 +1,10 @@
+import time
+import gc
+import platform
+import ctypes
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-import math
 
 from nicegui import ui, run
 from nicegui.events import GenericEventArguments
@@ -8,7 +12,6 @@ from nicegui.events import GenericEventArguments
 from ..element.red import notify, RedButton, RedInput, RedSelect, RedToogle
 from .edit_page import edit_page
 from ..utils.utils import get_task
-from ..rename.process import Rename
 from ..utils.path import TASK_PATH, RECORD_PATH
 from ..logger import logger
 from ..monitor.monitor import monitor_service
@@ -111,12 +114,43 @@ class TableManager:
         self.page_size = 100
         self.total_items = 0
 
-        self.is_fully_loaded = False # 标记是否已将所有文件载入缓存
+        self.is_fully_loaded = False
+        self.last_access_time = time.time()
+        self.CACHE_TTL = 300  # 缓存存活时间：300秒 (5分钟) 无操作则清理
+
+    def keep_alive(self):
+        """更新最后访问时间"""
+        self.last_access_time = time.time()
+
+    async def check_expiration(self):
+        """
+        检查缓存是否过期，如果过期则清空并释放内存。
+        该方法由 UI 定时器调用。
+        """
+        # 如果缓存为空，不需要处理
+        if not self.cache and not self.file_list:
+            return
+        if time.time() - self.last_access_time > self.CACHE_TTL:
+            logger.info("[任务列表] 页面闲置超时，自动清理内存缓存...")
+            self.cache.clear()
+            self.file_list = []
+            self.is_fully_loaded = False
+            self.total_items = 0
+            await run.io_bound(gc.collect)
+            if platform.system() == 'Linux':
+                try:
+                    libc = ctypes.CDLL("libc.so.6")
+                    libc.malloc_trim.argtypes = [ctypes.c_int]
+                    libc.malloc_trim.restype = ctypes.c_int
+                    await run.io_bound(lambda: libc.malloc_trim(0))
+                except Exception:
+                    pass
+
+            logger.info("[任务列表] 内存清理完成")
 
     def _scan_files_sync(self):
         if not TASK_PATH.exists():
             return []
-        # 这里的 glob 和 stat 是最耗时的
         return sorted(
             TASK_PATH.glob('*.json'),
             key=lambda x: x.stat().st_mtime,
@@ -124,7 +158,9 @@ class TableManager:
         )
 
     def _read_task_file(self, file_path: Path) -> Optional[Dict]:
-        """读取单个文件并格式化，优先使用缓存"""
+        """读取单个文件并格式化"""
+        self.keep_alive()  # 只要读取文件，就算活跃
+
         uuid = file_path.stem
         if uuid in self.cache:
             return self.cache[uuid]
@@ -135,9 +171,13 @@ class TableManager:
 
             status = '失败' if task_data.get('error') else '成功'
             error_msg = task_data.get('error', '')
+            ts = task_data.get('timestamp')
+            if not ts:
+                ts = file_path.stat().st_mtime
+            time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))
 
             row = {
-                'id': uuid, # 用于 key
+                'id': uuid,
                 'uuid': uuid,
                 'path': task_data.get('path', ''),
                 'target_path': task_data.get('target_path', ''),
@@ -145,6 +185,7 @@ class TableManager:
                 'season': task_data.get('season_id', ''),
                 'status': status,
                 'error_msg': error_msg,
+                'time': time_str,
                 'is_anime': task_data.get('is_anime', False),
                 'is_movie': task_data.get('is_movie', False),
                 'ai_used': task_data.get('use_ai', False),
@@ -159,10 +200,15 @@ class TableManager:
             return None
 
     async def load_data(self):
-        """异步加载数据，不阻塞主线程"""
+        self.keep_alive()
         try:
-            self.file_list = await run.io_bound(self._scan_files_sync)
-            self.is_fully_loaded = False
+            # 如果文件列表已经被清理了，重新加载
+            if not self.file_list:
+                self.file_list = await run.io_bound(self._scan_files_sync)
+            else:
+                # 简单的检查是否有变动 (可选)
+                pass
+
             self.total_items = len(self.file_list)
         except Exception as e:
             logger.error(f"File list error: {e}")
@@ -170,9 +216,8 @@ class TableManager:
             self.total_items = 0
 
     def get_current_page_data(self) -> List[Dict]:
-        """获取当前页数据"""
+        self.keep_alive()  # 翻页算活跃
 
-        # 判断是否有过滤条件
         has_filter = (
                 bool(self.filter_text) or
                 self.filter_status != '全部' or
@@ -180,14 +225,17 @@ class TableManager:
         )
 
         if not has_filter:
-            # === 模式 A：无过滤 (高性能后端分页) ===
-            self.total_items = len(self.file_list)
+            # === 模式 A：无过滤 ===
+            # 即使被清理了，load_data 会在外部被调用，或者在这里防御性检查
+            if not self.file_list and self.total_items == 0:
+                # 这里的 total_items 可能还没更新，通常 refresh 流程会先调 load_data
+                return []
 
-            # 计算切片
+            self.total_items = len(self.file_list)  # 确保总数正确
+
             start = (self.page - 1) * self.page_size
             end = start + self.page_size
 
-            # 越界修正
             if start >= self.total_items:
                 start = 0
                 end = self.page_size
@@ -202,14 +250,13 @@ class TableManager:
             return rows
 
         else:
-            # === 模式 B：有过滤 (需加载数据后内存过滤) ===
+            # === 模式 B：有过滤 (需加载数据) ===
 
             # 1. 懒加载：如果还没全量加载，现在加载
             if not self.is_fully_loaded:
-                # 这里的性能瓶颈：首次搜索时需要读取所有文件
-                # 10000 个文件可能需要 2-5 秒
                 notify('正在加载所有记录以进行搜索，请稍候...', type='info')
                 for f in self.file_list:
+                    # 读取所有文件进入 cache
                     if f.stem not in self.cache:
                         self._read_task_file(f)
                 self.is_fully_loaded = True
@@ -220,19 +267,15 @@ class TableManager:
             status = self.filter_status
             season = str(self.filter_season).strip() if self.filter_season else ''
 
-            # 使用 list(self.cache.values()) 可能乱序，最好重新按时间排序
-            # 优化：如果 self.file_list 是有序的，按这个顺序去 cache 取比较好
+            # 直接遍历 file_list 保证顺序
             for f in self.file_list:
                 row = self.cache.get(f.stem)
                 if not row: continue
 
-                # 文本过滤
                 if txt and (txt not in str(row['name']).lower() and txt not in str(row['path']).lower()):
                     continue
-                # 状态过滤
                 if status != '全部' and row['status'] != status:
                     continue
-                # 季号过滤
                 if season and str(row['season']).strip() != season:
                     continue
 
@@ -240,64 +283,19 @@ class TableManager:
 
             self.total_items = len(filtered)
 
-            # 3. 内存分页
             start = (self.page - 1) * self.page_size
             end = start + self.page_size
             return filtered[start:end]
 
-    def filter_data(self):
-        refresh_table_view.refresh()
-
-    def update_selection_label(self):
-        """更新界面左下角的选中计数"""
-        if self.selection_label:
-            count = len(self.selected_rows)
-            self.selection_label.text = f'已选中: {count}'
-
-    def handle_selection(self, e):
-        """处理 Quasar 的选择逻辑"""
-        args = e.args
-
-        # 情况1: Quasar 增量更新 (大多数情况)
-        if isinstance(args, dict) and 'rows' in args:
-            changed_rows = args['rows']
-            is_added = args.get('added', True)
-            existing_uuids = set(r['uuid'] for r in self.selected_rows)
-
-            if is_added:
-                for row in changed_rows:
-                    if row['uuid'] not in existing_uuids:
-                        self.selected_rows.append(row)
-                        existing_uuids.add(row['uuid'])
-            else:
-                uuids_to_remove = set(r['uuid'] for r in changed_rows)
-                self.selected_rows = [
-                    r for r in self.selected_rows
-                    if r['uuid'] not in uuids_to_remove
-                ]
-
-        # 情况2: 全量更新
-        elif isinstance(args, list):
-            self.selected_rows = args
-
-        # 实时更新左下角文字
-        self.update_selection_label()
-
-    async def do_refresh(self):
-        try:
-            notify('正在刷新列表...')
-            await self.load_data()
-            refresh_table_view.refresh()
-        except Exception:
-            pass
-
     def batch_retry_click(self):
+        self.keep_alive()
         if not self.selected_rows:
             notify('请先勾选需要重试的任务')
             return
         BatchEditDialog(self.selected_rows, self.execute_batch_process).open()
 
     async def execute_batch_process(self, rows: List[Dict], settings: Dict):
+        self.keep_alive()
         if not rows:
             notify("没有需要处理的任务")
             return
@@ -314,32 +312,24 @@ class TableManager:
         batch_is_movie_text = settings.get('is_movie')
         batch_use_ai_text = settings.get('use_ai')
 
-        # 注册计数器，让监控页面能看到数量变化
         monitor_service.register_batch_count(len(rows))
-
         notify(f'已将 {len(rows)} 个任务加入后台队列')
 
         for row in rows:
             try:
                 uuid = row['uuid']
-                # 优先读取最新的 task 文件，如果没有则用表格里的旧数据
                 task_data = get_task(uuid) or row
-
                 path_str = task_data.get('path')
                 if not path_str: continue
-
                 path = Path(path_str)
 
-                # 原有参数
                 is_anime_orig = task_data.get('is_anime')
                 is_movie_orig = task_data.get('is_movie')
                 ai_used_orig = task_data.get('use_ai')
                 season_id_orig = task_data.get('season_id')
                 offset_orig = task_data.get('episode_offset')
 
-                # 合并逻辑：如果有批量设置则使用，否则使用原参数
-                tmdb_id = batch_tmdb_id  # 批量没填就是 None
-
+                tmdb_id = batch_tmdb_id
                 season_id = int(batch_season_id) if batch_season_id else season_id_orig
                 offset = int(batch_offset) if batch_offset else offset_orig
                 if offset is None: offset = 0
@@ -366,14 +356,12 @@ class TableManager:
                     'cus_season_id': season_id,
                     'cus_tmdb_id': tmdb_id,
                     'cus_offset': offset,
-                    '_tuuid': uuid,  # 传入 UUID，保证覆盖原来的任务记录
-                    '_ai_attempted': False  # 重置 AI 尝试状态
+                    '_tuuid': uuid,
+                    '_ai_attempted': False
                 }
 
-                # 加入队列
                 monitor_service.add_manual_task(path, options)
 
-                # [视觉反馈] 临时修改缓存状态，让用户感觉反应很快
                 if uuid in self.cache:
                     self.cache[uuid]['status'] = '排队中'
                     self.cache[uuid]['error_msg'] = '等待后台处理...'
@@ -388,6 +376,7 @@ class TableManager:
             pass
 
     def delete_by_uuid(self, uuid: str):
+        self.keep_alive()
         path1 = TASK_PATH / f'{uuid}.json'
         path2 = RECORD_PATH / f'{uuid}.json'
 
@@ -401,6 +390,7 @@ class TableManager:
         self.total_items = max(0, self.total_items - 1)
 
     def batch_delete(self):
+        self.keep_alive()
         rows = list(self.selected_rows)
         if not rows:
             notify('请先勾选需要删除的任务')
@@ -413,7 +403,7 @@ class TableManager:
         self.refresh_table()
 
     def refresh_table(self):
-        """刷新逻辑：重新扫描文件列表（检测外部变动），清空状态"""
+        self.keep_alive()
         self.selected_rows = []
         if self.table and self.table.selected:
             self.table.selected.clear()
@@ -424,6 +414,43 @@ class TableManager:
 
         self.load_data()
         refresh_table_view.refresh()
+
+    def update_selection_label(self):
+        if self.selection_label:
+            count = len(self.selected_rows)
+            self.selection_label.text = f'已选中: {count}'
+
+    def handle_selection(self, e):
+        self.keep_alive()
+        args = e.args
+        if isinstance(args, dict) and 'rows' in args:
+            changed_rows = args['rows']
+            is_added = args.get('added', True)
+            existing_uuids = set(r['uuid'] for r in self.selected_rows)
+
+            if is_added:
+                for row in changed_rows:
+                    if row['uuid'] not in existing_uuids:
+                        self.selected_rows.append(row)
+                        existing_uuids.add(row['uuid'])
+            else:
+                uuids_to_remove = set(r['uuid'] for r in changed_rows)
+                self.selected_rows = [
+                    r for r in self.selected_rows
+                    if r['uuid'] not in uuids_to_remove
+                ]
+        elif isinstance(args, list):
+            self.selected_rows = args
+        self.update_selection_label()
+
+    async def do_refresh(self):
+        self.keep_alive()
+        try:
+            notify('正在刷新列表...')
+            await self.load_data()
+            refresh_table_view.refresh()
+        except Exception:
+            pass
 
 
 manager = TableManager()
@@ -436,6 +463,7 @@ def refresh_table_view():
 
     columns: List[Dict[str, Any]] = [
         {'name': 'name', 'label': '剧集信息 / 原文件路径', 'field': 'name', 'sortable': True, 'align': 'left'},
+        {'name': 'time', 'label': '处理时间', 'field': 'time', 'sortable': True, 'align': 'left', 'classes': 'text-grey-7', 'style': 'width: 160px'},
         {'name': 'season', 'label': '季度', 'field': 'season', 'sortable': True, 'align': 'center'},
         {'name': 'status', 'label': '状态', 'field': 'status', 'sortable': True, 'align': 'center'},
         {'name': 'tmdb_id', 'label': 'TMDB ID', 'field': 'tmdb_id', 'sortable': True, 'align': 'center'},
@@ -510,28 +538,26 @@ def refresh_table_view():
     manager.table.on('edit', lambda ev: handle_edit(ev))
     manager.table.on('del', lambda ev: handle_delete(ev))
 
-    # --- 自定义底部工具栏 ---
     with ui.row().classes('w-full justify-between items-center q-mt-sm q-px-sm'):
-        # 左侧：显示选中数量
-        # 将这个 Label 赋值给 manager，以便在 selection 事件中动态更新
         manager.selection_label = ui.label(f'已选中: {len(manager.selected_rows)}').classes(
             'text-subtitle2 text-primary font-bold')
 
-        # 右侧：分页控制区域 (总数、每页数量、翻页器)
         with ui.row().classes('items-center q-gutter-x-sm'):
             ui.label(f'总计: {manager.total_items}').classes('text-grey-7 q-mr-md')
 
             def on_page_size_change(e):
+                manager.keep_alive()  # 操作UI算活跃
                 manager.page_size = e.value
                 manager.page = 1
                 manager.selected_rows = []
-                manager.update_selection_label()  # 清空后更新 Label
+                manager.update_selection_label()
                 refresh_table_view.refresh()
 
             def on_page_change(e):
+                manager.keep_alive()  # 操作UI算活跃
                 manager.page = e.value
                 manager.selected_rows = []
-                manager.update_selection_label()  # 清空后更新 Label
+                manager.update_selection_label()
                 refresh_table_view.refresh()
 
             if total_pages > 1:
@@ -552,16 +578,19 @@ def refresh_table_view():
 
 def create_table():
     def on_text_change(e):
+        manager.keep_alive()
         manager.filter_text = e.value
         manager.page = 1
         refresh_table_view.refresh()
 
     def on_season_change(e):
+        manager.keep_alive()
         manager.filter_season = e.value
         manager.page = 1
         refresh_table_view.refresh()
 
     def on_status_change(e):
+        manager.keep_alive()
         manager.filter_status = e.value
         manager.page = 1
         refresh_table_view.refresh()
@@ -595,6 +624,10 @@ def create_table():
             RedButton('批量删除', on_click=manager.batch_delete).props('color=red-6 icon=delete')
 
     refresh_table_view()
+
+    # 启动后台检查定时器：每60秒检查一次是否过期
+    ui.timer(60.0, manager.check_expiration)
+
     async def init_data():
         try:
             ui.notify('正在加载任务列表...', type='info', position='top')
@@ -603,11 +636,11 @@ def create_table():
         except Exception:
             pass
 
-
     ui.timer(0, init_data, once=True)
 
 
 async def handle_edit(ev: GenericEventArguments):
+    manager.keep_alive()
     arg = ev.args
     uuid = arg['row']['uuid']
     await edit_page(uuid)
@@ -615,6 +648,7 @@ async def handle_edit(ev: GenericEventArguments):
 
 
 async def handle_retry(ev: GenericEventArguments, is_batch: bool = False):
+    manager.keep_alive()
     arg = ev.args
     row_data = arg['row']
     uuid = row_data['uuid']
@@ -631,7 +665,6 @@ async def handle_retry(ev: GenericEventArguments, is_batch: bool = False):
 
     path = Path(path_str)
 
-    # 提取参数
     options = {
         'is_anime': task_data.get('is_anime'),
         'is_movie': task_data.get('is_movie'),
@@ -645,14 +678,10 @@ async def handle_retry(ev: GenericEventArguments, is_batch: bool = False):
 
     try:
         if not is_batch:
-            # 加入队列
             monitor_service.add_manual_task(path, options, increment_counter=True)
-
-            # 更新缓存状态
             if uuid in manager.cache:
                 manager.cache[uuid]['status'] = '排队中'
                 manager.cache[uuid]['error_msg'] = '已加入处理队列'
-
             notify('已加入后台处理队列')
             refresh_table_view.refresh()
 
@@ -663,6 +692,7 @@ async def handle_retry(ev: GenericEventArguments, is_batch: bool = False):
 
 
 def handle_delete(ev: GenericEventArguments, is_notify: bool = True):
+    manager.keep_alive()
     arg = ev.args
     row_data = arg['row']
     uuid = row_data['uuid']

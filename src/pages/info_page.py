@@ -2,6 +2,8 @@ import platform
 import time
 import asyncio
 import requests
+import gc
+import ctypes
 from nicegui import ui, run
 
 from ..utils.path import TASK_PATH
@@ -45,6 +47,22 @@ class SystemMonitorPage:
         ui.timer(2.0, self.update_status_indicators)
         ui.timer(1.0, self.update_queue_display)
         ui.timer(1.0, self.refresh_log_view)
+        ui.timer(30.0, self.force_memory_cleanup)
+
+    async def force_memory_cleanup(self):
+        """垃圾回收"""
+        try:
+            await run.io_bound(gc.collect)
+            if platform.system() == 'Linux':
+                try:
+                    libc = ctypes.CDLL("libc.so.6")
+                    libc.malloc_trim.argtypes = [ctypes.c_int]
+                    libc.malloc_trim.restype = ctypes.c_int
+                    await run.io_bound(lambda: libc.malloc_trim(0))
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     async def refresh_stats_bg(self):
         self._cached_stats = await run.io_bound(self.get_stats)
@@ -122,23 +140,26 @@ class SystemMonitorPage:
 
     def on_clear_queue(self):
         monitor_service.clear_pending_tasks()
-        ui.notify('所有等待中的任务已清空', type='negative')
-        self.update_queue_display()  # 立即刷新列表
+        ui.notify('队列已清空', type='negative')
+        self.update_queue_display()
+        asyncio.create_task(self.force_memory_cleanup())
 
     async def on_save_queue(self):
-        # 给按钮一个加载状态，提升体验
+        """保存按钮回调"""
         self.btn_save_queue.props('loading')
-
         try:
-            count = await run.io_bound(monitor_service.save_queue_to_disk)
+            q_len = monitor_service.task_queue.qsize()
 
-            if count > 0:
-                ui.notify(f'已保存 {count} 个任务 (队列已暂存)', type='positive')
+            await run.io_bound(monitor_service.save_queue_to_disk)
+
+            if q_len > 0:
+                ui.notify(f'已保存 {q_len} 个任务并释放内存', type='positive')
             else:
-                ui.notify('队列为空，没有任务需要保存', type='info')
+                ui.notify('队列为空', type='info')
 
             if not monitor_service.is_paused_state:
                 monitor_service.pause_processing()
+            await self.force_memory_cleanup()
 
         except Exception as e:
             ui.notify(f'保存失败: {str(e)}', type='negative')

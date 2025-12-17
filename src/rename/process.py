@@ -55,6 +55,7 @@ class Rename:
     _tmdb_search_cache: Dict[tuple, tuple] = {}
     MAX_CACHE_SIZE = 500
     CACHE_PURGE_COUNT = 100
+    MAX_PROCESSED_HISTORY = 1000
 
     def __init__(self):
         self.BANGUMI_PATH = Path(cm.get_config('bangumi_path'))
@@ -1396,14 +1397,14 @@ class Rename:
             final_tmdb_id = cus_tmdb_id if cus_tmdb_id else (str(info['id']) if info else None)
             display_path = str(list(self.R.values())[0]) if self.R else str(work_path)
 
-            # 传递配置给 Trans (重要：确保 Trans 类支持接收此参数)
-            # 如果 trans.py 未修改，请务必修改 trans.py 接收第三个参数
             trans_result = Trans(self.R, _uuid, config_overrides).trans_file()
 
             if trans_result is True:
                 with Rename._lock:
                     for k in list(self.R.keys()):
                         Rename._processed_paths.add(str(k.absolute()))
+                    if len(Rename._processed_paths) > self.MAX_PROCESSED_HISTORY:
+                        Rename._processed_paths.clear()
 
                 self.R = {}
 
@@ -1413,7 +1414,7 @@ class Rename:
             task_data = {
                 "path": str(path), "target_path": display_path, "is_anime": is_anime, "is_movie": is_movie,
                 "name": name, "season_id": season_id, "uuid": str(_uuid), "error": None, "use_ai": effective_use_ai,
-                "tmdb_id": final_tmdb_id
+                "tmdb_id": final_tmdb_id, "timestamp": time.time()
             }
             with open(TASK_PATH / f"{_uuid}.json", "w", encoding="UTF-8") as f:
                 json.dump(task_data, f, indent=4, ensure_ascii=False)
@@ -1494,6 +1495,7 @@ class Rename:
             'uuid': str(_uuid),
             'error': error,
             'use_ai': use_ai,
+            'timestamp': time.time(),
         }
         with open(task_path, 'w', encoding='UTF-8') as file:
             json.dump(task_data, file, indent=4, ensure_ascii=False)

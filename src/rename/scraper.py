@@ -3,6 +3,7 @@ import requests
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Set
+from collections import OrderedDict
 from ..logger import logger
 from ..config.config_manager import cm
 
@@ -15,7 +16,8 @@ class Scraper:
         self.tmdb_person_base = "https://www.themoviedb.org/person/"
         self.api_key = cm.get_config("api_key")
 
-        self.url_cache: Dict[str, Path] = {}
+        self.url_cache: OrderedDict[str, Path] = OrderedDict()
+        self.MAX_URL_CACHE = 1000
         types = cm.get_config("scrape_image_types")
         self.allowed_types = set(types) if types else set()
 
@@ -152,6 +154,7 @@ class Scraper:
             if self.url_cache[full_url].exists():
                 try:
                     shutil.copy2(self.url_cache[full_url], save_path)
+                    self.url_cache.move_to_end(full_url)
                     return
                 except:
                     pass
@@ -162,6 +165,9 @@ class Scraper:
                 with open(save_path, "wb") as f:
                     f.write(resp.content)
                 self.url_cache[full_url] = save_path
+                self.url_cache.move_to_end(full_url)
+                if len(self.url_cache) > self.MAX_URL_CACHE:
+                    self.url_cache.popitem(last=False)
         except Exception:
             pass
 

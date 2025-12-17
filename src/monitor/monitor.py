@@ -22,9 +22,9 @@ from ..logger import logger
 
 
 class MonitorEventHandler(FileSystemEventHandler):
-    def __init__(self, task_queue: Queue, exclude_dirs: list[str]):
+    def __init__(self, service_instance, exclude_dirs: list[str]):
         super().__init__()
-        self.task_queue = task_queue
+        self.service = service_instance
         self.exclude_patterns = []
         for pattern_str in exclude_dirs:
             if not pattern_str:
@@ -63,9 +63,9 @@ class MonitorEventHandler(FileSystemEventHandler):
 
         path_obj = Path(path_str)
         logger.info(f"[监控] {action_name}: {path_obj.name} -> 加入队列")
-        with monitor_service._count_lock:
-            monitor_service.logical_pending_count += 1
-        self.task_queue.put((path_obj, {}))
+        with self.service._count_lock:
+            self.service.logical_pending_count += 1
+        self.service.task_queue.put((path_obj, {}))
         return True
 
 
@@ -117,50 +117,58 @@ class MonitorService:
         logger.info("[控制] 任务处理已恢复")
 
     def clear_pending_tasks(self):
-        """清空等待队列"""
-        with self.task_queue.mutex:
-            self.task_queue.queue.clear()
+        """清空等待队列 (深度清理内存)"""
+        # 1. 暂停防止写入冲突
+        was_paused = self._paused
+        self._paused = True
 
+        # 2. 彻底清空队列
+        try:
+            with self.task_queue.mutex:
+                self.task_queue.queue.clear()
+        except Exception:
+            # 如果直接访问底层不可行，循环 get
+            while not self.task_queue.empty():
+                try:
+                    self.task_queue.get_nowait()
+                    self.task_queue.task_done()
+                except Empty:
+                    break
+
+        # 3. 重置计数
         with self._count_lock:
             self.logical_pending_count = 0
 
-        logger.warning("[控制] 待处理队列已强制清空")
+        # 4. 强制垃圾回收
+        gc.collect()
+
+        if not was_paused:
+            self._paused = False
+
+        logger.warning("[控制] 待处理队列已强制清空，内存已清理")
 
     def has_saved_queue(self) -> bool:
         return self.QUEUE_FILE.exists()
 
     def save_queue_to_disk(self) -> int:
-        """
-        将当前队列中的所有任务保存到磁盘，并清空内存队列。
-        返回保存的任务数量。
-        """
-        # 1. 暂停处理，防止 worker 线程抢任务
-        self._paused = True
-
+        """保存并清空队列"""
+        self._paused = True  # 暂停处理
         saved_items = []
 
-        # 2. 安全地抽干队列 (使用标准方法，避免死锁)
-        # 循环直到队列抛出 Empty 异常
+        # 1. 提取所有任务
         while True:
             try:
-                # get_nowait 是非阻塞的，且线程安全
                 item = self.task_queue.get_nowait()
                 path_obj, options = item
-
                 saved_items.append({
                     "path": str(path_obj),
                     "options": options
                 })
-                # 标记任务完成，维护 queue 内部计数
                 self.task_queue.task_done()
             except Empty:
                 break
 
-        # 3. 重置逻辑计数器
-        with self._count_lock:
-            self.logical_pending_count = 0
-
-        # 4. 写入文件
+        # 2. 写入磁盘
         if saved_items:
             try:
                 with open(self.QUEUE_FILE, 'w', encoding='utf-8') as f:
@@ -168,10 +176,16 @@ class MonitorService:
                 logger.info(f"[任务保存] 已将 {len(saved_items)} 个任务保存到磁盘")
             except Exception as e:
                 logger.error(f"[任务保存] 保存失败: {e}")
-        else:
-            logger.info("[任务保存] 队列为空，无需保存")
 
-        return len(saved_items)
+        # 3. 清理现场
+        with self._count_lock:
+            self.logical_pending_count = 0
+
+        # 4. 显式 GC
+        del saved_items
+        gc.collect()
+
+        return 0
 
     def load_queue_from_disk(self) -> int:
         if not self.QUEUE_FILE.exists():
@@ -315,7 +329,7 @@ class MonitorService:
                     mode_name = "兼容模式(轮询)"
 
             # 4. 添加监控路径
-            event_handler = MonitorEventHandler(self.task_queue, exclude_dirs)
+            event_handler = MonitorEventHandler(self, exclude_dirs)
             monitored_count = 0
             for path in paths_to_monitor:
                 if path.exists() and path.is_dir():

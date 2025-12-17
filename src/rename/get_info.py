@@ -11,18 +11,29 @@ from ..logger import logger
 from ..config.config_manager import cm
 from .cleaner import is_chinese_percentage_sufficient
 
-# Key: query_year, Value: (name, info)
-GLOBAL_TV_CACHE: Dict[str, Any] = {}
-GLOBAL_MOVIE_CACHE: Dict[str, Any] = {}
-# Key: tv_id_season_num, Value: season_info
-GLOBAL_SEASON_CACHE: Dict[str, Any] = {}
-
 
 class Search:
     def __init__(self) -> None:
         self.TMDB_KEY = cm.get_config("api_key")
         tmdb.API_KEY = self.TMDB_KEY
         self._ai_processor = None
+
+        # Key: query_year, Value: (name, info)
+        self._tv_cache: Dict[str, Any] = {}
+        self._movie_cache: Dict[str, Any] = {}
+        # Key: tv_id_season_num, Value: season_info
+        self._season_cache: Dict[str, Any] = {}
+        self._max_cache_size = 200
+
+    def _safe_add_to_cache(self, cache_dict: Dict, key: str, value: Any):
+        """辅助方法：添加缓存并控制大小"""
+        if len(cache_dict) >= self._max_cache_size:
+            try:
+                first_key = next(iter(cache_dict))
+                del cache_dict[first_key]
+            except StopIteration:
+                pass
+        cache_dict[key] = value
 
     def _get_ai_processor(self):
         """延迟加载AI处理器，避免循环导入"""
@@ -241,8 +252,8 @@ class Search:
             self, tv_id: int, season_number: int
     ) -> Optional[Dict[str, Any]]:
         cache_key = f"{tv_id}_{season_number}"
-        if cache_key in GLOBAL_SEASON_CACHE:
-            return GLOBAL_SEASON_CACHE[cache_key]
+        if cache_key in self._season_cache:
+            return self._season_cache[cache_key]
 
         for i in range(3):
             try:
@@ -292,13 +303,13 @@ class Search:
                     f'[季度信息] 获取Season {season_number}信息成功，包含{len(filtered_season["episodes"])}集'
                 )
 
-                GLOBAL_SEASON_CACHE[cache_key] = filtered_season
+                self._safe_add_to_cache(self._season_cache, cache_key, filtered_season)
                 return filtered_season
 
             except Exception as e:
                 # 404 表示TMDB确实没有这一季，不需要重试
                 if "404" in str(e):
-                    GLOBAL_SEASON_CACHE[cache_key] = None
+                    self._safe_add_to_cache(self._season_cache, cache_key, None)
                     return None
 
                 logger.warning(
@@ -351,8 +362,8 @@ class Search:
 
     def get_movie_info(self, query: str, year: int):
         cache_key = f"{query}_{year}"
-        if cache_key in GLOBAL_MOVIE_CACHE:
-            return GLOBAL_MOVIE_CACHE[cache_key]
+        if cache_key in self._movie_cache:
+            return self._movie_cache[cache_key]
 
         for i in range(3):
             try:
@@ -383,7 +394,7 @@ class Search:
 
                     info["logo_path"] = self._get_logos(movie, "movie")
 
-                    GLOBAL_MOVIE_CACHE[cache_key] = (name, info)
+                    self._safe_add_to_cache(self._movie_cache, cache_key, (name, info))
                     return name, info
 
                 # --- API 搜不到，尝试网页搜兜底 ---
@@ -398,12 +409,12 @@ class Search:
                             )
                             name = info["title"]
                             info["logo_path"] = self._get_logos(movie, "movie")
-                            GLOBAL_MOVIE_CACHE[cache_key] = (name, info)
+                            self._safe_add_to_cache(self._movie_cache, cache_key, (name, info))
                             return name, info
                         except Exception as e_web:
                             logger.error(f"[TMDB Web] 兜底ID获取元数据失败: {e_web}")
 
-                GLOBAL_MOVIE_CACHE[cache_key] = ("", None)
+                self._safe_add_to_cache(self._movie_cache, cache_key, ("", None))
                 return "", None
 
             except Exception as e:
@@ -415,8 +426,8 @@ class Search:
 
     def get_tv_info(self, query: str, year: int):
         cache_key = f"{query}_{year}"
-        if cache_key in GLOBAL_TV_CACHE:
-            return GLOBAL_TV_CACHE[cache_key]
+        if cache_key in self._tv_cache:
+            return self._tv_cache[cache_key]
 
         for i in range(3):
             try:
@@ -450,7 +461,7 @@ class Search:
 
                         info["logo_path"] = self._get_logos(tv, "tv")
 
-                        GLOBAL_TV_CACHE[cache_key] = (name, info)
+                        self._safe_add_to_cache(self._tv_cache, cache_key, (name, info))
                         return name, info
 
                     if _ == 0:
@@ -464,7 +475,7 @@ class Search:
                                 )
                                 name = info["name"]
                                 info["logo_path"] = self._get_logos(tv, "tv")
-                                GLOBAL_TV_CACHE[cache_key] = (name, info)
+                                self._safe_add_to_cache(self._tv_cache, cache_key, (name, info))
                                 return name, info
                             except Exception as e_web:
                                 logger.error(f"[TMDB Web] 兜底ID获取元数据失败: {e_web}")
@@ -474,7 +485,7 @@ class Search:
                         if is_chinese_percentage_sufficient(q):
                             q = re.sub(r"[a-zA-Z]", "", q)
 
-                GLOBAL_TV_CACHE[cache_key] = ("", None)
+                self._safe_add_to_cache(self._tv_cache, cache_key, ("", None))
                 return "", None
 
             except Exception as e:
