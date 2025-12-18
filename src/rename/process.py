@@ -591,6 +591,11 @@ class Rename:
         norm_name = rtpath_name.strip().lower()
         filename = path.name
 
+        season_id = extract_season(rtpath_name)
+        if season_id == -1:
+            p_season = extract_season(path.parent.name)
+            if p_season > 0: season_id = p_season
+
         logger.info(f"[搜索参数] 准备搜索: Name='{rtpath_name}', Year={year}, Is_Movie={is_movie}, Is_Anime={is_anime}")
 
         with Rename._lock:
@@ -602,7 +607,6 @@ class Rename:
 
         if is_movie:
             logger.info(f"[处理任务] 上下文强制指定为电影类型，使用文件名 '{rtpath_name}' 进行搜索...")
-
             if cached_res:
                 s2_name, s2_info = cached_res
                 logger.debug(f"[TMDB缓存] 命中电影缓存: {s2_name}")
@@ -657,11 +661,11 @@ class Rename:
 
             if not s1_name:
                 logger.info(f"[TMDB搜索] 正在搜索TV (SxxExx模式): 关键词='{rtpath_name}', 年份={year}")
-                s1_name, s1_info = self.search.get_tv_info(rtpath_name, year)
+                s1_name, s1_info = self.search.get_tv_info(rtpath_name, year, season_id)
 
                 if not s1_name and year != 0:
                     logger.info(f"[TMDB搜索] TV带年份搜索失败，尝试去除年份: 关键词='{rtpath_name}'")
-                    s1_name, s1_info = self.search.get_tv_info(rtpath_name, 0)
+                    s1_name, s1_info = self.search.get_tv_info(rtpath_name, 0, season_id)
 
                 if s1_name:
                     with Rename._lock:
@@ -689,9 +693,9 @@ class Rename:
             s1_name, s1_info = Rename._tmdb_search_cache.get(tv_cache_key, (None, None))
 
         if not s1_name:
-            s1_name, s1_info = self.search.get_tv_info(rtpath_name, year)
+            s1_name, s1_info = self.search.get_tv_info(rtpath_name, year, season_id)
             if not s1_name and year != 0:
-                s1_name, s1_info = self.search.get_tv_info(rtpath_name, 0)
+                s1_name, s1_info = self.search.get_tv_info(rtpath_name, 0, season_id)
             if s1_name:
                 with Rename._lock:
                     Rename._tmdb_search_cache[tv_cache_key] = (s1_name, s1_info)
@@ -716,7 +720,6 @@ class Rename:
         if s2_name:
             logger.info(f'[处理任务] 搜索到的电影名称: {s2_name}')
 
-        season_id = extract_season(rtpath_name)
 
         if s1_name:
             pos += 1

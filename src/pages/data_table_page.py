@@ -410,7 +410,7 @@ class TableManager:
         self.file_list = [f for f in self.file_list if f.stem != uuid]
         self.total_items = max(0, self.total_items - 1)
 
-    def batch_delete(self):
+    async def batch_delete(self):
         self.keep_alive()
         rows = list(self.selected_rows)
         if not rows:
@@ -421,19 +421,20 @@ class TableManager:
             self.delete_by_uuid(row['uuid'])
 
         notify(f'已删除 {len(rows)} 个任务记录')
-        self.refresh_table()
+        await self.refresh_table()
 
-    def refresh_table(self):
+    async def refresh_table(self):
         self.keep_alive()
         self.selected_rows = []
         if self.table and self.table.selected:
             self.table.selected.clear()
         self.update_selection_label()
 
+        self.file_list = []
         self.cache.clear()
         self.is_fully_loaded = False
 
-        self.load_data()
+        await self.load_data()
         refresh_table_view.refresh()
 
     def update_selection_label(self):
@@ -468,6 +469,9 @@ class TableManager:
         self.keep_alive()
         try:
             notify('正在刷新列表...')
+            self.file_list = []
+            self.cache.clear()
+            self.is_fully_loaded = False
             await self.load_data()
             refresh_table_view.refresh()
         except Exception:
@@ -666,7 +670,7 @@ async def handle_edit(ev: GenericEventArguments):
     arg = ev.args
     uuid = arg['row']['uuid']
     await edit_page(uuid)
-    manager.refresh_table()
+    await manager.refresh_table()
 
 
 async def handle_retry(ev: GenericEventArguments, is_batch: bool = False):
@@ -719,7 +723,7 @@ async def handle_retry(ev: GenericEventArguments, is_batch: bool = False):
             notify(f'加入队列失败: {e}', type='negative')
 
 
-def handle_delete(ev: GenericEventArguments, is_notify: bool = True):
+async def handle_delete(ev: GenericEventArguments, is_notify: bool = True):
     manager.keep_alive()
     arg = ev.args
     row_data = arg['row']
@@ -729,4 +733,4 @@ def handle_delete(ev: GenericEventArguments, is_notify: bool = True):
 
     if is_notify:
         notify('删除任务记录成功!')
-    manager.refresh_table()
+    await manager.refresh_table()

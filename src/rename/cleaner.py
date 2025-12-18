@@ -192,14 +192,12 @@ def match_and_extract(input_string: str) -> Optional[Tuple[int, int]]:
         return season, episode
 
     # 4. 纯集数格式 .EP19, E19, EP19 (没有 S 前缀的情况)
-    # 增加了 ^ 表示允许匹配字符串开头
     pure_ep_match = re.search(r'(?i)(?:^|[.\s\-_\[\(\[])E(P)?(\d{1,4})(?:[vV]\d)?(?:$|[.\s\-_\]\)\]])', input_string)
     if pure_ep_match:
         episode = int(pure_ep_match.group(2))
         # 排除年份和常见分辨率
         if not (1900 < episode < 2100) and episode not in [480, 720, 1080, 2160]:
             season = extract_season(input_string)
-            # 【修复】强制兜底：如果找不到季号，默认为1，绝对不返回-1
             if season <= 0:
                 season = 1
             return season, episode
@@ -208,7 +206,7 @@ def match_and_extract(input_string: str) -> Optional[Tuple[int, int]]:
     clean_str = input_string.strip()
     if re.fullmatch(r'\d{1,4}', clean_str):
         episode = int(clean_str)
-        # 排除像 1988, 2020 这样的年份，其他数字只要是纯的，都认为是集数
+        # 排除像 1988, 2020 这样的年份
         if not (1900 < episode < 2100):
             season = extract_season(input_string)
             if season <= 0: season = 1
@@ -220,7 +218,6 @@ def match_and_extract(input_string: str) -> Optional[Tuple[int, int]]:
 def extract_base_num(filename: str) -> Optional[float]:
     """
     提取基础集数，用于 process_sub 的兜底逻辑
-    增强：支持动漫格式 [01]，支持 .EP01 及 EP01
     """
     # 1. SxxExx 格式
     match = re.search(r'(?i)S\d+(?:E|EP)(\d+)', filename)
@@ -261,20 +258,15 @@ def extract_number(filename: str) -> Optional[float]:
 def extract_tmdb_id(text: str) -> Optional[str]:
     """
     从字符串中提取 TMDB ID
-    支持格式:
-    - {tmdb-12345}
-    - [tmdbid=12345]
-    - tmdb-12345
     """
     if not text:
         return None
 
-    # 增强的正则列表，支持全角符号
     patterns = [
-        r'\{tmdb[-_]?(\d+)\}',       # {tmdb-12345}
-        r'｛tmdb[-_]?(\d+)｝',       # 全角 ｛tmdb-13363｝
-        r'\[tmdbid=(\d+)\]',         # [tmdbid=12345]
-        r'［tmdbid=(\d+)］',         # 全角
+        r'\{tmdb[-_]?(\d+)\}',  # {tmdb-12345}
+        r'｛tmdb[-_]?(\d+)｝',  # 全角
+        r'\[tmdbid=(\d+)\]',  # [tmdbid=12345]
+        r'［tmdbid=(\d+)］',  # 全角
         r'(?:^|[.\s\-_\[\(\｛])tmdb[-_]?(\d+)(?:$|[.\s\-_\]\)\｝])',  # tmdb-12345
         r'\{tmdbid[-_]?(\d+)\}',
         r'｛tmdbid[-_]?(\d+)｝'
@@ -291,63 +283,32 @@ def extract_tmdb_id(text: str) -> Optional[str]:
 def is_weak_filename(filename: str) -> bool:
     """
     判断是否为弱文件名（不包含标题，只有集数信息）
-    例如: "01.mp4", "S01E02.mkv", "E05.strm"
     """
     stem = Path(filename).stem.upper()
-    # 1. 纯数字 (如 01, 02)
-    if re.fullmatch(r'\d+', stem):
-        return True
-    # 2. 纯集数格式 (如 E01, EP01)
-    if re.fullmatch(r'(?i)E(P)?\d+(\s*v\d+)?', stem):
-        return True
-    # 3. 纯季集格式 (如 S01E02, S1E1, S01EP02)
-    if re.fullmatch(r'(?i)S\d+E(P)?\d+', stem):
-        return True
-    # 4. 长度过短且不含中文
-    if len(stem) <= 4 and not re.search(r'[\u4e00-\u9fff]', stem):
-        return True
+    if re.fullmatch(r'\d+', stem): return True
+    if re.fullmatch(r'(?i)E(P)?\d+(\s*v\d+)?', stem): return True
+    if re.fullmatch(r'(?i)S\d+E(P)?\d+', stem): return True
+    if len(stem) <= 4 and not re.search(r'[\u4e00-\u9fff]', stem): return True
     return False
 
 
 def is_season_name(filename: str) -> bool:
     """
-    判断目录名是否为纯季号目录（不包含剧名）
-    例如: "S01", "Season 1", "第1季", "S01-S02", "1"
+    判断目录名是否为纯季号目录
     """
     stem = Path(filename).stem.strip()
-
-    # 1. 纯数字 (如 1, 2)
-    if re.fullmatch(r'\d{1,2}', stem):
-        return True
-
-    # 2. 纯季号格式 (S01, S1)
-    if re.fullmatch(r'S\d+', stem, re.IGNORECASE):
-        return True
-
-    # 3. 季号范围 (S01-S02, Season 1-2)
-    if re.fullmatch(r'(S|Season\s*)\d+\s*-\s*(S|Season\s*)?\d+', stem, re.IGNORECASE):
-        return True
-
-    # 4. 特别标记 (SP, OVA, Special, Specials)
-    if re.fullmatch(r'(SP|OVA|specials?)', stem, re.IGNORECASE):
-        return True
-
-    # 5. 常见季号前缀
-    if re.match(r'(?i)^(Season|S)\s*\d+([ ._-]|$)', stem):
-        return True
-
+    if re.fullmatch(r'\d{1,2}', stem): return True
+    if re.fullmatch(r'S\d+', stem, re.IGNORECASE): return True
+    if re.fullmatch(r'(S|Season\s*)\d+\s*-\s*(S|Season\s*)?\d+', stem, re.IGNORECASE): return True
+    if re.fullmatch(r'(SP|OVA|specials?)', stem, re.IGNORECASE): return True
+    if re.match(r'(?i)^(Season|S)\s*\d+([ ._-]|$)', stem): return True
     for p in SEASON_PATTERNS:
-        # 尝试移除季号
         remain = re.sub(p, '', stem, flags=re.IGNORECASE).strip()
-        if not remain or re.fullmatch(r'[.\-_\[\]\(\)\s]+', remain):
-            return True
-
+        if not remain or re.fullmatch(r'[.\-_\[\]\(\)\s]+', remain): return True
     return False
 
+
 def is_video_file(filename: str) -> bool:
-    """
-    判断文件是否为视频文件
-    """
     suffix = Path(filename).suffix.lower()
     return suffix in VIDEO_SUFFIX
 
@@ -367,22 +328,16 @@ def parse_filename(filename: str) -> Tuple[str, int, Optional[int], Optional[int
 
     # 2. 提取年份
     year = 0
-    # 增加全角括号 （ 【 的支持
     year_pattern = r'(?:[.\s\-_\(\[\（\【]|^)([12][90]\d{2})(?:[.\s\-_\)\]\）\】]|$)'
-
-    # 先尝试从原始文件名提取（最准确）
     year_match = re.search(year_pattern, original)
     if year_match:
         year = int(year_match.group(1))
-        # 如果在 name 里也能找到位置，用于截断标题
         match_in_name = re.search(year_pattern, name)
         if match_in_name:
             title_part = name[:match_in_name.start()]
         else:
-            # 如果原始有年份但清理后的name没有，说明年份被 remove_tag 删了，直接用 name
             title_part = name
     else:
-        # 兜底：再从清理后的 name 找一次
         year_match = re.search(year_pattern, name)
         if year_match:
             year = int(year_match.group(1))
@@ -401,51 +356,68 @@ def parse_filename(filename: str) -> Tuple[str, int, Optional[int], Optional[int
     # Pattern C: S01
     s_only_match = re.search(r'[.\s\-_]S(\d{1,2})(?:$|[.\s\-_])', name, re.IGNORECASE)
 
-    if se_match:
-        season_num = int(se_match.group(1))
-        episode_num = int(se_match.group(2))
-        if se_match.start() < len(title_part):
-            title_part = title_part[:se_match.start()]
+    # === 新增 Pattern: Season 5 ===
+    # 处理 "Peppa.Pig.Season.5" 这种情况
+    season_word_match = re.search(r'[.\s\-_]Season[.\s\-_]*(\d{1,2})', name, re.IGNORECASE)
 
-    elif s_range_match:
-        season_num = int(s_range_match.group(1))
-        if s_range_match.start() < len(title_part):
-            title_part = title_part[:s_range_match.start()]
+    # === 新增 Pattern: 第X季 ===
+    # 处理 "小猪佩奇第五季" 这种情况
+    cn_season_match = re.search(r'[.\s\-_]?第\s*(\d+|[零一二三四五六七八九十百千万]+)\s*季', name)
 
-    elif s_only_match:
-        season_num = int(s_only_match.group(1))
-        if s_only_match.start() < len(title_part):
-            title_part = title_part[:s_only_match.start()]
+    # 优先级判定：
+    # 我们倾向于使用最靠前的匹配作为标题的截断点，以保证标题的纯净
+    matches = []
+    if se_match: matches.append((se_match.start(), se_match, 'se'))
+    if s_range_match: matches.append((s_range_match.start(), s_range_match, 'range'))
+    if s_only_match: matches.append((s_only_match.start(), s_only_match, 's_only'))
+    if season_word_match: matches.append((season_word_match.start(), season_word_match, 'season_word'))
+    if cn_season_match: matches.append((cn_season_match.start(), cn_season_match, 'cn_season'))
 
-    else:
-        # Pattern D: 中文 第x集
-        cn_match = re.search(r'[.\s\-_]?第\s*(\d+|[零一二三四五六七八九十百千万]+)\s*[集话]', title_part)
+    # 按匹配位置排序
+    matches.sort(key=lambda x: x[0])
+
+    # 如果有匹配到季信息
+    if matches:
+        first_match = matches[0]
+        match_obj = first_match[1]
+        m_type = first_match[2]
+
+        # 截断标题
+        # 如果匹配在标题范围内，才截断
+        if first_match[0] < len(title_part):
+            title_part = title_part[:first_match[0]]
+
+        # 提取数据
+        if m_type == 'se':
+            season_num = int(match_obj.group(1))
+            episode_num = int(match_obj.group(2))
+        elif m_type == 'range':
+            season_num = int(match_obj.group(1))
+        elif m_type == 's_only':
+            season_num = int(match_obj.group(1))
+        elif m_type == 'season_word':
+            season_num = int(match_obj.group(1))
+        elif m_type == 'cn_season':
+            val = match_obj.group(1)
+            season_num = int(val) if val.isdigit() else chinese_to_arabic(val)
+
+    # 如果还没找到 episode，尝试其他模式
+    if episode_num is None:
+        # 搜索整个 name 剩下的部分（去除掉 title_part 后的部分）
+        remainder = name[len(title_part):]
+
+        cn_match = re.search(r'[.\s\-_]?第\s*(\d+|[零一二三四五六七八九十百千万]+)\s*[集话]', remainder)
         if cn_match:
             ep_val = cn_match.group(1)
             episode_num = int(ep_val) if ep_val.isdigit() else chinese_to_arabic(ep_val)
-            season_num = extract_season(title_part)
-            if season_num <= 0: season_num = 1
-            title_part = title_part[:cn_match.start()]
-
-        # Pattern E: 纯 EP19 或 .EP19
-        if episode_num is None:
-            pure_ep_match = re.search(r'(?i)(?:^|[.\s\-_])E(P)?(\d{1,4})(?:$|[.\s\-_])', title_part)
+        else:
+            pure_ep_match = re.search(r'(?i)(?:^|[.\s\-_])E(P)?(\d{1,4})(?:$|[.\s\-_])', remainder)
             if pure_ep_match:
                 temp_ep = int(pure_ep_match.group(2))
                 if not (1900 < temp_ep < 2100):
                     episode_num = temp_ep
-                    season_num = extract_season(title_part)
-                    if season_num <= 0: season_num = 1
-                    title_part = title_part[:pure_ep_match.start()]
-            elif re.fullmatch(r'\d{1,4}', title_part.strip()):
-                temp_ep = int(title_part.strip())
-                if not (1900 < temp_ep < 2100):
-                    episode_num = temp_ep
-                    if season_num is None or season_num <= 0:
-                        season_num = 1
-                    title_part = ""
 
-    # 4. 兜底清洗
+    # 4. 兜底清洗 (移除分辨率等技术参数，如果它们跑到了标题里)
     if year == 0 and season_num is None:
         res_match = re.search(r'[.\s\-_](1080[PpIi]|4[Kk]|2160[Pp]|720[Pp])', title_part, re.IGNORECASE)
         if res_match:
@@ -457,10 +429,8 @@ def parse_filename(filename: str) -> Tuple[str, int, Optional[int], Optional[int
 
     # 5. 标准化清洗
     title_part = title_part.replace('：', ' ').replace(':', ' ')
-    if '.' in title_part and not re.search(r'[\u4e00-\u9fff]', title_part):
-        title_part = title_part.replace('.', ' ').replace('_', ' ')
-    else:
-        title_part = title_part.replace('_', ' ')
+
+    title_part = title_part.replace('.', ' ').replace('_', ' ')
 
     title_part = re.sub(r'\s+', ' ', title_part).strip(' .-[]()')
 

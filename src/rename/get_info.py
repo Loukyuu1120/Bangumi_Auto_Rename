@@ -4,6 +4,7 @@ import requests
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 from bs4 import BeautifulSoup
+from difflib import SequenceMatcher
 
 import tmdbsimple as tmdb
 
@@ -45,97 +46,340 @@ class Search:
                 logger.debug(f"[AI辅助] AI处理器加载失败: {e}")
         return self._ai_processor
 
-    def _search_tmdb_web(self, query: str, target_type: str = "tv", language: str = "zh-CN") -> Optional[int]:
+    def _search_tmdb_web(self, query: str, target_type: str = "tv", language: str = "zh-CN") -> List[Dict]:
         """
-        通过爬取TMDB网页搜索结果获取ID (当API搜不到时的兜底方案)
-        target_type: 'tv' 或 'movie'
-        返回: tmdb_id (int) or None
+        爬取TMDB网页搜索结果，支持带 Slug 的 URL (如 /tv/123-name)，返回候选列表
         """
         base_url = "https://www.themoviedb.org"
-        params = {
-            "language": language,
-            "query": query
-        }
+        params = {"language": language, "query": query}
         url = base_url + "/search?" + urlencode(params)
 
         headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
         }
 
+        results = []
         try:
-            logger.info(f"[TMDB Web] 正在尝试网页搜索兜底: {query} (Type: {target_type})")
+            logger.info(f"[TMDB Web] 正在执行网页搜索: {query} (Type: {target_type})")
             resp = requests.get(url, headers=headers, timeout=10)
             if resp.status_code != 200:
-                logger.warning(f"[TMDB Web] 网页搜索返回状态码: {resp.status_code}")
-                return None
+                return []
 
             soup = BeautifulSoup(resp.text, "html.parser")
 
-            # 遍历搜索结果卡片
-            for card in soup.select("div.card.v4.tight"):
-                # 1. 获取链接解析ID和类型
+            # 遍历所有搜索结果卡片
+            for card in soup.select("div.card"):
+                # 1. 提取链接
                 a_el = card.select_one("a.result")
+                # 有些布局可能不同，尝试备选方案
                 if not a_el:
-                    continue
-                href = a_el.get("href", "")  # 形如 /tv/288306?language=zh-CN
+                    a_el = card.select_one("div.details div.title a")
 
-                try:
-                    path = href.split("?")[0]  # /tv/288306
-                    parts = path.strip("/").split("/")  # ["tv", "288306"]
+                if not a_el: continue
 
-                    if len(parts) >= 2:
-                        media_type = parts[0]  # tv / movie
-                        tmdb_id_str = parts[1]
+                href = a_el.get("href", "")
 
-                        # 如果类型匹配，直接返回第一个结果的ID (通常第一个就是最匹配的)
-                        if media_type == target_type and tmdb_id_str.isdigit():
-                            tmdb_id = int(tmdb_id_str)
+                # 核心修正：匹配 /tv/数字 或 /movie/数字 (忽略后面的 slug)
+                match = re.search(rf"/{target_type}/(\d+)", href)
 
-                            # 获取一下标题用于日志记录
-                            title_el = card.select_one("div.title a h2")
-                            title = title_el.get_text(strip=True) if title_el else "Unknown"
+                if match:
+                    tmdb_id = int(match.group(1))
 
-                            logger.info(f"[TMDB Web] 网页搜索命中: {title} (ID: {tmdb_id})")
-                            return tmdb_id
-                except Exception:
-                    continue
+                    # 2. 提取标题
+                    title_el = card.select_one("div.details div.title h2")
+                    if title_el:
+                        name = title_el.get_text(strip=True)
+                    else:
+                        name = a_el.get_text(strip=True)
+
+                    # 3. 提取年份
+                    date_el = card.select_one("span.release_date")
+                    date_str = ""
+                    if date_el:
+                        date_text = date_el.get_text(strip=True)
+                        year_match = re.search(r'\d{4}', date_text)
+                        if year_match:
+                            date_str = f"{year_match.group(0)}-01-01"
+
+                    # 4. 提取原名 (Web结果通常不直接显示原名，暂时复用 name 或留空)
+                    original_name = name
+
+                    results.append({
+                        "id": tmdb_id,
+                        "name": name,
+                        "title": name,
+                        "original_name": original_name,
+                        "original_title": original_name,
+                        "first_air_date": date_str,
+                        "release_date": date_str
+                    })
+
+            logger.info(f"[TMDB Web] 抓取到 {len(results)} 个潜在结果")
+            return results
 
         except Exception as e:
-            logger.warning(f"[TMDB Web] 网页搜索发生异常: {e}")
-
-        return None
+            logger.warning(f"[TMDB Web] 网页搜索异常: {e}")
+            return []
 
     def _select_best_result(
             self,
             query: str,
             year: int,
             results: List[Dict],
-            is_movie: bool
+            is_movie: bool,
+            season_number: Optional[int] = None
     ) -> int:
-        """从多个TMDB结果中选择最佳匹配"""
-        if not results or len(results) == 1:
+        """
+        [混合模式] 选择最佳结果：
+        1. 优先使用规则评分（支持季号年份偏移逻辑）。
+        2. 如果规则评分判定为“高置信度”匹配(>=80分)，直接返回规则结果。
+        3. 如果规则评分信心不足，且 AI 可用，则调用 AI 辅助。
+        """
+        if not results:
+            return 0
+        if len(results) == 1:
             return 0
 
-        # 尝试使用AI辅助选择（2-10个结果时）
+        # --- 阶段一：规则打分 ---
+        best_idx = 0
+        max_score = -1.0
+
+        def clean_str(s):
+            return re.sub(r'[^\w\u4e00-\u9fa5]', '', str(s)).lower()
+
+        clean_query = clean_str(query)
+
+        for idx, res in enumerate(results):
+            score = 0.0
+
+            # 1. 名称相似度 (基础分 60)
+            name = res.get('title') if is_movie else res.get('name')
+            original_name = res.get('original_title') if is_movie else res.get('original_name')
+            if not original_name: original_name = name
+
+            ratio_name = SequenceMatcher(None, clean_query, clean_str(name)).ratio()
+            ratio_origin = SequenceMatcher(None, clean_query, clean_str(original_name)).ratio()
+
+            name_score = max(ratio_name, ratio_origin)
+
+            # 完全匹配奖励
+            if clean_query == clean_str(name):
+                name_score = 1.0
+
+            score += name_score * 60
+
+            # 2. 年份逻辑 (基础分 40)
+            date_str = res.get('release_date') if is_movie else res.get('first_air_date')
+            res_year = 0
+            if date_str:
+                try:
+                    res_year = int(str(date_str).split('-')[0])
+                except:
+                    pass
+
+            if year > 0 and res_year > 0:
+                year_diff = year - res_year
+
+                if is_movie:
+                    if abs(year_diff) <= 1:
+                        score += 40
+                    elif abs(year_diff) <= 2:
+                        score += 20
+                    else:
+                        score -= 20
+                else:
+                    # TV 剧集季号逻辑
+                    if season_number and season_number > 1:
+                        # S2+: 只要首播年份早于或等于文件年份即可 (2004 <= 2016)
+                        # 允许一定的容错 (-1)
+                        if year_diff >= 0:
+                            score += 40
+                        elif year_diff >= -1:
+                            score += 20
+                        else:
+                            score -= 100  # 严重错误：S5早于S1首播
+                    else:
+                        # S1: 必须接近
+                        if abs(year_diff) <= 2:
+                            score += 40
+                        elif abs(year_diff) <= 5:
+                            score += 10
+                        else:
+                            score -= 20
+            else:
+                # 缺少年份信息，给予中等分数避免误杀
+                score += 20
+
+            # logger.debug(f"Candidate: {name} ({res_year}), Score: {score}")
+
+            if score > max_score:
+                max_score = score
+                best_idx = idx
+
+        logger.debug(f"[选片] 规则计算最高分: {max_score:.2f} (候选: {results[best_idx].get('name' or 'title')})")
+
+        # --- 阶段二：决策 ---
+        # 阈值判定：如果分数超过 80 分，说明名字和年份都非常匹配，直接信赖规则
+        if max_score >= 80:
+            return best_idx
+
+        # --- 阶段三：AI 介入 ---
+        # 分数低，且结果数量适中，尝试 AI
         if 2 <= len(results) <= 10:
             ai_processor = self._get_ai_processor()
-            if ai_processor:
-                ai_selected_idx = ai_processor.select_best_tmdb_result(
-                    query=query,
-                    year=year,
-                    results=results,
-                    is_movie=is_movie
-                )
-                if ai_selected_idx is not None:
-                    return ai_selected_idx
+            if ai_processor and ai_processor.ai_client.is_available():
+                logger.info(f"[选片] 规则评分信心不足(Max={max_score:.1f})，调用 AI 进行判决...")
+                try:
+                    ai_idx = ai_processor.select_best_tmdb_result(
+                        query=query,
+                        year=year,
+                        results=results,
+                        is_movie=is_movie
+                    )
+                    if ai_idx is not None and 0 <= ai_idx < len(results):
+                        logger.info(f"[选片] AI 选择了: {results[ai_idx].get('name' or 'title')}")
+                        return ai_idx
+                except Exception as e:
+                    logger.warning(f"[选片] AI 辅助选择失败: {e}，回退到规则结果")
 
-        # 默认返回第一个结果
-        return 0
+        return best_idx
+
+    def get_movie_info(self, query: str, year: int):
+        cache_key = f"{query}_{year}"
+        if cache_key in self._movie_cache:
+            return self._movie_cache[cache_key]
+
+        for i in range(3):
+            try:
+                search = tmdb.Search()
+                search.movie(
+                    query=query,
+                    language="zh-CN",
+                    year=year if year != 0 else None,
+                )
+
+                candidates = []
+                source = "api"
+
+                # 1. 获取 API 结果
+                if search.results:
+                    candidates = search.results
+
+                # 2. 如果 API 无结果，且是第一次尝试，尝试 Web 兜底
+                if not candidates and i == 0:
+                    web_results = self._search_tmdb_web(query, target_type="movie")
+                    if web_results:
+                        candidates = web_results
+                        source = "web"
+
+                # 3. 筛选结果
+                if candidates:
+                    selected_idx = self._select_best_result(
+                        query=query,
+                        year=year,
+                        results=candidates,
+                        is_movie=True
+                    )
+                    target = candidates[selected_idx]
+
+                    # 获取详情
+                    movie = tmdb.Movies(target["id"])
+                    info = movie.info(
+                        language="zh-CN",
+                        append_to_response="credits,external_ids,release_dates"
+                    )
+                    info["logo_path"] = self._get_logos(movie, "movie")
+
+                    name = info.get("title", target.get("name"))  # 优先用详情里的title
+                    logger.info(f"[TMDB] 选中最佳电影结果 (Source: {source}): {name} (ID: {target['id']})")
+
+                    self._safe_add_to_cache(self._movie_cache, cache_key, (name, info))
+                    return name, info
+
+                self._safe_add_to_cache(self._movie_cache, cache_key, ("", None))
+                return "", None
+
+            except Exception as e:
+                logger.warning(f"[TMDB] 搜索电影 '{query}' 失败，第 {i + 1} 次重试: {e}")
+                time.sleep(2)
+        return "", None
+
+    def get_tv_info(self, query: str, year: int, season_number: Optional[int] = None):
+        """
+        搜索 TV 信息，支持 Web 兜底和季号辅助判断
+        """
+        cache_key = f"{query}_{year}"
+        if cache_key in self._tv_cache:
+            return self._tv_cache[cache_key]
+
+        for i in range(3):
+            try:
+                q = query
+                for _ in range(3):
+                    search = tmdb.Search()
+                    # API 搜索
+                    search.tv(
+                        query=q,
+                        language="zh-CN",
+                        first_air_date_year=year if year != 0 else None,
+                    )
+
+                    candidates = []
+                    source = "api"
+
+                    # 1. 获取 API 结果
+                    if search.results:
+                        candidates = search.results
+
+                    # 2. API 无结果时的 Web 兜底逻辑
+                    # 触发条件: 第一次循环 AND (未指定年份 OR 是多季剧集)
+                    # S2+ 时忽略 API 年份限制导致的空结果，转而通过 Web 搜素获取列表并校验
+                    elif _ == 0 and (year == 0 or (season_number and season_number > 1)):
+                        web_results = self._search_tmdb_web(q, target_type="tv")
+                        if web_results:
+                            candidates = web_results
+                            source = "web"
+
+                    # 3. 筛选结果
+                    if candidates:
+                        best_idx = self._select_best_result(
+                            query=q,
+                            year=year,
+                            results=candidates,
+                            is_movie=False,
+                            season_number=season_number
+                        )
+
+                        target = candidates[best_idx]
+                        tmdb_id = target["id"]
+
+                        logger.info(f"[TMDB] 选中最佳TV结果 (Source: {source}): {target.get('name')} (ID: {tmdb_id})")
+
+                        tv = tmdb.TV(tmdb_id)
+                        info = tv.info(
+                            language="zh-CN",
+                            append_to_response="credits,external_ids,content_ratings"
+                        )
+                        info["logo_path"] = self._get_logos(tv, "tv")
+
+                        self._safe_add_to_cache(self._tv_cache, cache_key, (info["name"], info))
+                        return info["name"], info
+
+                    # 重试逻辑：去除非中文字符
+                    else:
+                        if is_chinese_percentage_sufficient(q):
+                            q = re.sub(r"[a-zA-Z]", "", q)
+
+                self._safe_add_to_cache(self._tv_cache, cache_key, ("", None))
+                return "", None
+
+            except Exception as e:
+                logger.warning(
+                    f"[TMDB] 搜索剧集 '{query}' 失败，第 {i + 1} 次重试: {e}"
+                )
+                time.sleep(2)
+        return "", None
 
     def _fetch_tv_with_retry(
             self,
@@ -359,138 +603,3 @@ class Search:
         except Exception:
             pass
         return None
-
-    def get_movie_info(self, query: str, year: int):
-        cache_key = f"{query}_{year}"
-        if cache_key in self._movie_cache:
-            return self._movie_cache[cache_key]
-
-        for i in range(3):
-            try:
-                search = tmdb.Search()
-                search.movie(
-                    query=query,
-                    language="zh-CN",
-                    year=year if year != 0 else None,
-                )
-
-                if search.results:
-                    # 使用AI辅助选择最佳结果
-                    selected_idx = self._select_best_result(
-                        query=query,
-                        year=year,
-                        results=search.results,
-                        is_movie=True
-                    )
-
-                    target = search.results[selected_idx]
-                    name = target["title"]
-                    movie = tmdb.Movies(target["id"])
-
-                    info = movie.info(
-                        language="zh-CN",
-                        append_to_response="credits,external_ids,release_dates"
-                    )
-
-                    info["logo_path"] = self._get_logos(movie, "movie")
-
-                    self._safe_add_to_cache(self._movie_cache, cache_key, (name, info))
-                    return name, info
-
-                # --- API 搜不到，尝试网页搜兜底 ---
-                elif i == 0:
-                    web_id = self._search_tmdb_web(query, target_type="movie")
-                    if web_id:
-                        try:
-                            movie = tmdb.Movies(web_id)
-                            info = movie.info(
-                                language="zh-CN",
-                                append_to_response="credits,external_ids,release_dates"
-                            )
-                            name = info["title"]
-                            info["logo_path"] = self._get_logos(movie, "movie")
-                            self._safe_add_to_cache(self._movie_cache, cache_key, (name, info))
-                            return name, info
-                        except Exception as e_web:
-                            logger.error(f"[TMDB Web] 兜底ID获取元数据失败: {e_web}")
-
-                self._safe_add_to_cache(self._movie_cache, cache_key, ("", None))
-                return "", None
-
-            except Exception as e:
-                logger.warning(
-                    f"[TMDB] 搜索电影 '{query}' 失败，第 {i + 1} 次重试: {e}"
-                )
-                time.sleep(2)
-        return "", None
-
-    def get_tv_info(self, query: str, year: int):
-        cache_key = f"{query}_{year}"
-        if cache_key in self._tv_cache:
-            return self._tv_cache[cache_key]
-
-        for i in range(3):
-            try:
-                q = query
-                # 尝试3次API搜索 (可能在内部做一些字符清理)
-                for _ in range(3):
-                    search = tmdb.Search()
-                    search.tv(
-                        query=q,
-                        language="zh-CN",
-                        first_air_date_year=year if year != 0 else None,
-                    )
-
-                    if search.results:
-                        # 使用AI辅助选择最佳结果
-                        selected_idx = self._select_best_result(
-                            query=q,
-                            year=year,
-                            results=search.results,
-                            is_movie=False
-                        )
-
-                        target = search.results[selected_idx]
-                        name = target["name"]
-                        tv = tmdb.TV(target["id"])
-
-                        info = tv.info(
-                            language="zh-CN",
-                            append_to_response="credits,external_ids,content_ratings"
-                        )
-
-                        info["logo_path"] = self._get_logos(tv, "tv")
-
-                        self._safe_add_to_cache(self._tv_cache, cache_key, (name, info))
-                        return name, info
-
-                    if _ == 0:
-                        web_id = self._search_tmdb_web(q, target_type="tv")
-                        if web_id:
-                            try:
-                                tv = tmdb.TV(web_id)
-                                info = tv.info(
-                                    language="zh-CN",
-                                    append_to_response="credits,external_ids,content_ratings"
-                                )
-                                name = info["name"]
-                                info["logo_path"] = self._get_logos(tv, "tv")
-                                self._safe_add_to_cache(self._tv_cache, cache_key, (name, info))
-                                return name, info
-                            except Exception as e_web:
-                                logger.error(f"[TMDB Web] 兜底ID获取元数据失败: {e_web}")
-
-                    # 之前的重试逻辑：去除非中文字符再试
-                    else:
-                        if is_chinese_percentage_sufficient(q):
-                            q = re.sub(r"[a-zA-Z]", "", q)
-
-                self._safe_add_to_cache(self._tv_cache, cache_key, ("", None))
-                return "", None
-
-            except Exception as e:
-                logger.warning(
-                    f"[TMDB] 搜索剧集 '{query}' 失败，第 {i + 1} 次重试: {e}"
-                )
-                time.sleep(2)
-        return "", None
