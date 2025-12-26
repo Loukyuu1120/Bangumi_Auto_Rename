@@ -161,6 +161,14 @@ def match_and_extract(input_string: str) -> Optional[Tuple[int, int]]:
     提取季和集
     返回: (season, episode) 或者 None
     """
+    # 0. 中文季号+纯数字集号
+    # 匹配 "第1季12" 或 "第1季 12"
+    cn_season_num_pattern = re.search(r'第\s*(\d+)\s*季\s*(\d+)(?!\d)', input_string)
+    if cn_season_num_pattern:
+        season = int(cn_season_num_pattern.group(1))
+        episode = int(cn_season_num_pattern.group(2))
+        return season, episode
+
     # 1. 标准 S01E01 格式
     pattern = re.compile(r'(?i)S(\d+)(?:E|EP)(\d+)')
     match = pattern.search(input_string)
@@ -195,18 +203,25 @@ def match_and_extract(input_string: str) -> Optional[Tuple[int, int]]:
     pure_ep_match = re.search(r'(?i)(?:^|[.\s\-_\[\(\[])E(P)?(\d{1,4})(?:[vV]\d)?(?:$|[.\s\-_\]\)\]])', input_string)
     if pure_ep_match:
         episode = int(pure_ep_match.group(2))
-        # 排除年份和常见分辨率
         if not (1900 < episode < 2100) and episode not in [480, 720, 1080, 2160]:
             season = extract_season(input_string)
             if season <= 0:
                 season = 1
             return season, episode
 
+    # 5. 空格+纯数字结尾 (解决: ...时间 06.strm)
+    season_found = extract_season(input_string)
+    if season_found > 0:
+        end_num_match = re.search(r'\s(\d{1,3})(?:\.\w{2,4})?$', input_string)
+        if end_num_match:
+            ep_val = int(end_num_match.group(1))
+            if ep_val < 1900:  # 排除年份
+                return season_found, ep_val
+
     # 去除两端空格后，如果整个字符串就是 1-4 位数字
     clean_str = input_string.strip()
     if re.fullmatch(r'\d{1,4}', clean_str):
         episode = int(clean_str)
-        # 排除像 1988, 2020 这样的年份
         if not (1900 < episode < 2100):
             season = extract_season(input_string)
             if season <= 0: season = 1
