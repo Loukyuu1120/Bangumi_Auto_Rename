@@ -128,7 +128,7 @@ class TableManager:
         该方法由 UI 定时器调用。
         """
         # 如果缓存和文件列表都已经为空，说明已经清理过了，直接返回，避免重复日志
-        if not self.cache and not self.file_list:
+        if not self.cache:
             return
 
         # 计算当前空闲了多久
