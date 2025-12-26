@@ -138,9 +138,7 @@ class TableManager:
             logger.info(f"[任务列表] 页面闲置超时 ({int(idle_duration)}s > {self.CACHE_TTL}s)，自动清理内存缓存...")
             # 清空数据引用
             self.cache.clear()
-            self.file_list = []
             self.is_fully_loaded = False
-            self.total_items = 0
             await run.io_bound(gc.collect)
             if platform.system() == 'Linux':
                 try:
