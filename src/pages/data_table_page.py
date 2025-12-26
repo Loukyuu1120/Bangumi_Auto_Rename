@@ -207,6 +207,18 @@ class TableManager:
         except Exception:
             return None
 
+    @staticmethod
+    def _perform_physical_delete(uuids: List[str]):
+        """在后台线程批量删除文件，避免阻塞 UI"""
+        for uuid in uuids:
+            try:
+                path1 = TASK_PATH / f'{uuid}.json'
+                path2 = RECORD_PATH / f'{uuid}.json'
+                if path1.exists(): path1.unlink()
+                if path2.exists(): path2.unlink()
+            except Exception:
+                pass
+
     async def load_data(self):
         self.keep_alive()
         try:
@@ -397,31 +409,49 @@ class TableManager:
             pass
 
     def delete_by_uuid(self, uuid: str):
+        """单条删除（保留用于单独点击删除按钮）"""
         self.keep_alive()
+        # 物理删除
         path1 = TASK_PATH / f'{uuid}.json'
         path2 = RECORD_PATH / f'{uuid}.json'
+        try:
+            if path1.exists(): path1.unlink()
+            if path2.exists(): path2.unlink()
+        except Exception:
+            pass
 
-        if path1.exists(): path1.unlink()
-        if path2.exists(): path2.unlink()
-
+        # 内存清理
         if uuid in self.cache:
             del self.cache[uuid]
 
+        # 列表清理
         self.file_list = [f for f in self.file_list if f.stem != uuid]
         self.total_items = max(0, self.total_items - 1)
 
     async def batch_delete(self):
+        """批量删除（后台IO + 批量内存更新）"""
         self.keep_alive()
         rows = list(self.selected_rows)
         if not rows:
             notify('请先勾选需要删除的任务')
             return
 
-        for row in rows:
-            self.delete_by_uuid(row['uuid'])
+        count = len(rows)
+        notify(f'正在后台删除 {count} 个任务，请稍候...', type='info')
+        uuids_to_delete = [row['uuid'] for row in rows]
+        uuids_set = set(uuids_to_delete)
+        await run.io_bound(self._perform_physical_delete, uuids_to_delete)
+        for uuid in uuids_to_delete:
+            if uuid in self.cache:
+                del self.cache[uuid]
 
-        notify(f'已删除 {len(rows)} 个任务记录')
-        await self.refresh_table()
+        self.file_list = [f for f in self.file_list if f.stem not in uuids_set]
+        self.total_items = len(self.file_list)
+        self.selected_rows = []
+        self.update_selection_label()
+
+        notify(f'成功删除 {count} 个任务')
+        refresh_table_view.refresh()
 
     async def refresh_table(self):
         self.keep_alive()
@@ -730,7 +760,9 @@ async def handle_delete(ev: GenericEventArguments, is_notify: bool = True):
     uuid = row_data['uuid']
 
     manager.delete_by_uuid(uuid)
+    manager.selected_rows = [r for r in manager.selected_rows if r['uuid'] != uuid]
+    manager.update_selection_label()
 
     if is_notify:
         notify('删除任务记录成功!')
-    await manager.refresh_table()
+    refresh_table_view.refresh()
