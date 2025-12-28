@@ -168,6 +168,12 @@ def match_and_extract(input_string: str) -> Optional[Tuple[int, int]]:
         season = int(cn_season_num_pattern.group(1))
         episode = int(cn_season_num_pattern.group(2))
         return season, episode
+    cn_end_digit_match = re.search(r'[\u4e00-\u9fa5](\d{1,3})$', input_string.strip())
+    if cn_end_digit_match:
+        ep_val = int(cn_end_digit_match.group(1))
+        season = extract_season(input_string)
+        if season <= 0: season = 1
+        return season, ep_val
 
     # 1. 标准 S01E01 格式
     pattern = re.compile(r'(?i)S(\d+)(?:E|EP)(\d+)')

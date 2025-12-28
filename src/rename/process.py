@@ -335,6 +335,9 @@ class Rename:
         tv_rename_format = self._get_config_value('tv_rename_format', config_overrides)
         ep = 0
         _idata = match_and_extract(item_name)
+        if not _idata:
+            _idata = match_and_extract(item_path.stem)
+
         if _idata:
             if cus_season_id is None:
                 extracted_season = int(_idata[0])
@@ -363,9 +366,15 @@ class Rename:
                     return
 
             _item_name = remove_code(remove_season(item_name_l))
-            epp = extract_base_num(_item_name)
+
+            epp = extract_base_num(Path(_item_name).stem)
+            if epp is None:
+                epp = extract_base_num(_item_name)  # 回退到全名检测
+
             if epp is not None:
                 ep = int(epp)
+            elif Path(_item_name).stem.isdigit():  # 检查纯文件名是否为数字
+                ep = int(Path(_item_name).stem)
             elif _item_name.isdigit():
                 ep = int(_item_name)
 
