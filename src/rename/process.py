@@ -1191,7 +1191,7 @@ class Rename:
                 if rtpath_name and rtpath_name not in search_candidates:
                     search_candidates.append(rtpath_name)
                 try:
-                    name_no_brackets = re.sub(r'[\[【\(（].*?[\]】\)）]', '', rtpath_name)
+                    name_no_brackets = re.sub(r'[\[【\(（［].*?[\]】\)）］]', '', rtpath_name)
                     name_no_brackets = re.sub(r'\s+', ' ', name_no_brackets).strip()
 
                     if name_no_brackets and name_no_brackets != rtpath_name:
