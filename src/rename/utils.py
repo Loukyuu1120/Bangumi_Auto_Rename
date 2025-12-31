@@ -4,10 +4,11 @@ IGNORE_SUFFIX = ['.rar', '.zip', '.7z', '.webp', '.jpg', '.png', '.nfo', '.txt',
 EXTRA_TAG = [
     'NCOP', 'NCED', 'Menu', 'Teaser', 'IV', 'CM', 'NC', 'OP', 'PV', 'ED',
     'Advice', 'Trailer', 'Event', 'Fans', '访谈', 'Preview', 'Picture Drama',
-    '预告', '特典', '映像',
+    '预告', '特典', '映像', '花絮', '采访'
 ]
 S0_TAG = [
-    r'OVA', r'OAD', r'Special', r'sp', r'SP', r'00', r'\.5', r'Chaos no Kakera'
+    r'OVA', r'OAD', r'Special', r'sp', r'SP', r'00', r'\.5', r'Chaos no Kakera',
+    r'总集篇', r'Recap', r'Movie'
 ]
 VIDEO_SUFFIX = [
     '.strm', '.mp4', '.mkv', '.avi', '.wmv', '.flv', '.mov', '.mpg', '.mpeg',
@@ -88,6 +89,7 @@ SEASON_PATTERNS = [
     r'Series\s*([\d]{1,2})',
     r'(First|Second|Third|Fourth|Fifth) Season',
     r' (I{2,3})', r' (I{1,3}V)', r' (VI{2,3})',
+    r'总集篇', r'Recap'
 ]
 EPISODE_PATTERNS = [
     r'第\s*(\d+)\s*季\s*(\d+)(?!\d)',  # 匹配：第1季06

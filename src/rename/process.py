@@ -1024,10 +1024,15 @@ class Rename:
                         if is_anime is None:
                             is_anime = c.get('is_anime')
                         rtpath_name = cus_name
-                        is_movie = False
+                        is_movie = False  # 强制标记为 TV
+                        ai_is_movie_hint = False
                         from_ai_cache = True
                     else:
-                        logger.info(f"[目录缓存] 缓存为电影，不使用缓存")
+                        logger.info(f"[目录缓存] 命中电影缓存: {c.get('name')}")
+                        cus_tmdb_id, cus_name = c.get('tmdb_id'), c.get('name')
+                        rtpath_name = cus_name
+                        is_movie = True
+                        ai_is_movie_hint = True
                 else:
                     final_search_name = ""
 
@@ -1049,6 +1054,10 @@ class Rename:
 
                     if final_search_name:
                         rtpath_name = final_search_name
+
+                    if not final_search_name and not cus_tmdb_id:
+                        logger.warning(f"[跳过] 弱文件名且无法提取有效父目录信息: {path.name}")
+                        return self.error_reply(_uuid, '弱文件名无法识别', path)
 
                     if any(inv in rtpath_name.lower() for inv in INVALID_NAMES) and not cus_tmdb_id:
                         rtpath_name = ""
@@ -1161,10 +1170,9 @@ class Rename:
                             'is_anime': is_anime,
                             'is_movie': is_movie
                         }
+                        self._safe_cache_update(Rename._dir_cache, cache_key, new_cache_data, "目录缓存")
                         if _scoped_cache is not None:
                             _scoped_cache[cache_key] = new_cache_data
-                        else:
-                            self._safe_cache_update(Rename._dir_cache, cache_key, new_cache_data, "目录缓存")
                 except Exception as e:
                     logger.warning(f"[ID失效] ID {cus_tmdb_id} 查询失败: {e}，判定为脏数据，将使用文件名搜索...")
                     cus_tmdb_id = None
@@ -1294,10 +1302,9 @@ class Rename:
                     'is_anime': is_anime,
                     'is_movie': is_movie
                 }
+                self._safe_cache_update(Rename._dir_cache, cache_key, new_cache_data, "目录缓存")
                 if _scoped_cache is not None:
                     _scoped_cache[cache_key] = new_cache_data
-                else:
-                    self._safe_cache_update(Rename._dir_cache, cache_key, new_cache_data, "目录缓存")
 
             work_path = None
             season_id = 0

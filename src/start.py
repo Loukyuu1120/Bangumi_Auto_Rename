@@ -7,6 +7,7 @@ sys.path.append(str(Path(__file__).parents[2]))
 from .logger import logger  # noqa: E402
 from .web import ui  # noqa: E402 # type: ignore
 from .monitor.monitor_manager import monitor_manager
+from .monitor.monitor import monitor_service
 
 
 async def startup_monitor():
@@ -18,11 +19,19 @@ async def startup_monitor():
         logger.error(f"监控服务启动失败: {e}")
 
 
+def on_shutdown():
+    logger.info("程序正在关闭，正在保存任务状态...")
+    monitor_service.stop()
+    logger.info("任务状态保存完成，程序已安全关闭。" )
+
 if __name__ in {"__main__", "__mp_main__"}:
     logger.info("程序启动中...")
 
     # 注册启动任务
     app.on_startup(startup_monitor)
+
+    # 注册关闭任务
+    app.on_shutdown(on_shutdown)
 
     ui.run(
         host="0.0.0.0",

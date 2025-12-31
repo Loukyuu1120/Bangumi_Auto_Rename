@@ -7,7 +7,7 @@ import threading
 import json
 from pathlib import Path
 from threading import Event, Thread
-from queue import Queue, Empty
+from queue import PriorityQueue, Empty
 from typing import Dict, Any
 
 from nicegui import run
@@ -62,10 +62,11 @@ class MonitorEventHandler(FileSystemEventHandler):
             return False
 
         path_obj = Path(path_str)
-        logger.info(f"[监控] {action_name}: {path_obj.name} -> 加入队列")
+        logger.info(f"[监控] {action_name}: {path_obj.name} -> 加入队列 (系统优先)")
         with self.service._count_lock:
             self.service.logical_pending_count += 1
-        self.service.task_queue.put((path_obj, {}))
+
+        self.service.task_queue.put((self.service.PRIORITY_SYSTEM, (path_obj, {})))
         return True
 
 
@@ -75,6 +76,8 @@ class MonitorService:
     """
 
     _instance = None
+    PRIORITY_SYSTEM = 1
+    PRIORITY_MANUAL = 10
 
     def __new__(cls):
         if cls._instance is None:
@@ -85,7 +88,9 @@ class MonitorService:
     def __init__(self):
         if self.initialized:
             return
-        self.task_queue = Queue(maxsize=0)
+        # 使用 PriorityQueue 替代普通 Queue
+        self.task_queue = PriorityQueue(maxsize=0)
+
         self.logical_pending_count = 0
         self._count_lock = threading.Lock()
         self._paused = False
@@ -107,17 +112,14 @@ class MonitorService:
         return self._paused
 
     def pause_processing(self):
-        """暂停处理线程，但监控继续（相当于暂存任务）"""
         self._paused = True
         logger.info("[控制] 任务处理已暂停 (新文件将进入队列等待)")
 
     def resume_processing(self):
-        """恢复处理"""
         self._paused = False
         logger.info("[控制] 任务处理已恢复")
 
     def clear_pending_tasks(self):
-        """清空等待队列 (深度清理内存)"""
         # 1. 暂停防止写入冲突
         was_paused = self._paused
         self._paused = True
@@ -127,7 +129,6 @@ class MonitorService:
             with self.task_queue.mutex:
                 self.task_queue.queue.clear()
         except Exception:
-            # 如果直接访问底层不可行，循环 get
             while not self.task_queue.empty():
                 try:
                     self.task_queue.get_nowait()
@@ -152,18 +153,33 @@ class MonitorService:
 
     def save_queue_to_disk(self) -> int:
         """保存并清空队列"""
-        self._paused = True  # 暂停处理
+        # 注意：这里我们不再清空队列，只是保存当前状态，
+        # 因为在 stop() 中调用时，我们不希望丢失内存中的数据直到进程真正结束
+        # 如果需要清空效果，请手动调用 clear_pending_tasks
+
+        if self.task_queue.empty():
+            return 0
+
+        logger.info("[任务保存] 正在保存未完成的任务...")
+        self._paused = True
         saved_items = []
+
+        # 临时列表用于保存取出的数据，以便后续如果要继续运行可以放回
+        temp_items = []
 
         # 1. 提取所有任务
         while True:
             try:
-                item = self.task_queue.get_nowait()
-                path_obj, options = item
+                # PriorityQueue 的 item 是 (priority, (path, options))
+                item_tuple = self.task_queue.get_nowait()
+                priority, (path_obj, options) = item_tuple
+
                 saved_items.append({
                     "path": str(path_obj),
-                    "options": options
+                    "options": options,
+                    "priority": priority  # 保存优先级
                 })
+                temp_items.append(item_tuple)
                 self.task_queue.task_done()
             except Empty:
                 break
@@ -177,12 +193,13 @@ class MonitorService:
             except Exception as e:
                 logger.error(f"[任务保存] 保存失败: {e}")
 
-        # 3. 清理现场
+        # 3. 如果是 stop 调用，这里实际上清空了内存队列。
+        # 3. 重置计数
         with self._count_lock:
             self.logical_pending_count = 0
 
-        # 4. 显式 GC
         del saved_items
+        del temp_items
         gc.collect()
 
         return 0
@@ -200,12 +217,13 @@ class MonitorService:
                 for entry in saved_items:
                     path_str = entry.get("path")
                     options = entry.get("options", {})
+                    priority = entry.get("priority", self.PRIORITY_MANUAL)
 
                     if path_str:
                         path_obj = Path(path_str)
-                        # 即使文件不存在了也加进去吗？建议检查一下存在性
                         if path_obj.exists():
-                            self.task_queue.put((path_obj, options))
+                            # 恢复时放入优先级队列
+                            self.task_queue.put((priority, (path_obj, options)))
                             count += 1
 
             with self._count_lock:
@@ -218,7 +236,6 @@ class MonitorService:
             logger.error(f"[任务恢复] 读取失败: {e}")
 
         return count
-
 
     @staticmethod
     def count_directory_files(directory: Path, max_check: int = 10000) -> int:
@@ -271,25 +288,25 @@ class MonitorService:
         return None
 
     async def start(self, path_configs: Dict[Path, Dict], exclude_dirs: list[str]):
-        """启动监控 (异步防阻塞版)"""
+        """启动监控"""
         if self.is_running:
             logger.warning("[监控] 服务已经在运行中")
             return
 
-        # 定义内部同步函数，执行耗时操作
+        # 启动时尝试加载上次保存的任务
+        self.load_queue_from_disk()
+
         def _start_sync():
             self.stop_event.clear()
             self.path_map = path_configs
             paths_to_monitor = list(path_configs.keys())
 
-            # 1. 启动消费者线程
             if not self.worker_thread or not self.worker_thread.is_alive():
                 self.worker_thread = Thread(
                     target=self._process_worker, daemon=True, name="RenameWorker"
                 )
                 self.worker_thread.start()
 
-            # 2. 智能选择监控模式 (这里有耗时的 count_directory_files)
             use_polling = False
             total_files = 0
             for path in paths_to_monitor:
@@ -308,7 +325,6 @@ class MonitorService:
             if cm.get_config("monitor_mode") == "compatibility":
                 use_polling = True
 
-            # 3. 实例化 Observer
             ObserverClass = None
             if not use_polling:
                 ObserverClass = self.__choose_observer()
@@ -328,7 +344,6 @@ class MonitorService:
                     self.observer = PollingObserver(timeout=2)
                     mode_name = "兼容模式(轮询)"
 
-            # 4. 添加监控路径
             event_handler = MonitorEventHandler(self, exclude_dirs)
             monitored_count = 0
             for path in paths_to_monitor:
@@ -369,7 +384,6 @@ class MonitorService:
         logger.info("[监控] 启动流程已在后台完成")
 
     def _scheduled_cache_clear(self):
-        """执行定时的缓存清理任务"""
         try:
             count = Rename.clear_processed_cache()
             logger.info(f"[定时任务] 自动清理了 {count} 条路径缓存记录")
@@ -377,8 +391,14 @@ class MonitorService:
             logger.error(f"[定时任务] 缓存清理失败: {e}")
 
     def stop(self):
-        """停止监控服务和处理线程"""
+        """停止监控服务和处理线程，并保存队列"""
         logger.info("[监控] 正在接收停止指令...")
+
+        # 停止时自动保存队列
+        try:
+            self.save_queue_to_disk()
+        except Exception as e:
+            logger.error(f"[监控] 自动保存队列失败: {e}")
 
         if self.observer:
             if self.observer.is_alive():
@@ -393,14 +413,12 @@ class MonitorService:
             self.worker_thread = None
             logger.info("[监控] 处理线程已停止")
 
-        # 【修改点4】移除定时器停止代码
-
         self.is_running = False
         logger.info("[监控] 服务已完全停止")
 
     def get_queue_list(self) -> list[str]:
         return [
-            p[0].name if isinstance(p, tuple) else p.name
+            p[1][0].name  # 提取 (priority, (path, options)) 中的 path.name
             for p in list(self.task_queue.queue)
         ]
 
@@ -426,7 +444,9 @@ class MonitorService:
         if increment_counter:
             with self._count_lock:
                 self.logical_pending_count += 1
-        self.task_queue.put((path, options))
+
+        # 使用优先级 10 (较低优先级)，确保系统监控(1)能插队
+        self.task_queue.put((self.PRIORITY_MANUAL, (path, options)))
 
     def _process_worker(self):
         logger.info("[处理线程] 启动成功，等待任务...")
@@ -446,14 +466,13 @@ class MonitorService:
                 self.last_cache_clear_time = current_time
 
             try:
-                item = self.task_queue.get(timeout=1)
+                # PriorityQueue 会自动按优先级弹出 (priority 越小越先出)
+                queue_item = self.task_queue.get(timeout=1)
             except Empty:
                 continue
 
-            if isinstance(item, tuple):
-                file_path, options = item
-            else:
-                file_path, options = item, {}
+            # 解包优先级元组 格式: (priority, (path, options))
+            priority, (file_path, options) = queue_item
 
             try:
                 if not self._wait_for_file_ready(file_path):
@@ -496,7 +515,7 @@ class MonitorService:
                 rename_kwargs['config_overrides'] = final_overrides
 
                 logger.info(
-                    f"[开始处理] {file_path.name} | AI: {use_ai} | HasCustomCfg: {bool(custom_config)}"
+                    f"[开始处理] {file_path.name} | Prio: {priority} | AI: {use_ai}"
                 )
 
                 rename_processor.process(file_path, use_ai=use_ai, **rename_kwargs)
