@@ -9,6 +9,7 @@ from pathlib import Path
 from threading import Event, Thread
 from queue import PriorityQueue, Empty
 from typing import Dict, Any
+from itertools import count
 
 from nicegui import run
 from watchdog.events import FileSystemEventHandler
@@ -66,7 +67,8 @@ class MonitorEventHandler(FileSystemEventHandler):
         with self.service._count_lock:
             self.service.logical_pending_count += 1
 
-        self.service.task_queue.put((self.service.PRIORITY_SYSTEM, (path_obj, {})))
+        seq = next(self.service._counter)
+        self.service.task_queue.put((self.service.PRIORITY_SYSTEM, seq, (path_obj, {})))
         return True
 
 
@@ -90,6 +92,8 @@ class MonitorService:
             return
         # 使用 PriorityQueue 替代普通 Queue
         self.task_queue = PriorityQueue(maxsize=0)
+
+        self._counter = count()
 
         self.logical_pending_count = 0
         self._count_lock = threading.Lock()
@@ -153,9 +157,6 @@ class MonitorService:
 
     def save_queue_to_disk(self) -> int:
         """保存并清空队列"""
-        # 注意：这里我们不再清空队列，只是保存当前状态，
-        # 因为在 stop() 中调用时，我们不希望丢失内存中的数据直到进程真正结束
-        # 如果需要清空效果，请手动调用 clear_pending_tasks
 
         if self.task_queue.empty():
             return 0
@@ -170,9 +171,8 @@ class MonitorService:
         # 1. 提取所有任务
         while True:
             try:
-                # PriorityQueue 的 item 是 (priority, (path, options))
                 item_tuple = self.task_queue.get_nowait()
-                priority, (path_obj, options) = item_tuple
+                priority, seq, (path_obj, options) = item_tuple
 
                 saved_items.append({
                     "path": str(path_obj),
@@ -193,7 +193,6 @@ class MonitorService:
             except Exception as e:
                 logger.error(f"[任务保存] 保存失败: {e}")
 
-        # 3. 如果是 stop 调用，这里实际上清空了内存队列。
         # 3. 重置计数
         with self._count_lock:
             self.logical_pending_count = 0
@@ -208,7 +207,7 @@ class MonitorService:
         if not self.QUEUE_FILE.exists():
             return 0
 
-        count = 0
+        count_loaded = 0
         try:
             with open(self.QUEUE_FILE, 'r', encoding='utf-8') as f:
                 saved_items = json.load(f)
@@ -222,20 +221,20 @@ class MonitorService:
                     if path_str:
                         path_obj = Path(path_str)
                         if path_obj.exists():
-                            # 恢复时放入优先级队列
-                            self.task_queue.put((priority, (path_obj, options)))
-                            count += 1
+                            seq = next(self._counter)
+                            self.task_queue.put((priority, seq, (path_obj, options)))
+                            count_loaded += 1
 
             with self._count_lock:
-                self.logical_pending_count += count
+                self.logical_pending_count += count_loaded
 
             self.QUEUE_FILE.unlink()  # 加载成功后删除存档
-            logger.info(f"[任务恢复] 成功恢复 {count} 个任务")
+            logger.info(f"[任务恢复] 成功恢复 {count_loaded} 个任务")
 
         except Exception as e:
             logger.error(f"[任务恢复] 读取失败: {e}")
 
-        return count
+        return count_loaded
 
     @staticmethod
     def count_directory_files(directory: Path, max_check: int = 10000) -> int:
@@ -385,8 +384,8 @@ class MonitorService:
 
     def _scheduled_cache_clear(self):
         try:
-            count = Rename.clear_processed_cache()
-            logger.info(f"[定时任务] 自动清理了 {count} 条路径缓存记录")
+            count_cleared = Rename.clear_processed_cache()
+            logger.info(f"[定时任务] 自动清理了 {count_cleared} 条路径缓存记录")
         except Exception as e:
             logger.error(f"[定时任务] 缓存清理失败: {e}")
 
@@ -418,14 +417,14 @@ class MonitorService:
 
     def get_queue_list(self) -> list[str]:
         return [
-            p[1][0].name  # 提取 (priority, (path, options)) 中的 path.name
+            p[2][0].name  # 提取 path.name (index 2 is the data tuple)
             for p in list(self.task_queue.queue)
         ]
 
-    def register_batch_count(self, count: int):
+    def register_batch_count(self, count_val: int):
         with self._count_lock:
-            self.logical_pending_count += count
-        logger.info(f"[计数器] 批量注册任务: +{count}, 当前待处理: {self.logical_pending_count}")
+            self.logical_pending_count += count_val
+        logger.info(f"[计数器] 批量注册任务: +{count_val}, 当前待处理: {self.logical_pending_count}")
 
     def add_manual_task(self, path: Path, options: Dict[str, Any] = None, increment_counter=False):
         if options is None:
@@ -445,8 +444,8 @@ class MonitorService:
             with self._count_lock:
                 self.logical_pending_count += 1
 
-        # 使用优先级 10 (较低优先级)，确保系统监控(1)能插队
-        self.task_queue.put((self.PRIORITY_MANUAL, (path, options)))
+        seq = next(self._counter)
+        self.task_queue.put((self.PRIORITY_MANUAL, seq, (path, options)))
 
     def _process_worker(self):
         logger.info("[处理线程] 启动成功，等待任务...")
@@ -471,8 +470,7 @@ class MonitorService:
             except Empty:
                 continue
 
-            # 解包优先级元组 格式: (priority, (path, options))
-            priority, (file_path, options) = queue_item
+            priority, seq, (file_path, options) = queue_item
 
             try:
                 if not self._wait_for_file_ready(file_path):
