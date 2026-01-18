@@ -1117,6 +1117,8 @@ class ConfigPage(ui.dialog):
                 item.setdefault("scan_now", False)
                 self.monitor_paths_data.append(item)
 
+        setattr(self.config, "monitor_paths", self.monitor_paths_data)
+
         self.path_container = ui.column().classes("w-full gap-2")
 
         def _refresh_list():
@@ -1141,7 +1143,8 @@ class ConfigPage(ui.dialog):
                             RedButton("🗑️", on_click=lambda i=idx: _remove_path(i)).props("dense flat color=grey")
 
                         # 高级配置折叠面板
-                        with ui.expansion("监控配置 (点击展开)", icon="settings").classes("w-full text-sm text-gray-600"):
+                        with ui.expansion("监控配置 (点击展开)", icon="settings").classes(
+                                "w-full text-sm text-gray-600"):
                             with ui.column().classes("w-full gap-2 p-2 bg-gray-50"):
                                 with ui.row().classes("w-full items-center justify-between bg-blue-50 p-2 rounded"):
                                     ui.label("🚀 立即操作").classes("font-bold text-blue-800")
@@ -1149,7 +1152,8 @@ class ConfigPage(ui.dialog):
                                         "保存后立即全量扫描此目录",
                                         value=item.get('scan_now', False),
                                         on_change=lambda e, i=idx: self._update_path_data(i, "scan_now", e.value)
-                                    ).props("dense color=blue").tooltip("开启后，点击保存配置时会立即遍历该目录并将所有视频加入任务队列")
+                                    ).props("dense color=blue").tooltip(
+                                        "开启后，点击保存配置时会立即遍历该目录并将所有视频加入任务队列")
                                 ui.label("💡 留空或不选表示使用全局默认设置").classes("text-xs text-gray-400 mb-1")
                                 # === 0. 目标输出目录 (Priority) ===
                                 ui.label("📁 目标输出目录 (覆盖全局设置)").classes("font-bold text-xs mt-1")
@@ -1161,25 +1165,34 @@ class ConfigPage(ui.dialog):
                                         placeholder="留空则使用全局配置",
                                         on_change=lambda e, i=idx: self._update_path_data(i, "target_tv_dir", e.value)
                                     ).props("filled dense").classes("flex-1")
-                                    RedButton("📂", on_click=lambda i=idx, inp=tv_dir_input: self._pick_folder_for_item(i, inp)).props("dense flat")
+                                    RedButton("📂",
+                                              on_click=lambda i=idx, inp=tv_dir_input: self._pick_folder_for_item(i,
+                                                                                                                  inp)).props(
+                                        "dense flat")
 
                                     # Movie 目标目录
                                     mv_dir_input = ui.input(
                                         label="🎬 电影目标目录",
                                         value=item.get("target_movie_dir", ""),
                                         placeholder="留空则使用全局配置",
-                                        on_change=lambda e, i=idx: self._update_path_data(i, "target_movie_dir", e.value)
+                                        on_change=lambda e, i=idx: self._update_path_data(i, "target_movie_dir",
+                                                                                          e.value)
                                     ).props("filled dense").classes("flex-1")
-                                    RedButton("📂", on_click=lambda i=idx, inp=mv_dir_input: self._pick_folder_for_item(i, inp)).props("dense flat")
+                                    RedButton("📂",
+                                              on_click=lambda i=idx, inp=mv_dir_input: self._pick_folder_for_item(i,
+                                                                                                                  inp)).props(
+                                        "dense flat")
 
                                 ui.separator().classes("my-1")
                                 # === 1. 重命名模板 ===
                                 with ui.row().classes("w-full gap-2"):
                                     ui.input(label="📺 TV模板", value=item.get("tv_rename_format", ""),
-                                             on_change=lambda e, i=idx: self._update_path_data(i, "tv_rename_format", e.value)
+                                             on_change=lambda e, i=idx: self._update_path_data(i, "tv_rename_format",
+                                                                                               e.value)
                                              ).props("filled dense").classes("flex-1")
                                     ui.input(label="🎬 Movie模板", value=item.get("movie_rename_format", ""),
-                                             on_change=lambda e, i=idx: self._update_path_data(i, "movie_rename_format", e.value)
+                                             on_change=lambda e, i=idx: self._update_path_data(i, "movie_rename_format",
+                                                                                               e.value)
                                              ).props("filled dense").classes("flex-1")
 
                                 # === 2. 行为控制 (Mode, Overwrite) ===
@@ -1190,7 +1203,8 @@ class ConfigPage(ui.dialog):
                                         options=["默认", "硬链接", "软链接", "复制", "剪切"],
                                         value=current_mode,
                                         label="重命名模式",
-                                        on_change=lambda e, i=idx: self._update_path_data(i, "mode", None if e.value == "默认" else e.value)
+                                        on_change=lambda e, i=idx: self._update_path_data(i, "mode",
+                                                                                          None if e.value == "默认" else e.value)
                                     ).props("dense outlined").classes("flex-1")
 
                                     # 覆盖模式
@@ -1199,7 +1213,8 @@ class ConfigPage(ui.dialog):
                                         options=["默认", "从不覆盖", "总是覆盖", "保留最新"],
                                         value=current_ov,
                                         label="覆盖模式",
-                                        on_change=lambda e, i=idx: self._update_path_data(i, "overwrite_mode", None if e.value == "默认" else e.value)
+                                        on_change=lambda e, i=idx: self._update_path_data(i, "overwrite_mode",
+                                                                                          None if e.value == "默认" else e.value)
                                     ).props("dense outlined").classes("flex-1")
 
                                 # === 3. 开关控制 (刮削, 二级分类) ===
@@ -1211,7 +1226,9 @@ class ConfigPage(ui.dialog):
                                         options=["默认", "启用", "禁用"],
                                         value=meta_label,
                                         label="刮削元数据",
-                                        on_change=lambda e, i=idx: self._update_path_data(i, "scrape_metadata", True if e.value=="启用" else (False if e.value=="禁用" else None))
+                                        on_change=lambda e, i=idx: self._update_path_data(i, "scrape_metadata",
+                                                                                          True if e.value == "启用" else (
+                                                                                              False if e.value == "禁用" else None))
                                     ).props("dense outlined").classes("w-32")
 
                                     # 二级分类
@@ -1221,7 +1238,9 @@ class ConfigPage(ui.dialog):
                                         options=["默认", "启用", "禁用"],
                                         value=sec_label,
                                         label="二级分类",
-                                        on_change=lambda e, i=idx: self._update_path_data(i, "secondary_classification", True if e.value=="启用" else (False if e.value=="禁用" else None))
+                                        on_change=lambda e, i=idx: self._update_path_data(i, "secondary_classification",
+                                                                                          True if e.value == "启用" else (
+                                                                                              False if e.value == "禁用" else None))
                                     ).props("dense outlined").classes("w-32")
 
                                 # === 4. 图片类型 ===
@@ -1230,8 +1249,6 @@ class ConfigPage(ui.dialog):
                                     "banner", "logo", "clearart", "thumb"
                                 ]
                                 current_img_types = item.get("scrape_image_types")
-                                # 如果是 None，NiceGUI select多选模式可能显示为空，我们接受它为空，表示"未设置/Global"
-                                # 用户如果想选择，就会覆盖；如果全取消选择，变成空列表，save时存为None（回退Global）
 
                                 ui.select(
                                     options=image_options,
@@ -1241,18 +1258,19 @@ class ConfigPage(ui.dialog):
                                     on_change=lambda e, i=idx: self._update_path_data(
                                         i,
                                         "scrape_image_types",
-                                        e.value if e.value else None # 如果列表非空则保存列表，空则保存None以使用全局配置
+                                        e.value if e.value else None
                                     )
                                 ).props("use-chips dense outlined").classes("w-full")
 
-
         def _add_path():
             self.monitor_paths_data.append({"path": "", "tv_format": "", "movie_format": ""})
+            setattr(self.config, "monitor_paths", self.monitor_paths_data)
             _refresh_list()
 
         def _remove_path(index):
             if 0 <= index < len(self.monitor_paths_data):
                 self.monitor_paths_data.pop(index)
+                setattr(self.config, "monitor_paths", self.monitor_paths_data)
                 _refresh_list()
 
         # 初始渲染
