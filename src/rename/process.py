@@ -951,9 +951,18 @@ class Rename:
         abs_str = str(path.resolve())
 
         with Rename._lock:
+            # 检查是否有手动指定的参数，如果有，则视为强制执行，忽略历史记录
+            is_forced_task = any(v is not None for v in [
+                cus_tmdb_id, cus_season_id, cus_name, cus_offset, config_overrides
+            ])
+
             if abs_str in Rename._processed_paths:
-                logger.info(f"[跳过] 文件已在之前的任务中处理完毕: {path.name}")
-                return True
+                if not is_forced_task:
+                    logger.info(f"[跳过] 文件已在之前的任务中处理完毕: {path.name}")
+                    return True
+                else:
+                    logger.info(f"[强制执行] 检测到手动参数/重试请求，忽略已处理标记: {path.name}")
+
             if abs_str in Rename._processing_paths:
                 logger.info(f"[跳过] 文件当前正在处理中: {path.name}")
                 return True
@@ -1013,6 +1022,7 @@ class Rename:
                     if cache_key in Rename._dir_cache:
                         cached_data = Rename._dir_cache[cache_key]
 
+            # 如果是弱文件名，但用户手动指定了TMDB ID或名称，则跳过这里的强制跳过逻辑
             if is_weak and not cus_tmdb_id and not cus_name:
                 if cached_data:
                     c = cached_data
@@ -1079,8 +1089,8 @@ class Rename:
                     if p_year > 0:
                         year = p_year
                     elif path.parent.parent != path.root:
-                         _, gp_year, _, _ = parse_filename(path.parent.parent.name)
-                         if gp_year > 0: year = gp_year
+                        _, gp_year, _, _ = parse_filename(path.parent.parent.name)
+                        if gp_year > 0: year = gp_year
 
                     if year > 0:
                         logger.info(f"[年份补全] 已从目录结构补全年份: {year}")
@@ -1094,7 +1104,7 @@ class Rename:
 
                     if is_movie_hint is None:
                         if _s is not None or _e is not None:
-                            is_movie_hint = False # 有SxxExx，猜电视剧
+                            is_movie_hint = False  # 有SxxExx，猜电视剧
                         elif _file_year > 0:
                             is_movie_hint = True  # 有年份无集数，猜电影
 
@@ -1134,15 +1144,18 @@ class Rename:
                                 # 使用反转后的类型重新请求
                                 name_2, info_2, is_anime_2, is_movie_2 = self.search.get_info_by_tmdb_id(
                                     tmdb_id=int(cus_tmdb_id),
-                                    is_movie_hint=new_hint # 强制指定新类型
+                                    is_movie_hint=new_hint  # 强制指定新类型
                                 )
 
                                 # 检查第二次结果的年份
                                 tmdb_year_2 = 0
-                                date_str_2 = info_2.get('release_date', '') if is_movie_2 else info_2.get('first_air_date', '')
+                                date_str_2 = info_2.get('release_date', '') if is_movie_2 else info_2.get(
+                                    'first_air_date', '')
                                 if date_str_2:
-                                    try: tmdb_year_2 = int(date_str_2.split('-')[0])
-                                    except: pass
+                                    try:
+                                        tmdb_year_2 = int(date_str_2.split('-')[0])
+                                    except:
+                                        pass
 
                                 # 如果第二次请求成功，且年份更接近 (或者第一次差距太大，第二次只要有结果就信第二次)
                                 if name_2 and info_2:
@@ -1151,7 +1164,8 @@ class Rename:
 
                                     # 如果第二次的年份差距明显更小，或者第二次也是合理的
                                     if gap_2 < gap_1:
-                                        logger.info(f"[ID校验] 切换类型成功！修正为: {'电影' if is_movie_2 else '剧集'} ({name_2})")
+                                        logger.info(
+                                            f"[ID校验] 切换类型成功！修正为: {'电影' if is_movie_2 else '剧集'} ({name_2})")
                                         name = name_2
                                         info = info_2
                                         is_anime = is_anime_2
@@ -1248,7 +1262,8 @@ class Rename:
                                         break
 
                         if sibling_count >= 4:
-                            logger.info(f"[环境判断] 目录下检测到多个视频文件({sibling_count}+)，且当前为弱文件名，强制锁定为 [TV模式]")
+                            logger.info(
+                                f"[环境判断] 目录下检测到多个视频文件({sibling_count}+)，且当前为弱文件名，强制锁定为 [TV模式]")
                             is_movie = False
                             ai_is_movie_hint = False
                     except Exception as e:
@@ -1362,7 +1377,7 @@ class Rename:
             else:
                 custom_tv_dir = self._get_config_value('target_tv_dir', config_overrides)
                 if custom_tv_dir:
-                     _WORK_PATH = Path(custom_tv_dir)
+                    _WORK_PATH = Path(custom_tv_dir)
                 else:
                     if is_anime:
                         _WORK_PATH = self.ANIME_PATH
