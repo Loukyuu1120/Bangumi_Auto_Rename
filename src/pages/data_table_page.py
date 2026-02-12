@@ -406,17 +406,180 @@ class TableManager:
         except Exception:
             pass
 
-    def delete_by_uuid(self, uuid: str):
-        """单条删除（保留用于单独点击删除按钮）"""
-        self.keep_alive()
-        # 物理删除
-        path1 = TASK_PATH / f'{uuid}.json'
-        path2 = RECORD_PATH / f'{uuid}.json'
+    def _cleanup_dirs_after_delete(self, dirs: set[Path]):
+        """删除文件后：清理空目录（只要目录里没有视频文件就删）"""
+        from src.rename.utils import VIDEO_SUFFIX
+
+        def has_video_files(directory: Path) -> bool:
+            try:
+                for item in directory.rglob('*'):
+                    if item.is_file() and item.suffix.lower() in VIDEO_SUFFIX:
+                        return True
+            except Exception:
+                pass
+            return False
+
+        def force_cleanup_dir(directory: Path):
+            try:
+                for item in directory.iterdir():
+                    if item.is_file():
+                        try:
+                            item.unlink()
+                        except Exception:
+                            pass
+                    elif item.is_dir():
+                        force_cleanup_dir(item)
+
+                directory.rmdir()
+                logger.info(f'[删除任务] 已清理无视频目录: {directory}')
+            except Exception as e:
+                logger.warning(f'[删除任务] 清理目录失败 {directory}: {e}')
+
+        # 从深到浅删，避免父目录先删失败
+        for d in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
+            try:
+                if not d.exists() or not d.is_dir():
+                    continue
+                if not has_video_files(d):
+                    force_cleanup_dir(d)
+            except Exception:
+                pass
+
+    def _delete_files_from_record_sync(self, uuid: str, delete_transferred: bool, delete_source: bool):
+        """
+        根据 uuid 删除目标文件/源文件/记录文件。用于在后台线程调用。
+        """
+        import json
+
+        record_file = RECORD_PATH / f'{uuid}.json'
+        task_file = TASK_PATH / f'{uuid}.json'
+
+        dirs_to_check: set[Path] = set()
+
+        # 1) 删除目标文件
+        mapping = None
+        if delete_transferred and record_file.exists():
+            try:
+                with record_file.open('r', encoding='utf-8') as f:
+                    mapping = json.load(f)  # {source_str: target_str}
+            except Exception:
+                mapping = None
+
+            if isinstance(mapping, dict):
+                for _, tgt_str in mapping.items():
+                    try:
+                        t = Path(tgt_str)
+                    except Exception:
+                        continue
+
+                    parent = t.parent
+                    for _ in range(3):
+                        if parent.exists() and parent.is_dir():
+                            dirs_to_check.add(parent)
+
+                        if parent.parent == parent:
+                            break
+                        parent = parent.parent
+
+                    # 1) 删除目标文件本体
+                    try:
+                        if t.exists() and t.is_file():
+                            t.unlink()
+                    except Exception:
+                        pass
+
+                    # 2) 删除同前缀元数据（字幕/图片/nfo等）
+                    prefix = t.stem
+                    try:
+                        if parent.exists() and parent.is_dir():
+                            for child in parent.iterdir():
+                                if not child.is_file():
+                                    continue
+                                if child == t:
+                                    continue
+                                if child.stem.startswith(prefix):
+                                    try:
+                                        child.unlink()
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        pass
+
+        # 目标删除完成后：清理目录
+        if delete_transferred and dirs_to_check:
+            try:
+                self._cleanup_dirs_after_delete(dirs_to_check)
+            except Exception:
+                pass
+
+        # 2) 删除源文件
+        if delete_source:
+            maybe_paths = set()
+
+            # 从 task_file 获取源路径
+            try:
+                if task_file.exists():
+                    with task_file.open('r', encoding='utf-8') as f:
+                        td = json.load(f)
+                    p = td.get('path')
+                    if p:
+                        maybe_paths.add(p)
+            except Exception:
+                pass
+
+            # 从 mapping keys 获取源路径
+            try:
+                if isinstance(mapping, dict):
+                    for src_str in mapping.keys():
+                        if src_str:
+                            maybe_paths.add(src_str)
+                elif record_file.exists():
+                    # mapping 之前没读到，这里再读一次
+                    with record_file.open('r', encoding='utf-8') as f:
+                        _m = json.load(f)
+                    if isinstance(_m, dict):
+                        for src_str in _m.keys():
+                            if src_str:
+                                maybe_paths.add(src_str)
+            except Exception:
+                pass
+
+            # 删除源文件
+            for pstr in maybe_paths:
+                try:
+                    p = Path(pstr)
+                    if p.exists() and p.is_file():
+                        p.unlink()
+                except Exception:
+                    pass
+
+        # 3) 删除任务记录文件
         try:
-            if path1.exists(): path1.unlink()
-            if path2.exists(): path2.unlink()
+            if task_file.exists():
+                task_file.unlink()
         except Exception:
             pass
+
+        try:
+            if record_file.exists():
+                record_file.unlink()
+        except Exception:
+            pass
+
+    def delete_by_uuid(self, uuid: str, delete_transferred: bool = False, delete_source: bool = False):
+        """单条删除（可选择是否删除转移后的文件或原文件）"""
+        self.keep_alive()
+
+        # 后台同步删除实际文件与记录
+        try:
+            # 在后台线程执行物理删除
+            run.io_bound(self._delete_files_from_record_sync, uuid, delete_transferred, delete_source)
+        except Exception:
+            # 如果 run.io_bound 不可用（同步上下文），仍然直接调用
+            try:
+                self._delete_files_from_record_sync(uuid, delete_transferred, delete_source)
+            except Exception:
+                pass
 
         # 内存清理
         if uuid in self.cache:
@@ -427,28 +590,84 @@ class TableManager:
         self.total_items = max(0, self.total_items - 1)
 
     async def batch_delete(self):
-        """批量删除（后台IO + 批量内存更新）"""
+        """批量删除：先弹窗选择是否删除文件/源文件，再后台删除并更新内存"""
         self.keep_alive()
+
         rows = list(self.selected_rows)
         if not rows:
             notify('请先勾选需要删除的任务')
             return
 
-        count = len(rows)
-        notify(f'正在后台删除 {count} 个任务，请稍候...', type='info')
-        uuids_to_delete = [row['uuid'] for row in rows]
+        # 弹窗选择
+        from nicegui import ui as _ui
+
+        result = {
+            'confirmed': False,
+            'del_trans': False,
+            'del_src': False,
+        }
+
+        dialog = _ui.dialog()
+        with dialog:
+            with _ui.card().style('width: 420px; max-width: 90vw'):
+                _ui.label(f'确认删除 {len(rows)} 条记录吗？').classes('text-h6 q-mb-md')
+                _ui.label('选择是否同时删除文件（若文件不存在会被忽略）').classes(
+                'text-caption text-grey q-mb-sm'
+                )
+
+                del_target_checkbox = _ui.checkbox('删除已转移的目标文件').props('dense')
+                del_source_checkbox = _ui.checkbox('删除源文件（转移前）').props('dense')
+
+                with _ui.row().classes('w-full justify-end q-mt-md'):
+                    _ui.button('取消', on_click=lambda e: dialog.close()).props('outline color=grey')
+
+                    def do_confirm(e):
+                        result['confirmed'] = True
+                        result['del_trans'] = del_target_checkbox.value
+                        result['del_src'] = del_source_checkbox.value
+                        dialog.close()
+
+                    _ui.button('确认删除', on_click=do_confirm).classes('q-ml-sm').props('color=red')
+
+        dialog.open()
+
+        await dialog
+
+        if not result['confirmed']:
+            notify('已取消删除')
+            return
+
+        notify(
+            f'正在后台删除 {len(rows)} 个任务（同时删除目标文件: {result["del_trans"]}, '
+            f'删除源文件: {result["del_src"]}）',
+            type='info',
+        )
+
+        uuids_to_delete = [r['uuid'] for r in rows]
         uuids_set = set(uuids_to_delete)
-        await run.io_bound(self._perform_physical_delete, uuids_to_delete)
+
+        # 在后台删除实际文件（io_bound）
+        await run.io_bound(
+            lambda: [
+                self._delete_files_from_record_sync(
+                    u,
+                    result['del_trans'],
+                    result['del_src'],
+                )
+                for u in uuids_to_delete
+            ]
+        )
+
+        # 内存更新
         for uuid in uuids_to_delete:
-            if uuid in self.cache:
-                del self.cache[uuid]
+            self.cache.pop(uuid, None)
 
         self.file_list = [f for f in self.file_list if f.stem not in uuids_set]
         self.total_items = len(self.file_list)
         self.selected_rows = []
         self.update_selection_label()
 
-        notify(f'成功删除 {count} 个任务')
+        notify(f'成功删除 {len(rows)} 个任务')
         refresh_table_view.refresh()
 
     async def refresh_table(self):
@@ -757,10 +976,59 @@ async def handle_delete(ev: GenericEventArguments, is_notify: bool = True):
     row_data = arg['row']
     uuid = row_data['uuid']
 
-    manager.delete_by_uuid(uuid)
-    manager.selected_rows = [r for r in manager.selected_rows if r['uuid'] != uuid]
+    from nicegui import ui as _ui
+
+    # 用一个 future 来接收结果
+    result = {'confirmed': False, 'del_trans': False, 'del_src': False}
+
+    dialog = _ui.dialog()
+    with dialog:
+        with _ui.card().style('width: 420px; max-width: 90vw'):
+            _ui.label('确认删除该任务记录吗？').classes('text-h6 q-mb-md')
+            _ui.label('可选择是否同时删除源文件/目标文件（不存在会被忽略）').classes(
+                'text-caption text-grey q-mb-sm'
+            )
+
+            del_target_checkbox = _ui.checkbox('删除已转移的目标文件').props('dense')
+            del_source_checkbox = _ui.checkbox('删除源文件（转移前）').props('dense')
+
+            with _ui.row().classes('w-full justify-end q-mt-md'):
+                _ui.button('取消', on_click=dialog.close).props('outline color=grey')
+
+                def do_confirm():
+                    result['confirmed'] = True
+                    result['del_trans'] = bool(del_target_checkbox.value)
+                    result['del_src'] = bool(del_source_checkbox.value)
+                    dialog.close()
+
+                _ui.button('确认删除', on_click=do_confirm).classes('q-ml-sm').props('color=red')
+
+    dialog.open()
+
+    await dialog
+
+    if not result['confirmed']:
+        if is_notify:
+            notify('已取消删除')
+        return
+
+    if is_notify:
+        notify(
+            f'正在后台删除任务（删除目标文件: {result["del_trans"]}, 删除源文件: {result["del_src"]}）',
+            type='info'
+        )
+
+    manager.delete_by_uuid(
+        uuid,
+        delete_transferred=result['del_trans'],
+        delete_source=result['del_src'],
+    )
+
+    manager.selected_rows = [r for r in manager.selected_rows if r.get('uuid') != uuid]
     manager.update_selection_label()
 
     if is_notify:
-        notify('删除任务记录成功!')
+        notify('删除成功!')
+
     refresh_table_view.refresh()
+
