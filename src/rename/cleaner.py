@@ -195,8 +195,8 @@ def match_and_extract(input_string: str) -> Optional[Tuple[int, int]]:
         if episode > 0:
             return season, episode
 
-    # 3. 动漫方括号格式 [01], [12v2], 【03】
-    brackets = re.findall(r'[\[【](\d{1,4})(?:[vV]\d)?[\]】]', input_string)
+    # 3. 动漫方括号格式 [01], [12v2], 【03】,添加对空格容忍
+    brackets = re.findall(r'[\[【]\s*(\d{1,4})\s*(?:[vV]\d)?\s*[\]】]', input_string)
     valid_eps = []
     for val in brackets:
         num = int(val)
@@ -237,6 +237,17 @@ def match_and_extract(input_string: str) -> Optional[Tuple[int, int]]:
             if season <= 0: season = 1
             return season, episode
 
+    # 6. 处理类似 " - 01" 格式（孤立数字，非分辨率/年份）
+    isolated_num_match = re.search(r'(?:^|[^a-zA-Z0-9])(\d{1,3})(?:[^a-zA-Z0-9]|$)', input_string)
+    if isolated_num_match:
+        ep = int(isolated_num_match.group(1))
+        # 排除常见分辨率、年份
+        if ep not in [480, 576, 720, 1080, 2160, 264, 265] and not (1900 < ep < 2100):
+            season = extract_season(input_string)
+            if season <= 0:
+                season = 1
+            return season, ep
+
     return None
 
 
@@ -250,7 +261,7 @@ def extract_base_num(filename: str) -> Optional[float]:
         return float(match.group(1))
 
     # 2. 动漫方括号格式 [01]
-    brackets = re.findall(r'[\[【](\d{1,4})(?:[vV]\d)?[\]】]', filename)
+    brackets = re.findall(r'[\[【]\s*(\d{1,4})\s*(?:[vV]\d)?\s*[\]】]', filename)
     for val in brackets:
         num = float(val)
         if num not in [480, 576, 720, 1080, 2160, 264, 265] and not (1900 < num < 2100):
@@ -261,6 +272,13 @@ def extract_base_num(filename: str) -> Optional[float]:
     if match_ep:
         num = float(match_ep.group(2))
         if not (1900 < num < 2100):
+            return num
+
+    # 4. 孤立数字（类似 " - 01"）
+    isolated_num = re.search(r'(?:^|[^a-zA-Z0-9])(\d{1,3})(?:[^a-zA-Z0-9]|$)', filename)
+    if isolated_num:
+        num = float(isolated_num.group(1))
+        if num not in [480, 576, 720, 1080, 2160, 264, 265] and not (1900 < num < 2100):
             return num
 
     clean_str = filename.strip()
