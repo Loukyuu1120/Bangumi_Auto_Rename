@@ -1,0 +1,498 @@
+package rename
+
+import (
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"unicode"
+)
+
+// VideoSuffix lists all recognised video file extensions (lowercase).
+var VideoSuffix = map[string]bool{
+	".strm": true, ".mp4": true, ".mkv": true, ".avi": true,
+	".wmv": true, ".flv": true, ".mov": true, ".mpg": true,
+	".mpeg": true, ".m4v": true, ".rm": true, ".rmvb": true,
+	".ts": true, ".iso": true, ".m2ts": true,
+}
+
+// SubtitleSuffix lists common subtitle extensions.
+var SubtitleSuffix = map[string]bool{
+	".ass": true, ".srt": true, ".sub": true, ".ssa": true, ".vtt": true,
+}
+
+// IsVideoFile reports whether a file path has a recognised video extension.
+func IsVideoFile(path string) bool {
+	return VideoSuffix[strings.ToLower(filepath.Ext(path))]
+}
+
+// ignoreDirs lists directory name segments that should be skipped.
+var ignoreDirs = []string{"cd", "scan"}
+
+// extraTags are non-episode special content identifiers.
+var extraTags = []string{
+	"NCOP", "NCED", "Menu", "Teaser", "IV", "CM", "NC", "OP", "PV", "ED",
+	"Advice", "Trailer", "Event", "Fans", "Preview", "Picture Drama",
+	"访谈", "预告", "特典", "映像", "花絮", "采访",
+}
+
+// s0Tags indicate Season-0 / OVA content.
+var s0TagPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\bOVA\b`),
+	regexp.MustCompile(`(?i)\bOAD\b`),
+	regexp.MustCompile(`(?i)\bSpecial\b`),
+	regexp.MustCompile(`(?i)\b[Ss][Pp]\b`),
+	regexp.MustCompile(`(?i)\b00\b`),
+	regexp.MustCompile(`\.5\b`),
+	regexp.MustCompile(`(?i)Chaos no Kakera`),
+	regexp.MustCompile(`总集篇`),
+	regexp.MustCompile(`(?i)\bRecap\b`),
+	regexp.MustCompile(`(?i)\bMovie\b`),
+}
+
+// keywordsToClean are encoding/release noise words.
+var keywordsToClean = []string{
+	"1080P", "FLAC", "简繁", "外挂", "MKV", "MP4", "TV", "全集",
+	"HEVC", "8bit", "10bit", "720P", "2160P", "4K", "BD", "RIP",
+	"DBD-raws", "Remux", "AVC", "H264", "H265", "DTS", "DTS-HD",
+	"TrueHD", "Atmos", "HDR", "DV", "Dolby", "AAC", "AC3", "HQ",
+	"Web-DL", "BluRay",
+}
+
+// bracketPattern matches common bracket types and their contents.
+var bracketPattern = regexp.MustCompile(`\[.*?\]|【.*?】|《.*?》|<.*?>|\(.*?\)|（.*?）`)
+
+// codePatterns match technical encoding info that is noise in titles.
+var codePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(2160|1080|720|480|576)[pP]`),
+	regexp.MustCompile(`(?i)x264|x265|h264|h265|hevc|avc|mpeg2|vp9|av1`),
+	regexp.MustCompile(`(?i)(dts-?hd|dts|truehd|atmos|ac3|aac|flac|opus|mp3|pcm)(\W*\d+\.\d)?(audio|ch|channel)?`),
+	regexp.MustCompile(`(?i)\b\d{1,2}\.\d(audio|ch|channel|sound)\b`),
+	regexp.MustCompile(`(?i)hdr|dv|dolby|10bit|8bit`),
+	regexp.MustCompile(`(?i)remux|bluray|web-dl|webrip|hdtv|bdrip|dvdrip`),
+	regexp.MustCompile(`(?i)hq|(\d{2,3})\s?fps`),
+}
+
+// seasonPatterns attempt to extract a season number from a title.
+var seasonPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`[Ss]\s*([\d]{1,2})`),
+	regexp.MustCompile(`第([0-9一二三四五六七八九零]{1,2})[季部分部]`),
+	regexp.MustCompile(`([\d]{1,2})nd Season`),
+	regexp.MustCompile(`(?i)Season\s*([\d]{1,2})`),
+	regexp.MustCompile(`(?i)Series\s*([\d]{1,2})`),
+	regexp.MustCompile(`(?i)(First|Second|Third|Fourth|Fifth) Season`),
+	regexp.MustCompile(` (I{2,3})\b`),
+	regexp.MustCompile(` (I{1,3}V)\b`),
+	regexp.MustCompile(` (VI{2,3})\b`),
+}
+
+// episodePatterns attempt to extract episode (and optionally season) numbers.
+var episodePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`第\s*(\d+)\s*季\s*(\d+)(?!\d)`),    // 第1季06
+	regexp.MustCompile(`[Ss]([\d]{1,2})[Ee]([\d]{1,3})`), // S01E06
+	regexp.MustCompile(`[Ee]([\d]{1,3})`),                // E06
+	regexp.MustCompile(`[Ee][Pp]([\d]{1,3})`),            // EP06
+	regexp.MustCompile(`第([0-9一二三四五六七八九零]+)[话集]`),        // 第06集
+	regexp.MustCompile(`([\d]{1,3})[Ee]pisode`),
+	regexp.MustCompile(`([\d]{1,3})[Ee]ps`),
+	regexp.MustCompile(`\[(\d{1,3})\]`),              // [06]
+	regexp.MustCompile(`【(\d{1,3})】`),                // 【06】
+	regexp.MustCompile(` - (\d{1,3})(?:\D|$)`),       //  - 06
+	regexp.MustCompile(`\s(\d{1,3})(?:\.\w{2,4})?$`), // trailing number
+}
+
+var numMap = map[string]int{
+	"First": 1, "Second": 2, "Third": 3, "Fourth": 4, "Fifth": 5,
+}
+var romaMap = map[string]int{
+	"II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6, "VII": 7,
+}
+
+var cnNum = map[rune]int{
+	'零': 0, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+	'六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
+}
+
+// ChineseToNumber converts a Chinese numeral string to an integer.
+func ChineseToNumber(s string) int {
+	result := 0
+	current := 0
+	for _, ch := range s {
+		if v, ok := cnNum[ch]; ok {
+			switch {
+			case v == 10:
+				if current == 0 {
+					current = 1
+				}
+				result += current * 10
+				current = 0
+			case v < 10:
+				current = v
+			}
+		}
+	}
+	result += current
+	return result
+}
+
+// IsDigit reports whether every rune in s is an ASCII digit.
+func IsDigit(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if !unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// RemoveTag strips the first occurrence of tag (case-insensitive) from title.
+func RemoveTag(title, tag string) string {
+	re := regexp.MustCompile(`(?i)` + regexp.QuoteMeta(tag))
+	return strings.TrimSpace(re.ReplaceAllString(title, ""))
+}
+
+// CleanNoise removes common encoding noise words and bracket content from a title.
+func CleanNoise(title string) string {
+	// Remove bracket content
+	title = bracketPattern.ReplaceAllString(title, " ")
+
+	// Remove code patterns
+	for _, p := range codePatterns {
+		title = p.ReplaceAllString(title, " ")
+	}
+
+	// Remove known noise keywords (case-insensitive)
+	for _, kw := range keywordsToClean {
+		re := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(kw) + `\b`)
+		title = re.ReplaceAllString(title, " ")
+	}
+
+	// Collapse whitespace and trim
+	wsRe := regexp.MustCompile(`\s{2,}`)
+	title = wsRe.ReplaceAllString(strings.TrimSpace(title), " ")
+	return title
+}
+
+// ExtractSeason tries to parse a season number from a string.
+// Returns (season, found).
+func ExtractSeason(s string) (int, bool) {
+	for i, p := range seasonPatterns {
+		m := p.FindStringSubmatch(s)
+		if m == nil {
+			continue
+		}
+		switch i {
+		case 0, 2, 3, 4: // numeric group
+			if n, err := strconv.Atoi(m[1]); err == nil {
+				return n, true
+			}
+		case 1: // Chinese numeral
+			n := ChineseToNumber(m[1])
+			if n > 0 {
+				return n, true
+			}
+		case 5: // First/Second/…
+			if n, ok := numMap[m[1]]; ok {
+				return n, true
+			}
+		case 6, 7, 8: // Roman II, III, IV, VI, VII
+			if n, ok := romaMap[strings.TrimSpace(m[1])]; ok {
+				return n, true
+			}
+		}
+	}
+	return 1, false
+}
+
+// EpisodeInfo holds the result of episode extraction.
+type EpisodeInfo struct {
+	Season  int
+	Episode int
+	Found   bool
+}
+
+// ExtractEpisode tries to extract season and episode numbers from a filename stem.
+func ExtractEpisode(stem string) EpisodeInfo {
+	// Pattern 0: 第N季M集
+	if m := episodePatterns[0].FindStringSubmatch(stem); m != nil {
+		s, _ := strconv.Atoi(m[1])
+		e, _ := strconv.Atoi(m[2])
+		return EpisodeInfo{Season: s, Episode: e, Found: true}
+	}
+	// Pattern 1: SxxExx
+	if m := episodePatterns[1].FindStringSubmatch(stem); m != nil {
+		s, _ := strconv.Atoi(m[1])
+		e, _ := strconv.Atoi(m[2])
+		return EpisodeInfo{Season: s, Episode: e, Found: true}
+	}
+	// Patterns 2-9: episode only
+	for i := 2; i < len(episodePatterns); i++ {
+		m := episodePatterns[i].FindStringSubmatch(stem)
+		if m == nil {
+			continue
+		}
+		capGroup := m[1]
+		// Chinese numerals
+		if !IsDigit(capGroup) {
+			n := ChineseToNumber(capGroup)
+			if n > 0 {
+				return EpisodeInfo{Episode: n, Found: true}
+			}
+			continue
+		}
+		if n, err := strconv.Atoi(capGroup); err == nil && n > 0 {
+			return EpisodeInfo{Episode: n, Found: true}
+		}
+	}
+	return EpisodeInfo{}
+}
+
+// ExtractTMDBID looks for patterns like {tmdb-12345} or [tmdbid=12345] and returns the ID string.
+func ExtractTMDBID(s string) string {
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`\{tmdb-(\d+)\}`),
+		regexp.MustCompile(`(?i)\[tmdbid=(\d+)\]`),
+		regexp.MustCompile(`(?i)tmdb[_-]?id[=:](\d+)`),
+	}
+	for _, p := range patterns {
+		if m := p.FindStringSubmatch(s); m != nil {
+			return m[1]
+		}
+	}
+	return ""
+}
+
+// IsWeakFilename reports whether a stem looks like a poor search keyword
+// (pure episode numbers, very short, all digits, etc.).
+func IsWeakFilename(stem string) bool {
+	clean := strings.TrimSpace(stem)
+	if len(clean) <= 3 {
+		return true
+	}
+	if IsDigit(clean) {
+		return true
+	}
+	// Looks purely like SxxExx
+	if regexp.MustCompile(`^[Ss]\d{1,2}[Ee]\d{1,3}$`).MatchString(clean) {
+		return true
+	}
+	return false
+}
+
+// IsSeasonName reports whether a directory name looks like a season folder
+// (e.g. "Season 1", "S02", "第一季").
+func IsSeasonName(name string) bool {
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)^Season\s*\d+$`),
+		regexp.MustCompile(`(?i)^S\d{1,2}$`),
+		regexp.MustCompile(`^第[一二三四五六七八九零十百千万\d]+季$`),
+	}
+	for _, p := range patterns {
+		if p.MatchString(strings.TrimSpace(name)) {
+			return true
+		}
+	}
+	return false
+}
+
+// ParsedFile holds structured metadata extracted from a raw filename.
+type ParsedFile struct {
+	Title   string
+	Year    int
+	Season  int
+	Episode int
+	Part    string // e.g. "Part1"
+	IsExtra bool
+	IsS0    bool
+}
+
+// ParseFilename extracts structured information from a video filename stem.
+func ParseFilename(stem string) ParsedFile {
+	result := ParsedFile{Season: 1}
+
+	// 1. Check for extra / S0 tags first
+	upperStem := strings.ToUpper(stem)
+	for _, tag := range extraTags {
+		if strings.Contains(upperStem, strings.ToUpper(tag)) {
+			result.IsExtra = true
+			return result
+		}
+	}
+	for _, p := range s0TagPatterns {
+		if p.MatchString(stem) {
+			result.IsS0 = true
+		}
+	}
+
+	// 2. Extract year
+	yearRe := regexp.MustCompile(`\((\d{4})\)`)
+	if m := yearRe.FindStringSubmatch(stem); m != nil {
+		if y, err := strconv.Atoi(m[1]); err == nil && y > 1900 && y < 2100 {
+			result.Year = y
+			stem = strings.Replace(stem, m[0], "", 1)
+		}
+	}
+
+	// 3. Extract episode info
+	ep := ExtractEpisode(stem)
+	if ep.Found {
+		result.Episode = ep.Episode
+		if ep.Season > 0 {
+			result.Season = ep.Season
+		}
+	}
+
+	// 4. Extract season if not already set by SxxExx
+	if ep.Season == 0 {
+		if s, ok := ExtractSeason(stem); ok {
+			result.Season = s
+		}
+	}
+
+	// 5. Clean noise and set title
+	title := CleanNoise(stem)
+	// Remove season/episode markers from title
+	title = seasonPatterns[0].ReplaceAllString(title, "")
+	for _, p := range episodePatterns {
+		title = p.ReplaceAllString(title, "")
+	}
+	title = strings.NewReplacer("-", " ", "_", " ", ".", " ").Replace(title)
+	wsRe := regexp.MustCompile(`\s{2,}`)
+	result.Title = strings.TrimSpace(wsRe.ReplaceAllString(title, " "))
+
+	return result
+}
+
+// MediaInfo holds extracted video/audio technical metadata strings.
+type MediaInfo struct {
+	Source     string
+	VideoCodec string
+	AudioCodec string
+	HDR        string
+	QualityTag string
+	Resolution string
+}
+
+var mediaMapping = map[string]map[string][]string{
+	"source": {
+		"Remux":  {"REMUX"},
+		"BluRay": {"BLURAY", " BD ", " BD-", ".BD."},
+		"BDRip":  {"BDRIP"},
+		"UHD-BD": {"UHD-BD", "UHD BLURAY"},
+		"WEB-DL": {"WEB-DL", "WEBDL"},
+		"WEBRip": {"WEBRIP"},
+		"HDTV":   {"HDTV"},
+		"DVD":    {"DVD", "NTSC", "PAL"},
+	},
+	"video_codec": {
+		"x264":  {"X264", "H264", "AVC"},
+		"x265":  {"X265", "H265", "HEVC"},
+		"MPEG2": {"MPEG2"},
+		"AV1":   {"AV1"},
+		"VP9":   {"VP9"},
+	},
+	"audio_codec": {
+		"DTS-HD MA": {"DTS-HD", "DTSHD"},
+		"DTS":       {"DTS"},
+		"TrueHD":    {"TRUEHD"},
+		"Atmos":     {"ATMOS"},
+		"AC3":       {"AC3", "DDP", "EAC3"},
+		"AAC":       {"AAC"},
+		"FLAC":      {"FLAC"},
+		"Opus":      {"OPUS"},
+		"MP3":       {"MP3"},
+	},
+	"hdr": {
+		"Dolby Vision": {"DV", "DOLBY VISION"},
+		"HDR10+":       {"HDR10+"},
+		"HDR":          {"HDR"},
+	},
+}
+
+// ExtractMediaInfo parses encoding metadata from a raw filename.
+func ExtractMediaInfo(filename string) MediaInfo {
+	upper := strings.ToUpper(filename)
+	info := MediaInfo{}
+
+	for category, entries := range mediaMapping {
+		for label, tokens := range entries {
+			for _, token := range tokens {
+				if strings.Contains(upper, token) {
+					switch category {
+					case "source":
+						info.Source = label
+					case "video_codec":
+						info.VideoCodec = label
+					case "audio_codec":
+						info.AudioCodec = label
+					case "hdr":
+						info.HDR = label
+					}
+					goto nextCategory
+				}
+			}
+		}
+	nextCategory:
+	}
+
+	// Resolution
+	resRe := regexp.MustCompile(`(2160|1080|720|480)[pPiI]`)
+	if m := resRe.FindStringSubmatch(filename); m != nil {
+		info.Resolution = m[0]
+	}
+
+	return info
+}
+
+// SanitizeForPath replaces characters that are invalid in filesystem paths.
+func SanitizeForPath(s string) string {
+	invalid := `<>:"/\|?*`
+	for _, c := range invalid {
+		s = strings.ReplaceAll(s, string(c), "")
+	}
+	// Collapse multiple spaces / dots
+	s = regexp.MustCompile(`\.{2,}`).ReplaceAllString(s, ".")
+	s = regexp.MustCompile(` {2,}`).ReplaceAllString(s, " ")
+	return strings.TrimSpace(s)
+}
+
+// IsChinesePercentageSufficient reports whether at least pct% of runes in s
+// are CJK unified ideographs.
+func IsChinesePercentageSufficient(s string, pct float64) bool {
+	if s == "" {
+		return false
+	}
+	total := 0
+	chinese := 0
+	for _, r := range s {
+		total++
+		if r >= 0x4E00 && r <= 0x9FFF {
+			chinese++
+		}
+	}
+	if total == 0 {
+		return false
+	}
+	return float64(chinese)/float64(total) >= pct/100.0
+}
+
+// ToSimplifiedMax is a placeholder for CJK simplification.
+// Full conversion requires an external library; here we just pass through.
+func ToSimplifiedMax(s string) string {
+	return s
+}
+
+// DivideByYear splits a title string that might embed a year like "Title (2023)"
+// into title and year components.
+func DivideByYear(s string) (title string, year int) {
+	re := regexp.MustCompile(`^(.*?)\s*\((\d{4})\)\s*$`)
+	if m := re.FindStringSubmatch(s); m != nil {
+		if y, err := strconv.Atoi(m[2]); err == nil {
+			return strings.TrimSpace(m[1]), y
+		}
+	}
+	return strings.TrimSpace(s), 0
+}

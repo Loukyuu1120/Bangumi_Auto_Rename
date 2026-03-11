@@ -1,27 +1,53 @@
-FROM python:3.12-slim-bullseye
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1 – Build
+# ─────────────────────────────────────────────────────────────────────────────
+FROM golang:1.22-alpine AS builder
 
-ENV TZ=Asia/Shanghai \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+# git is needed by `go mod download` for VCS-based dependencies
+RUN apk add --no-cache git
 
-WORKDIR /Bangumi_Auto_Rename
+WORKDIR /build
 
-COPY requirements_docker.txt ./
+# Download dependencies first so Docker can cache this layer independently
+# from source-code changes.
+COPY go_app/go.mod go_app/go.sum ./
+RUN go mod download
 
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        git \
-        python-is-python3 \
-        libnss3 libnspr4 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
-        libdrm2 libatspi2.0-0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
-        libgbm1 libxkbcommon0 libasound2 libpango-1.0-0 libcairo2 && \
-    python -m pip install --upgrade pip && \
-    pip install -r requirements_docker.txt && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+# Copy the full Go application source
+COPY go_app/ .
 
-COPY . /Bangumi_Auto_Rename
+# Build a fully static binary:
+#   CGO_ENABLED=0  – no C runtime dependency
+#   -s -w          – strip debug info (reduces binary size ~30 %)
+RUN CGO_ENABLED=0 GOOS=linux go build \
+        -ldflags="-s -w" \
+        -o /bangumi_auto_rename \
+        .
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 2 – Runtime
+# ─────────────────────────────────────────────────────────────────────────────
+FROM alpine:3.19
+
+# ca-certificates – required for outbound HTTPS calls (TMDB, OpenAI, Gemini …)
+# tzdata          – required so the TZ env var is honoured
+RUN apk add --no-cache ca-certificates tzdata
+
+ENV TZ=Asia/Shanghai
+
+# Persistent data directory (config, task records, logs).
+# Mount a host volume here so settings survive container re-creates.
+VOLUME ["/Bangumi_Auto_Rename/data"]
+
+WORKDIR /app
+
+# Copy the compiled binary from the builder stage
+COPY --from=builder /bangumi_auto_rename ./bangumi_auto_rename
+
+# Copy the static web UI (index.html, app.js, …)
+COPY go_app/static ./static
 
 EXPOSE 5999
 
-CMD ["sh", "-c", "pwd && ls /Bangumi_Auto_Rename && python3 -m src.start"]
+ENTRYPOINT ["/app/bangumi_auto_rename"]
+CMD ["--data", "/Bangumi_Auto_Rename/data", "--static", "/app/static"]

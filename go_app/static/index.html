@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>番剧自动重命名</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+:root{--main:#d64d4d;--dark:#b83c3c;--light:#f9ecec;}
+*,*::before,*::after{box-sizing:border-box;}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#f5f5f5;overflow:hidden;height:100vh;display:flex;flex-direction:column;margin:0;}
+.btn-red{background:var(--main);color:#fff;border-radius:9999px;padding:5px 15px;font-size:13px;cursor:pointer;border:none;transition:background .15s;white-space:nowrap;}
+.btn-red:hover{background:var(--dark);}
+.btn-outline{background:transparent;color:var(--main);border:1.5px solid var(--main);border-radius:9999px;padding:4px 13px;font-size:12px;cursor:pointer;transition:.15s;white-space:nowrap;}
+.btn-outline:hover{background:var(--light);}
+.btn-gray{background:#e5e7eb;color:#374151;border-radius:9999px;padding:5px 15px;font-size:13px;cursor:pointer;border:none;white-space:nowrap;}
+.btn-gray:hover{background:#d1d5db;}
+input[type=text],input[type=number],input[type=password],select,textarea{border:1.5px solid #d1d5db;border-radius:8px;padding:6px 10px;font-size:13px;outline:none;width:100%;background:#fff;transition:border-color .15s;}
+input:focus,select:focus,textarea:focus{border-color:var(--main);}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:50;display:flex;align-items:center;justify-content:center;}
+.modal-box{background:#fff;border-radius:12px;padding:24px;width:600px;max-width:96

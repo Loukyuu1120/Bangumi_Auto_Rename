@@ -2,7 +2,10 @@ version: "3.9"
 
 services:
   bangumi-auto-rename:
-    image: loukyuu1120/bangumi-auto-rename:web
+    image: loukyuu1120/bangumi-auto-rename:v2
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: bangumi-auto-rename
     ports:
       - "5999:5999"
@@ -12,4 +15,4 @@ services:
     environment:
       - HTTP_PROXY=http://192.168.0.1:7890
       - HTTPS_PROXY=http://192.168.0.1:7890
-    restart: unless-stopped
+    restart: always
