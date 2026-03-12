@@ -10,6 +10,8 @@ const S = {
   configData: {},
   logLines: [],
   autoRefreshTimer: null,
+  sortBy: "processed_at",
+  sortOrder: "desc",
   _monitorPathEditIndex: null,
   _secondaryRules: null,
   _lastCheckedIndex: null,
@@ -179,12 +181,29 @@ function changePageSize() {
   loadTasks();
 }
 
+function changeTaskSort() {
+  const sortByEl = document.getElementById("sortBySelect");
+  const sortOrderEl = document.getElementById("sortOrderSelect");
+  if (sortByEl) S.sortBy = sortByEl.value || "processed_at";
+  if (sortOrderEl) S.sortOrder = sortOrderEl.value || "desc";
+  S.page = 1;
+  loadTasks();
+}
+
 async function loadTasks() {
   const text = document.getElementById("searchText").value;
   const status = document.getElementById("filterStatus").value;
+  const sortByEl = document.getElementById("sortBySelect");
+  const sortOrderEl = document.getElementById("sortOrderSelect");
+
+  if (sortByEl && sortByEl.value) S.sortBy = sortByEl.value;
+  if (sortOrderEl && sortOrderEl.value) S.sortOrder = sortOrderEl.value;
+
   const qs = new URLSearchParams({
     text,
     status,
+    sort_by: S.sortBy,
+    sort_order: S.sortOrder,
     page: S.page,
     page_size: S.pageSize,
   });
@@ -196,6 +215,12 @@ async function loadTasks() {
   }
 
   S.totalItems = data.total;
+  if (data.sort_by) S.sortBy = data.sort_by;
+  if (data.sort_order) S.sortOrder = data.sort_order;
+
+  if (sortByEl) sortByEl.value = S.sortBy;
+  if (sortOrderEl) sortOrderEl.value = S.sortOrder;
+
   renderTaskTable(data.items || []);
   renderPagination(data.total, data.page, data.page_size);
   document.getElementById("totalCount").textContent = `共 ${data.total} 条`;
@@ -1551,6 +1576,11 @@ document.addEventListener("DOMContentLoaded", () => {
   // Auto-refresh stats every 30 seconds
   setInterval(refreshStats, 30000);
   // Auto-refresh task table every 15 seconds when tasks tab is active
+  const sortByEl = document.getElementById("sortBySelect");
+  const sortOrderEl = document.getElementById("sortOrderSelect");
+  if (sortByEl && !sortByEl.value) sortByEl.value = S.sortBy;
+  if (sortOrderEl && !sortOrderEl.value) sortOrderEl.value = S.sortOrder;
+
   setInterval(() => {
     const pane = document.getElementById("pane-tasks");
     if (pane && pane.style.display !== "none") loadTasks();

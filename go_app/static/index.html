@@ -186,6 +186,13 @@ input[type=checkbox].chk{width:15px;height:15px;accent-color:var(--main);cursor:
       <option value="processing">处理中</option>
       <option value="ignored">忽略</option>
     </select>
+    <select id="sortBySelect" onchange="changeTaskSort()">
+      <option value="processed_at" selected>按处理时间</option>
+    </select>
+    <select id="sortOrderSelect" onchange="changeTaskSort()">
+      <option value="desc" selected>最新优先</option>
+      <option value="asc">最早优先</option>
+    </select>
     <select id="pageSizeSelect" onchange="changePageSize()">
       <option value="50">50条/页</option>
       <option value="100" selected>100条/页</option>

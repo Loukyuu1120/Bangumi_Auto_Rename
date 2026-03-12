@@ -111,10 +111,12 @@ func (h *Handler) registerRoutes(mux *http.ServeMux) {
 func (h *Handler) handleTasks(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		// Query params: text, status, season, page, page_size
+		// Query params: text, status, season, sort_by, sort_order, page, page_size
 		text := r.URL.Query().Get("text")
 		status := r.URL.Query().Get("status")
 		seasonStr := r.URL.Query().Get("season")
+		sortBy := strings.TrimSpace(r.URL.Query().Get("sort_by"))
+		sortOrder := strings.TrimSpace(r.URL.Query().Get("sort_order"))
 		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 		pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
 
@@ -132,7 +134,8 @@ func (h *Handler) handleTasks(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		all := h.store.ListTasksFiltered(text, status, season)
+		ascending := strings.EqualFold(sortOrder, "asc")
+		all := h.store.ListTasksFiltered(text, status, season, sortBy, ascending)
 		total := len(all)
 
 		// Paginate
@@ -147,10 +150,12 @@ func (h *Handler) handleTasks(w http.ResponseWriter, r *http.Request) {
 		page_data := all[start:end]
 
 		jsonOK(w, map[string]interface{}{
-			"total":     total,
-			"page":      page,
-			"page_size": pageSize,
-			"items":     page_data,
+			"total":      total,
+			"page":       page,
+			"page_size":  pageSize,
+			"sort_by":    sortBy,
+			"sort_order": sortOrder,
+			"items":      page_data,
 		})
 
 	default:

@@ -278,10 +278,11 @@ func (s *Store) ListTasks() []*TaskRecord {
 
 // ListTasksFiltered returns tasks matching optional text / status / season filters.
 // All filter strings are case-insensitive.  Empty strings mean "no filter".
-func (s *Store) ListTasksFiltered(text, status string, season *int) []*TaskRecord {
+func (s *Store) ListTasksFiltered(text, status string, season *int, sortBy string, ascending bool) []*TaskRecord {
 	all := s.ListTasks()
 	text = strings.ToLower(strings.TrimSpace(text))
 	status = strings.TrimSpace(status)
+	sortBy = strings.TrimSpace(sortBy)
 
 	var out []*TaskRecord
 	for _, r := range all {
@@ -303,6 +304,22 @@ func (s *Store) ListTasksFiltered(text, status string, season *int) []*TaskRecor
 		}
 		out = append(out, r)
 	}
+
+	if sortBy == "processed_at" {
+		sort.SliceStable(out, func(i, j int) bool {
+			if out[i].ProcessedAt == out[j].ProcessedAt {
+				if ascending {
+					return out[i].UUID < out[j].UUID
+				}
+				return out[i].UUID > out[j].UUID
+			}
+			if ascending {
+				return out[i].ProcessedAt < out[j].ProcessedAt
+			}
+			return out[i].ProcessedAt > out[j].ProcessedAt
+		})
+	}
+
 	return out
 }
 

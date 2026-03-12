@@ -602,13 +602,21 @@ type MediaInfo struct {
 var mediaMapping = map[string]map[string][]string{
 	"source": {
 		"Remux":  {"REMUX"},
-		"BluRay": {"BLURAY", " BD ", " BD-", ".BD."},
+		"BluRay": {"BLURAY", "BLU-RAY", " BD ", " BD-", ".BD.", "BDMV"},
 		"BDRip":  {"BDRIP"},
-		"UHD-BD": {"UHD-BD", "UHD BLURAY"},
-		"WEB-DL": {"WEB-DL", "WEBDL"},
-		"WEBRip": {"WEBRIP"},
+		"UHD-BD": {"UHD-BD", "UHD BLURAY", "UHD.BLURAY", "ULTRAHD BLURAY", "2160P BLURAY"},
+		"WEB-DL": {"WEB-DL", "WEBDL", "WEB DL"},
+		"WEBRip": {"WEBRIP", "WEB-RIP", "WEB RIP"},
 		"HDTV":   {"HDTV"},
+		"DVDRip": {"DVDRIP"},
 		"DVD":    {"DVD", "NTSC", "PAL"},
+		"HDCam":  {"HDCAM"},
+		"CAM":    {" CAM ", ".CAM.", "-CAM"},
+		"TS":     {" TELESYNC ", ".TS.", "-TS", "HDTS"},
+		"TC":     {" TELECINE ", ".TC.", "-TC"},
+		"PDTV":   {"PDTV"},
+		"SATRip": {"SATRIP"},
+		"TVRip":  {"TVRIP"},
 	},
 	"video_codec": {
 		"x264":  {"X264", "H264", "AVC"},
@@ -616,22 +624,47 @@ var mediaMapping = map[string]map[string][]string{
 		"MPEG2": {"MPEG2"},
 		"AV1":   {"AV1"},
 		"VP9":   {"VP9"},
+		"VC-1":  {"VC-1", "VC1"},
+		"Hi10P": {"HI10P"},
+		"10bit": {"10BIT", "YUV420P10", "MAIN10"},
+		"8bit":  {"8BIT"},
 	},
 	"audio_codec": {
-		"DTS-HD MA": {"DTS-HD", "DTSHD"},
-		"DTS":       {"DTS"},
-		"TrueHD":    {"TRUEHD"},
-		"Atmos":     {"ATMOS"},
-		"AC3":       {"AC3", "DDP", "EAC3"},
-		"AAC":       {"AAC"},
-		"FLAC":      {"FLAC"},
-		"Opus":      {"OPUS"},
-		"MP3":       {"MP3"},
+		"TrueHD Atmos": {"TRUEHD.ATMOS", "TRUEHD ATMOS", "TRUEHD+ATMOS", "ATMOS TRUEHD"},
+		"DDP Atmos":    {"DDP.ATMOS", "DDP ATMOS", "EAC3 ATMOS", "E-AC-3 ATMOS", "DD+.ATMOS", "DD+ ATMOS"},
+		"DTS:X":        {"DTS:X", "DTSX"},
+		"DTS-HD MA":    {"DTS-HD.MA", "DTS-HD MA", "DTSHD.MA", "DTSHD MA", "DTS-HD", "DTSHD"},
+		"DTS-HD HRA":   {"DTS-HRA", "DTS HD HRA", "DTS-HD HRA"},
+		"DTS-ES":       {"DTS-ES"},
+		"DTS":          {"DTS"},
+		"TrueHD":       {"TRUEHD"},
+		"DDP":          {"DDP", "EAC3", "E-AC-3", "DD+", "DDPLUS"},
+		"AC3":          {"AC3", "DD ", "DD5", "DD2"},
+		"AAC":          {"AAC"},
+		"FLAC":         {"FLAC"},
+		"Opus":         {"OPUS"},
+		"MP3":          {"MP3"},
+		"PCM":          {"LPCM", "PCM"},
 	},
 	"hdr": {
-		"Dolby Vision": {"DV", "DOLBY VISION"},
+		"Dolby Vision": {"DOLBY VISION", "DOVI", "DV"},
 		"HDR10+":       {"HDR10+"},
+		"HDR10":        {"HDR10"},
+		"HLG":          {"HLG"},
 		"HDR":          {"HDR"},
+	},
+	"quality_tag": {
+		"Proper":         {"PROPER"},
+		"REPACK":         {"REPACK"},
+		"RERIP":          {"RERIP"},
+		"Hybrid":         {"HYBRID"},
+		"Extended":       {"EXTENDED"},
+		"Director's Cut": {"DIRECTOR'S CUT", "DIRECTORS CUT", "DC"},
+		"Criterion":      {"CRITERION"},
+		"Dubbed":         {"DUBBED"},
+		"Dual Audio":     {"DUAL AUDIO", "DUALAUDIO"},
+		"Multi Audio":    {"MULTI AUDIO", "MULTIAUDIO"},
+		"Atmos":          {"ATMOS"},
 	},
 }
 
@@ -641,30 +674,38 @@ func ExtractMediaInfo(filename string) MediaInfo {
 	info := MediaInfo{}
 
 	for category, entries := range mediaMapping {
+		var detected []string
 		for label, tokens := range entries {
 			for _, token := range tokens {
-				if strings.Contains(upper, token) {
-					switch category {
-					case "source":
-						info.Source = label
-					case "video_codec":
-						info.VideoCodec = label
-					case "audio_codec":
-						info.AudioCodec = label
-					case "hdr":
-						info.HDR = label
-					}
-					goto nextCategory
+				if strings.Contains(upper, strings.ToUpper(token)) {
+					detected = append(detected, label)
+					break
 				}
 			}
 		}
-	nextCategory:
+
+		if len(detected) == 0 {
+			continue
+		}
+
+		switch category {
+		case "source":
+			info.Source = detected[0]
+		case "video_codec":
+			info.VideoCodec = strings.Join(detected, " ")
+		case "audio_codec":
+			info.AudioCodec = strings.Join(detected, " ")
+		case "hdr":
+			info.HDR = strings.Join(detected, " ")
+		case "quality_tag":
+			info.QualityTag = strings.Join(detected, " ")
+		}
 	}
 
 	// Resolution
-	resRe := regexp.MustCompile(`(2160|1080|720|480)[pPiI]`)
+	resRe := regexp.MustCompile(`(?i)(2160|1080|720|576|480)[pPiI]|4K|8K`)
 	if m := resRe.FindStringSubmatch(filename); m != nil {
-		info.Resolution = m[0]
+		info.Resolution = strings.ToLower(strings.ReplaceAll(m[0], "I", "i"))
 	}
 
 	// FPS
@@ -674,9 +715,17 @@ func ExtractMediaInfo(filename string) MediaInfo {
 	}
 
 	// Channels
-	chanRe := regexp.MustCompile(`([257]\.[01])`)
+	chanRe := regexp.MustCompile(`(?i)\b([1-9]\.\d)\b`)
 	if m := chanRe.FindStringSubmatch(filename); m != nil {
 		info.Channels = m[1]
+	}
+
+	// Common audio+channel combined forms when plain channel regex misses
+	if info.Channels == "" {
+		audioChanRe := regexp.MustCompile(`(?i)\b(?:DDP|DD\+|EAC3|E-AC-3|AC3|AAC|DTS(?:[-.: ]?HD)?|TRUEHD|FLAC|OPUS|PCM)[ ._-]*([1-9]\.\d)\b`)
+		if m := audioChanRe.FindStringSubmatch(filename); m != nil {
+			info.Channels = m[1]
+		}
 	}
 
 	// Release group
@@ -685,8 +734,9 @@ func ExtractMediaInfo(filename string) MediaInfo {
 		grp := m[1]
 		upperGrp := strings.ToUpper(grp)
 		if upperGrp != "DL" && upperGrp != "RIP" && upperGrp != "H264" && upperGrp != "H265" &&
-			upperGrp != "HEVC" && upperGrp != "AAC" && upperGrp != "MKV" && upperGrp != "MP4" &&
-			upperGrp != "STRM" && upperGrp != "ASS" {
+			upperGrp != "HEVC" && upperGrp != "AAC" && upperGrp != "AC3" && upperGrp != "DDP" &&
+			upperGrp != "TRUEHD" && upperGrp != "DTS" && upperGrp != "ATMOS" &&
+			upperGrp != "MKV" && upperGrp != "MP4" && upperGrp != "STRM" && upperGrp != "ASS" {
 			info.Group = grp
 		}
 	}

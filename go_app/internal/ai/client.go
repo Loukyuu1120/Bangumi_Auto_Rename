@@ -132,23 +132,52 @@ func (c *Client) AnalyzeMetadata(contextData map[string]interface{}) *MetadataRe
 		filesStr.WriteString("- " + f + "\n")
 	}
 
-	prompt := fmt.Sprintf(`你是媒体元数据提取专家。分析以下信息并提取TMDB搜索用的核心元数据。
+	prompt := fmt.Sprintf(`你是一个专业的媒体元数据分析专家。请分析以下文件路径信息，提取用于 TMDB 搜索的核心元数据。
 
-主要名称: %s
-完整路径: %s
-包含文件:
+主要分析名称:
+%s
+
+完整路径参考 (包含潜在的ID或父级目录信息):
+%s
+
+包含的文件:
 %s
 
 请返回纯JSON（不含Markdown标记），格式：
 {"name":"...","year":0,"is_movie":false,"tmdb_id":"","confidence":"High|Medium|Low"}
 
-规则：
-1. 检查路径中的{tmdb-xxxx}或[tmdbid=xxxx]标记，有则填入tmdb_id
-2. 移除版本修饰词、制作组、分辨率等噪音，保留官方标题
-3. 禁止翻译标题（中文保留中文，日文保留日文）
-4. 年份优先取括号内数字`, folderName, fullPath, filesStr.String())
+请严格遵守以下步骤进行推断：
 
-	systemPrompt := "你是严格的媒体元数据提取器，只输出纯JSON，禁止Markdown。"
+1. 提取 TMDB ID（最高优先级）：
+   - 仔细检查完整路径参考和文件名
+   - 查找 {tmdb-xxxx}、[tmdbid=xxxx]、tmdb:xxxx、tmdb=xxxx 等标记
+   - 如果发现，优先填入 tmdb_id，这比推断名字更准确
+
+2. 清洗官方名称（Official Name）：
+   - 从主要分析名称中提取核心标题
+   - 必须移除：版本修饰词（如“新编集版”“重制版”“Director's Cut”）、制作组信息、分辨率、语种、片源、编码、音频格式等噪音
+   - 保留原名：如果是中文名，保留中文；如果是英文，保留英文；如果是日文，保留日文
+   - 绝对禁止将中文标题翻译成英文，也不要凭空意译标题
+   - 如果标题里混有季号、集号、SxxExx、分辨率、WEB-DL、BluRay、x264、x265、HEVC、AAC、DDP、Atmos 等技术信息，必须剔除
+
+3. 确定年份：
+   - 优先查找圆括号中的年份，如 (2024)
+   - 如果主要分析名称里没有，再去完整路径参考中查找
+   - 只有在高度确定时才填写 year，否则填 0
+
+4. 判断类型：
+   - 如果明显是单文件电影、剧场版、Movie、Film，倾向 is_movie=true
+   - 如果包含季号、SxxExx、第X季、多集文件、Season 目录，倾向 is_movie=false
+   - 无法确定时优先按剧集处理，即 is_movie=false
+
+5. 置信度：
+   - 信息非常明确时返回 High
+   - 有一定推断但基本可信时返回 Medium
+   - 依据不足时返回 Low
+
+只输出纯 JSON，不要输出解释、不要输出 Markdown、不要输出代码块。`, folderName, fullPath, filesStr.String())
+
+	systemPrompt := "你是一个严格的媒体文件元数据提取器。你的任务是从文件路径中提取用于数据库搜索的标准名称、年份和ID。禁止意译标题，必须移除噪音词。你只输出纯 JSON 格式的结果，不要包含 Markdown 标记。"
 	resp, err := c.chatComplete(systemPrompt, prompt, 0.1)
 	if err != nil {
 		logger.Warn("[AI搜索] 请求失败: %v", err)
