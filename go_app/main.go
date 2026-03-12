@@ -112,11 +112,14 @@ func main() {
 			})
 		}
 
-		if err := svc.StartWatchers(watchPaths, excludeDirs, cfgSnap.MonitorMode); err != nil {
-			log.Warn("文件监控启动失败: %v", err)
-		} else {
-			log.Info("文件监控已启动，监控目录数: %d", len(watchPaths))
-		}
+		log.Info("文件监控启动中，监控目录数: %d", len(watchPaths))
+		go func() {
+			if err := svc.StartWatchers(watchPaths, excludeDirs, cfgSnap.MonitorMode); err != nil {
+				log.Warn("文件监控启动失败: %v", err)
+			} else {
+				log.Info("文件监控已启动，监控目录数: %d", len(watchPaths))
+			}
+		}()
 	} else {
 		log.Info("文件监控未启用（可在设置页面中开启）")
 	}

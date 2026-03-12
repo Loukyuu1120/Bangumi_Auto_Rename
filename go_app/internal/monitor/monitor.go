@@ -6,8 +6,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -17,17 +22,10 @@ import (
 	"bangumi_auto_rename/internal/rename"
 )
 
-// maxWatchDepth is the maximum number of directory levels below a configured
-// root that will be pre-registered with fsnotify on startup, and the cap used
-// when dynamically adding newly-created directories at runtime.
-const maxWatchDepth = 4
-
-// maxWatchersPerRoot is the maximum number of sub-directories that will be
-// added to fsnotify per monitored root path.  Each watch consumes one OS file
-// descriptor; this cap prevents "too many open files" on very large trees.
-// Directories beyond the cap are still handled via dynamic detection in
-// watchLoop when new sub-directories are created at runtime.
-const maxWatchersPerRoot = 300
+const (
+	PrioritySystem = 1
+	PriorityManual = 10
+)
 
 // extractTMDBIDFromPath extracts TMDB ID from file path using the same logic as in process.go
 func extractTMDBIDFromPath(path string) string {
@@ -44,7 +42,7 @@ func extractTMDBIDFromPath(path string) string {
 }
 
 // pollInterval is the interval between directory scans in compatibility (polling) mode.
-const pollInterval = 3 * time.Second
+const pollInterval = 2 * time.Second
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -79,15 +77,12 @@ func (o TaskOptions) toRenameOpts() rename.TaskOptions {
 
 // QueueItem is a single pending rename job.
 type QueueItem struct {
-	UUID    string      `json:"uuid"`
-	Path    string      `json:"path"`
-	Options TaskOptions `json:"options"`
-	AddedAt time.Time   `json:"added_at"`
-}
-
-// QueueSnapshot is used to persist / restore the queue between process restarts.
-type QueueSnapshot struct {
-	Items []QueueItem `json:"items"`
+	UUID     string      `json:"uuid"`
+	Path     string      `json:"path"`
+	Options  TaskOptions `json:"options"`
+	AddedAt  time.Time   `json:"added_at"`
+	Priority int         `json:"priority"`
+	Seq      uint64      `json:"seq"`
 }
 
 // PathConfig describes a single monitored directory and its per-path overrides.
@@ -115,14 +110,12 @@ type Service struct {
 	// pending work queue (protected by mu)
 	queue []QueueItem
 
-	// stable-file detection: path → pending entry (size + opts)
-	pendingFiles  map[string]pendingEntry
-	pendingFileMu sync.Mutex
-
 	// fsnotify watcher (nil when monitoring is disabled / in polling mode)
 	watcher     *fsnotify.Watcher
 	watchedDirs []PathConfig
 	excludeDirs []string
+	// compiled exclude regex patterns (case-insensitive)
+	excludePatterns []*regexp.Regexp
 
 	// pollCancel cancels the pollLoop goroutine (compatibility mode)
 	pollCancel context.CancelFunc
@@ -133,23 +126,15 @@ type Service struct {
 	// pause / resume
 	paused bool
 
-	// total items expected in the current batch (for progress reporting)
-	batchTotal int
+	// logical pending count (mirrors Python monitor_service.logical_pending_count)
+	logicalPendingCount int
+	countMu             sync.Mutex
+
+	seq uint64
 
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// ensures Init is only run once
-	once sync.Once
-}
-
-// pendingEntry holds the last-seen file size together with the TaskOptions
-// that were determined when the file-system event was first observed.
-// Keeping opts here ensures that per-directory is_anime overrides are not
-// lost between the watchLoop and the stabilityChecker goroutine.
-type pendingEntry struct {
-	size int64
-	opts TaskOptions
 }
 
 var (
@@ -172,14 +157,12 @@ func InitService(processor *rename.Processor, store *rename.Store, dataDir strin
 			store:        store,
 			log:          logger.Get(),
 			dataDir:      dataDir,
-			pendingFiles: make(map[string]pendingEntry),
 			workCh:       make(chan struct{}, 512),
 			ctx:          ctx,
 			cancel:       cancel,
 		}
 		globalService = svc
 		go svc.worker()
-		go svc.stabilityChecker()
 	})
 	return globalService
 }
@@ -210,29 +193,52 @@ func (s *Service) StartWatchers(paths []PathConfig, excludeDirs []string, mode .
 
 	s.watchedDirs = paths
 	s.excludeDirs = excludeDirs
+	s.excludePatterns = compileExcludePatterns(excludeDirs, s.log)
 
 	if len(paths) == 0 {
 		s.log.Info("[监控] 无监控目录配置，跳过启动")
 		return nil
 	}
 
-	// Determine monitoring mode
+	// Determine monitoring mode (mirror Python behavior)
 	watchMode := "compatibility"
 	if len(mode) > 0 && mode[0] != "" {
-		watchMode = mode[0]
+		watchMode = strings.ToLower(strings.TrimSpace(mode[0]))
 	}
 
-	if watchMode == "native" {
-		return s.startNativeWatchers(paths)
+	usePolling := watchMode == "compatibility"
+	if !usePolling && runtime.GOOS != "linux" {
+		s.log.Info("[监控] 当前系统不支持递归原生监听，回退到轮询模式")
+		usePolling = true
+	}
+	if !usePolling && runtime.GOOS == "linux" {
+		limit := getInotifyLimit()
+		s.log.Info("[监控] 当前 max_user_watches: %d", limit)
+		totalFiles := 0
+		for _, pc := range paths {
+			totalFiles += countDirectoryFiles(pc.Path, 10000)
+		}
+		if totalFiles > int(float64(limit)*0.8) {
+			s.log.Warn("[监控] 文件数量(%d) 接近系统限制(%d)，强制使用轮询模式", totalFiles, limit)
+			usePolling = true
+		}
 	}
 
-	// Default: compatibility (polling) mode – mirrors Python's PollingObserver.
-	// This is more reliable as it works at any directory depth and doesn't
-	// depend on OS-level inotify/kqueue limits.
-	s.log.Info("[监控] 使用兼容模式 (轮询)，与 Python 版行为一致")
-	pollCtx, pollCancel := context.WithCancel(s.ctx)
-	s.pollCancel = pollCancel
-	go s.pollLoop(pollCtx, paths)
+	if usePolling {
+		s.log.Info("[监控] 使用兼容模式 (轮询)，与 Python 版行为一致")
+		pollCtx, pollCancel := context.WithCancel(s.ctx)
+		s.pollCancel = pollCancel
+		go s.pollLoop(pollCtx, paths)
+		s.log.Info("[监控] 服务已启动，模式: [兼容模式(轮询)]，监控 %d 个目录", len(paths))
+		return nil
+	}
+
+	if err := s.startNativeWatchers(paths); err != nil {
+		s.log.Warn("[监控] 原生模式启动失败，回退到轮询: %v", err)
+		pollCtx, pollCancel := context.WithCancel(s.ctx)
+		s.pollCancel = pollCancel
+		go s.pollLoop(pollCtx, paths)
+	}
 	return nil
 }
 
@@ -243,31 +249,59 @@ func (s *Service) startNativeWatchers(paths []PathConfig) error {
 		return err
 	}
 
+	monitoredCount := 0
 	for _, pc := range paths {
 		if _, err := os.Stat(pc.Path); err != nil {
 			s.log.Warn("[监控] 路径不存在，跳过: %s", pc.Path)
 			continue
 		}
-		if err := w.Add(pc.Path); err != nil {
-			s.log.Warn("[监控] 添加监控失败 %s: %v", pc.Path, err)
-			continue
+		if runtime.GOOS == "linux" {
+			_ = filepath.WalkDir(pc.Path, func(path string, d fs.DirEntry, walkErr error) error {
+				if walkErr != nil {
+					return nil
+				}
+				if !d.IsDir() {
+					return nil
+				}
+				if s.shouldExclude(path) {
+					return filepath.SkipDir
+				}
+				if addErr := w.Add(path); addErr != nil {
+					s.log.Warn("[监控] 添加目录失败 %s: %v", path, addErr)
+					return nil
+				}
+				monitoredCount++
+				return nil
+			})
+			s.log.Info("[监控] 已添加监控目录: %s", pc.Path)
+		} else {
+			if err := w.Add(pc.Path); err != nil {
+				s.log.Warn("[监控] 添加监控失败 %s: %v", pc.Path, err)
+				continue
+			}
+			monitoredCount++
+			s.log.Info("[监控] 已添加监控目录: %s", pc.Path)
 		}
-		s.log.Info("[监控] 开始监控 (原生模式): %s", pc.Path)
+	}
 
-		count := 0
-		s.addDirsRecursive(w, pc.Path, 0, &count)
-		if count > 0 {
-			s.log.Info("[监控] 已添加 %d 个子目录: %s", count, pc.Path)
-		}
+	if monitoredCount == 0 {
+		_ = w.Close()
+		s.log.Warn("[监控] 没有有效的监控目录，服务未启动监听")
+		return nil
 	}
 
 	s.watcher = w
 	go s.watchLoop(w, paths)
+	s.log.Info("[监控] 服务已启动，模式: [高效模式(原生)]，监控 %d 个目录", monitoredCount)
 	return nil
 }
 
 // Stop shuts down the service worker and any active watchers.
 func (s *Service) Stop() {
+	if err := s.SaveQueue(); err != nil {
+		s.log.Warn("[监控] 自动保存队列失败: %v", err)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -314,35 +348,25 @@ func (s *Service) IsPaused() bool {
 // AddTask enqueues a single file for processing with the provided options.
 // Returns the UUID assigned to the task.
 func (s *Service) AddTask(path string, opts TaskOptions) string {
-	return s.AddTaskWithPriority(path, opts, false)
+	return s.AddTaskWithPriority(path, opts, PriorityManual, false)
 }
 
 // AddTaskWithID enqueues a task using a caller-supplied UUID so retries/edits
 // can reuse the existing task record instead of creating duplicates.
-func (s *Service) AddTaskWithID(id, path string, opts TaskOptions, priority bool) string {
+func (s *Service) AddTaskWithID(id, path string, opts TaskOptions, priority int, incrementCounter bool) string {
 	if id == "" {
 		id = uuid.New().String()
 	}
 	item := QueueItem{
-		UUID:    id,
-		Path:    path,
-		Options: opts,
-		AddedAt: time.Now(),
+		UUID:     id,
+		Path:     path,
+		Options:  opts,
+		AddedAt:  time.Now(),
+		Priority: priority,
+		Seq:      atomic.AddUint64(&s.seq, 1),
 	}
 
-	s.mu.Lock()
-	for i, q := range s.queue {
-		if q.UUID == id || q.Path == path {
-			s.queue = append(s.queue[:i], s.queue[i+1:]...)
-			break
-		}
-	}
-	if priority {
-		s.queue = append([]QueueItem{item}, s.queue...)
-	} else {
-		s.queue = append(s.queue, item)
-	}
-	s.mu.Unlock()
+	s.enqueue(item, incrementCounter)
 
 	// Non-blocking wake-up
 	select {
@@ -356,16 +380,17 @@ func (s *Service) AddTaskWithID(id, path string, opts TaskOptions, priority bool
 
 // AddTaskWithPriority enqueues a task. When priority is true, it is inserted
 // at the front of the queue.
-func (s *Service) AddTaskWithPriority(path string, opts TaskOptions, priority bool) string {
-	return s.AddTaskWithID("", path, opts, priority)
+func (s *Service) AddTaskWithPriority(path string, opts TaskOptions, priority int, incrementCounter bool) string {
+	return s.AddTaskWithID("", path, opts, priority, incrementCounter)
 }
 
 // RegisterBatchCount sets the expected total count for the current batch
 // (used for progress display in the UI).
 func (s *Service) RegisterBatchCount(n int) {
-	s.mu.Lock()
-	s.batchTotal = n
-	s.mu.Unlock()
+	s.countMu.Lock()
+	s.logicalPendingCount += n
+	s.countMu.Unlock()
+	s.log.Info("[计数器] 批量注册任务: +%d, 当前待处理: %d", n, s.logicalPendingCount)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -385,6 +410,12 @@ func (s *Service) QueueList() []QueueItem {
 	defer s.mu.Unlock()
 	out := make([]QueueItem, len(s.queue))
 	copy(out, s.queue)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Priority != out[j].Priority {
+			return out[i].Priority < out[j].Priority
+		}
+		return out[i].Seq < out[j].Seq
+	})
 	return out
 }
 
@@ -393,7 +424,30 @@ func (s *Service) ClearQueue() {
 	s.mu.Lock()
 	s.queue = s.queue[:0]
 	s.mu.Unlock()
+	s.countMu.Lock()
+	s.logicalPendingCount = 0
+	s.countMu.Unlock()
 	s.log.Info("[任务] 队列已清空")
+}
+
+func (s *Service) enqueue(item QueueItem, incrementCounter bool) {
+	s.mu.Lock()
+	s.queue = append(s.queue, item)
+	s.mu.Unlock()
+
+	if incrementCounter {
+		s.countMu.Lock()
+		s.logicalPendingCount++
+		s.countMu.Unlock()
+	}
+}
+
+func (s *Service) decrementLogicalCount() {
+	s.countMu.Lock()
+	if s.logicalPendingCount > 0 {
+		s.logicalPendingCount--
+	}
+	s.countMu.Unlock()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -401,25 +455,53 @@ func (s *Service) ClearQueue() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (s *Service) queueFilePath() string {
-	return filepath.Join(s.dataDir, "queue.json")
+	return filepath.Join(s.dataDir, "task", "saved_queue.json")
 }
 
 // SaveQueue persists the current queue to disk so it survives a restart.
 func (s *Service) SaveQueue() error {
 	s.mu.Lock()
-	snapshot := QueueSnapshot{Items: make([]QueueItem, len(s.queue))}
-	copy(snapshot.Items, s.queue)
+	if len(s.queue) == 0 {
+		s.mu.Unlock()
+		return nil
+	}
+	s.paused = true
+	items := make([]QueueItem, len(s.queue))
+	copy(items, s.queue)
+	s.queue = s.queue[:0]
 	s.mu.Unlock()
 
-	data, err := json.MarshalIndent(snapshot, "", "  ")
+	entries := make([]map[string]interface{}, 0, len(items))
+	for _, item := range items {
+		entry := map[string]interface{}{
+			"path":     item.Path,
+			"priority": item.Priority,
+			"options":  taskOptionsToMap(item.Options),
+		}
+		entries = append(entries, entry)
+	}
+
+	data, err := json.MarshalIndent(entries, "", "  ")
 	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(s.queueFilePath()), 0o755); err != nil {
 		return err
 	}
 	tmp := s.queueFilePath() + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.queueFilePath())
+	if err := os.Rename(tmp, s.queueFilePath()); err != nil {
+		return err
+	}
+
+	s.countMu.Lock()
+	s.logicalPendingCount = 0
+	s.countMu.Unlock()
+
+	s.log.Info("[任务保存] 已将 %d 个任务保存到磁盘", len(items))
+	return nil
 }
 
 // LoadQueue reads a previously persisted queue from disk and re-enqueues items.
@@ -432,25 +514,46 @@ func (s *Service) LoadQueue() error {
 		}
 		return err
 	}
-
-	var snapshot QueueSnapshot
-	if err := json.Unmarshal(data, &snapshot); err != nil {
+	var entries []map[string]interface{}
+	if err := json.Unmarshal(data, &entries); err != nil {
 		return err
 	}
 
-	_ = os.Remove(s.queueFilePath())
-
-	for _, item := range snapshot.Items {
-		s.mu.Lock()
-		s.queue = append(s.queue, item)
-		s.mu.Unlock()
-		select {
-		case s.workCh <- struct{}{}:
-		default:
+	countLoaded := 0
+	for _, entry := range entries {
+		path, _ := entry["path"].(string)
+		if path == "" {
+			continue
 		}
+		if _, statErr := os.Stat(path); statErr != nil {
+			continue
+		}
+		priority := PriorityManual
+		if p, ok := entry["priority"].(float64); ok {
+			priority = int(p)
+		}
+		opts := TaskOptions{}
+		if raw, ok := entry["options"].(map[string]interface{}); ok {
+			opts = taskOptionsFromMap(raw)
+		}
+
+		item := QueueItem{
+			UUID:     uuid.New().String(),
+			Path:     path,
+			Options:  opts,
+			AddedAt:  time.Now(),
+			Priority: priority,
+			Seq:      atomic.AddUint64(&s.seq, 1),
+		}
+		s.enqueue(item, false)
+		countLoaded++
 	}
 
-	s.log.Info("[任务] 已从磁盘恢复 %d 个队列任务", len(snapshot.Items))
+	_ = os.Remove(s.queueFilePath())
+	s.countMu.Lock()
+	s.logicalPendingCount += countLoaded
+	s.countMu.Unlock()
+	s.log.Info("[任务恢复] 成功恢复 %d 个任务", countLoaded)
 	return nil
 }
 
@@ -464,8 +567,8 @@ func (s *Service) HasSavedQueue() bool {
 // Polling-based watcher (compatibility mode)
 //
 // Mirrors Python's PollingObserver: periodically walks all monitored
-// directories at unlimited depth, detects new video files, and feeds them
-// through the same pendingFiles → stabilityChecker → AddTask pipeline.
+// directories at unlimited depth, detects new video files, and enqueues them
+// with system priority (matching Python's PollingObserver behavior).
 // ─────────────────────────────────────────────────────────────────────────────
 
 // pollLoop periodically scans all monitored directories for new video files.
@@ -512,26 +615,13 @@ func (s *Service) pollLoop(ctx context.Context, paths []PathConfig) {
 						}
 					}
 
-					// Add to pending for stability check
 					// Extract TMDB ID from path if present
 					if tmdbID := extractTMDBIDFromPath(filePath); tmdbID != "" {
 						opts.CusTMDBID = tmdbID
 					}
-					s.pendingFileMu.Lock()
-					s.pendingFiles[filePath] = pendingEntry{size: size, opts: opts}
-					s.pendingFileMu.Unlock()
-
-					s.log.Debug("[监控] 轮询检测到新文件: %s", filePath)
-				} else {
-					// Existing file — update size in pendingFiles if it changed
-					// (the stabilityChecker uses this to detect when writing stops)
-					s.pendingFileMu.Lock()
-					if _, isPending := s.pendingFiles[filePath]; isPending {
-						pe := s.pendingFiles[filePath]
-						pe.size = size
-						s.pendingFiles[filePath] = pe
-					}
-					s.pendingFileMu.Unlock()
+					_ = size
+					s.AddTaskWithPriority(filePath, opts, PrioritySystem, true)
+					s.log.Info("[监控] 轮询发现新文件: %s -> 加入队列 (系统优先)", filepath.Base(filePath))
 				}
 			}
 
@@ -588,7 +678,7 @@ func (s *Service) watchLoop(w *fsnotify.Watcher, paths []PathConfig) {
 			if !ok {
 				return
 			}
-			if event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename) == 0 {
+			if event.Op&(fsnotify.Create|fsnotify.Rename) == 0 {
 				continue
 			}
 
@@ -596,13 +686,22 @@ func (s *Service) watchLoop(w *fsnotify.Watcher, paths []PathConfig) {
 			// watcher so that files placed inside it are also detected.
 			if info, statErr := os.Stat(event.Name); statErr == nil && info.IsDir() {
 				if !s.shouldExclude(event.Name) {
-					if addErr := w.Add(event.Name); addErr == nil {
-						s.log.Debug("[监控] 动态监控新目录: %s", event.Name)
-						count := 0
-						s.addDirsRecursive(w, event.Name, 0, &count)
-					} else {
-						s.log.Warn("[监控] 动态添加目录失败 %s: %v", event.Name, addErr)
-					}
+					_ = filepath.WalkDir(event.Name, func(path string, d fs.DirEntry, err error) error {
+						if err != nil {
+							return nil
+						}
+						if !d.IsDir() {
+							return nil
+						}
+						if s.shouldExclude(path) {
+							return filepath.SkipDir
+						}
+						if addErr := w.Add(path); addErr != nil {
+							s.log.Warn("[监控] 动态添加目录失败 %s: %v", path, addErr)
+						}
+						return nil
+					})
+					s.log.Debug("[监控] 动态监控新目录: %s", event.Name)
 				}
 				continue
 			}
@@ -628,16 +727,8 @@ func (s *Service) watchLoop(w *fsnotify.Watcher, paths []PathConfig) {
 				opts.CusTMDBID = tmdbID
 			}
 
-			// Queue for stability check (don't process files still being written).
-			// Store opts alongside the size so the stabilityChecker can use them.
-			s.pendingFileMu.Lock()
-			info, err := os.Stat(event.Name)
-			if err == nil {
-				s.pendingFiles[event.Name] = pendingEntry{size: info.Size(), opts: opts}
-			}
-			s.pendingFileMu.Unlock()
-
-			s.log.Debug("[监控] 检测到文件变化: %s", event.Name)
+			s.AddTaskWithPriority(event.Name, opts, PrioritySystem, true)
+			s.log.Info("[监控] 捕获变更: %s -> 加入队列 (系统优先)", filepath.Base(event.Name))
 
 		case err, ok := <-w.Errors:
 			if !ok {
@@ -653,47 +744,37 @@ func buildTaskOptions(extras map[string]interface{}) TaskOptions {
 	if extras == nil {
 		return opts
 	}
-	if v, ok := extras["is_anime"]; ok {
-		if b, ok := v.(bool); ok {
-			opts.IsAnime = &b
-		}
-	}
-	if v, ok := extras["is_movie"]; ok {
-		if b, ok := v.(bool); ok {
-			opts.IsMovie = &b
-		}
-	}
-	if v, ok := extras["tv_rename_format"]; ok {
-		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-			if opts.ConfigOverrides == nil {
-				opts.ConfigOverrides = map[string]interface{}{}
+	overrides := map[string]interface{}{}
+	for k, v := range extras {
+		switch k {
+		case "path", "scan_now":
+			continue
+		case "is_anime":
+			if b, ok := v.(bool); ok {
+				opts.IsAnime = &b
+			} else if s, ok := v.(string); ok {
+				b := s == "true" || s == "1"
+				opts.IsAnime = &b
 			}
-			opts.ConfigOverrides["tv_rename_format"] = s
+		case "is_movie":
+			if b, ok := v.(bool); ok {
+				opts.IsMovie = &b
+			} else if s, ok := v.(string); ok {
+				b := s == "true" || s == "1"
+				opts.IsMovie = &b
+			}
+		default:
+			if v == nil {
+				continue
+			}
+			if s, ok := v.(string); ok && strings.TrimSpace(s) == "" {
+				continue
+			}
+			overrides[k] = v
 		}
 	}
-	if v, ok := extras["movie_rename_format"]; ok {
-		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-			if opts.ConfigOverrides == nil {
-				opts.ConfigOverrides = map[string]interface{}{}
-			}
-			opts.ConfigOverrides["movie_rename_format"] = s
-		}
-	}
-	if v, ok := extras["mode"]; ok {
-		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-			if opts.ConfigOverrides == nil {
-				opts.ConfigOverrides = map[string]interface{}{}
-			}
-			opts.ConfigOverrides["mode"] = s
-		}
-	}
-	if v, ok := extras["overwrite_mode"]; ok {
-		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-			if opts.ConfigOverrides == nil {
-				opts.ConfigOverrides = map[string]interface{}{}
-			}
-			opts.ConfigOverrides["overwrite_mode"] = s
-		}
+	if len(overrides) > 0 {
+		opts.ConfigOverrides = overrides
 	}
 	return opts
 }
@@ -702,18 +783,7 @@ func buildTaskOptions(extras map[string]interface{}) TaskOptions {
 // It is used by the config "scan_now" action to mimic the Python behavior.
 func (s *Service) ScanNow(paths []PathConfig, excludeDirs []string) int {
 	count := 0
-	shouldExclude := func(path string) bool {
-		for _, excl := range excludeDirs {
-			if excl == "" {
-				continue
-			}
-			if strings.Contains(path, excl) {
-				return true
-			}
-		}
-		base := filepath.Base(path)
-		return strings.HasPrefix(base, ".")
-	}
+	s.UpdateExcludeDirs(excludeDirs)
 
 	for _, pc := range paths {
 		root := filepath.Clean(pc.Path)
@@ -733,12 +803,12 @@ func (s *Service) ScanNow(paths []PathConfig, excludeDirs []string) int {
 				return nil
 			}
 			if d.IsDir() {
-				if shouldExclude(path) {
+				if s.shouldExclude(path) {
 					return filepath.SkipDir
 				}
 				return nil
 			}
-			if shouldExclude(path) {
+			if s.shouldExclude(path) {
 				return nil
 			}
 			if !rename.IsVideoFile(path) {
@@ -763,127 +833,208 @@ func (s *Service) ScanNow(paths []PathConfig, excludeDirs []string) int {
 	return count
 }
 
-// addDirsRecursive adds sub-directories of dir to w, up to maxWatchDepth
-// levels deep and maxWatchersPerRoot total (shared via count pointer).
-// It opens only one directory at a time with os.ReadDir so that the process
-// never accumulates too many open file descriptors simultaneously.
-func (s *Service) addDirsRecursive(w *fsnotify.Watcher, dir string, depth int, count *int) {
-	if depth >= maxWatchDepth || *count >= maxWatchersPerRoot {
-		return
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		if *count >= maxWatchersPerRoot {
-			s.log.Warn("[监控] 子目录监控已达上限 %d，其余目录将依靠动态检测", maxWatchersPerRoot)
-			return
-		}
-		subdir := filepath.Join(dir, entry.Name())
-		if s.shouldExclude(subdir) {
-			continue
-		}
-		if addErr := w.Add(subdir); addErr != nil {
-			s.log.Warn("[监控] 添加子目录监控失败 %s: %v", subdir, addErr)
-		} else {
-			(*count)++
-			s.log.Debug("[监控] 监控子目录: %s", subdir)
-		}
-		s.addDirsRecursive(w, subdir, depth+1, count)
-	}
-}
-
 // shouldExclude reports whether a path matches any of the configured exclude patterns.
 func (s *Service) shouldExclude(path string) bool {
+	base := filepath.Base(path)
+	if strings.HasPrefix(base, ".") {
+		return true
+	}
 	s.mu.Lock()
-	excl := append([]string{}, s.excludeDirs...)
+	patterns := append([]*regexp.Regexp{}, s.excludePatterns...)
 	s.mu.Unlock()
-	lowerPath := strings.ToLower(path)
-	for _, excl := range excl {
-		if excl == "" {
-			continue
-		}
-		if strings.Contains(lowerPath, strings.ToLower(excl)) {
+	for _, re := range patterns {
+		if re.MatchString(path) {
 			return true
 		}
 	}
-	base := filepath.Base(path)
-	return strings.HasPrefix(base, ".")
+	return false
 }
 
 // UpdateExcludeDirs updates the in-memory exclude list without restarting watchers.
 func (s *Service) UpdateExcludeDirs(exclude []string) {
 	s.mu.Lock()
 	s.excludeDirs = exclude
+	s.excludePatterns = compileExcludePatterns(exclude, s.log)
 	s.mu.Unlock()
 	s.log.Info("[监控] 排除目录已更新 (%d 条)", len(exclude))
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Stability checker – waits for files to stop growing before queuing them
-// ─────────────────────────────────────────────────────────────────────────────
-
-func (s *Service) stabilityChecker() {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	type stableEntry struct {
-		size int64
-		opts TaskOptions
+func compileExcludePatterns(exclude []string, log *logger.Logger) []*regexp.Regexp {
+	patterns := make([]*regexp.Regexp, 0, len(exclude))
+	for _, patternStr := range exclude {
+		if strings.TrimSpace(patternStr) == "" {
+			continue
+		}
+		re, err := regexp.Compile("(?i)" + patternStr)
+		if err != nil {
+			log.Error("[监控] 排除规则 '%s' 无效: %v", patternStr, err)
+			continue
+		}
+		patterns = append(patterns, re)
 	}
-	stable := make(map[string]stableEntry)   // path → entry at last stable check
-	checked := make(map[string]pendingEntry) // path → entry at previous tick
+	return patterns
+}
 
-	for {
+func countDirectoryFiles(root string, maxCheck int) int {
+	count := 0
+	_ = filepath.WalkDir(root, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() {
+			count++
+			if count > maxCheck {
+				return filepath.SkipDir
+			}
+		}
+		return nil
+	})
+	return count
+}
+
+func getInotifyLimit() int {
+	data, err := os.ReadFile("/proc/sys/fs/inotify/max_user_watches")
+	if err != nil {
+		return 8192
+	}
+	v, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 8192
+	}
+	return v
+}
+
+func taskOptionsToMap(opts TaskOptions) map[string]interface{} {
+	out := map[string]interface{}{}
+	if opts.IsAnime != nil {
+		out["is_anime"] = *opts.IsAnime
+	}
+	if opts.IsMovie != nil {
+		out["is_movie"] = *opts.IsMovie
+	}
+	if opts.UseAI {
+		out["use_ai"] = opts.UseAI
+	}
+	if opts.CusName != "" {
+		out["cus_name"] = opts.CusName
+	}
+	if opts.CusSeasonID != nil {
+		out["cus_season_id"] = *opts.CusSeasonID
+	}
+	if opts.CusTMDBID != "" {
+		out["cus_tmdb_id"] = opts.CusTMDBID
+	}
+	if opts.CusOffset != 0 {
+		out["cus_offset"] = opts.CusOffset
+	}
+	if len(opts.ConfigOverrides) > 0 {
+		out["config_overrides"] = opts.ConfigOverrides
+	}
+	return out
+}
+
+func taskOptionsFromMap(m map[string]interface{}) TaskOptions {
+	var opts TaskOptions
+	if m == nil {
+		return opts
+	}
+	if v, ok := m["is_anime"]; ok {
+		if b, ok := v.(bool); ok {
+			opts.IsAnime = &b
+		}
+	}
+	if v, ok := m["is_movie"]; ok {
+		if b, ok := v.(bool); ok {
+			opts.IsMovie = &b
+		}
+	}
+	if v, ok := m["use_ai"]; ok {
+		if b, ok := v.(bool); ok {
+			opts.UseAI = b
+		}
+	}
+	if v, ok := m["cus_name"]; ok {
+		if s, ok := v.(string); ok {
+			opts.CusName = s
+		}
+	}
+	if v, ok := m["cus_tmdb_id"]; ok {
+		if s, ok := v.(string); ok {
+			opts.CusTMDBID = s
+		}
+	}
+	if v, ok := m["cus_offset"]; ok {
+		if n, ok := v.(float64); ok {
+			opts.CusOffset = int(n)
+		}
+	}
+	if v, ok := m["cus_season_id"]; ok {
+		if n, ok := v.(float64); ok {
+			i := int(n)
+			opts.CusSeasonID = &i
+		}
+	}
+	if v, ok := m["config_overrides"]; ok {
+		if mm, ok := v.(map[string]interface{}); ok {
+			opts.ConfigOverrides = mm
+		}
+	}
+	return opts
+}
+
+func (s *Service) waitForFileReady(path string, timeout time.Duration, interval time.Duration) bool {
+	if _, err := os.Stat(path); err != nil {
+		return false
+	}
+	start := time.Now()
+	lastSize := int64(-1)
+	for time.Since(start) < timeout {
 		select {
 		case <-s.ctx.Done():
-			return
-		case <-ticker.C:
-			s.pendingFileMu.Lock()
-			current := make(map[string]pendingEntry, len(s.pendingFiles))
-			for k, v := range s.pendingFiles {
-				current[k] = v
-			}
-			s.pendingFileMu.Unlock()
+			return false
+		default:
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			time.Sleep(interval)
+			continue
+		}
+		size := info.Size()
+		if size > 0 && size == lastSize {
+			return true
+		}
+		lastSize = size
+		time.Sleep(interval)
+	}
+	s.log.Warn("[等待超时] 尝试强制处理: %s", filepath.Base(path))
+	return true
+}
 
-			for path, entry := range current {
-				prev, existed := checked[path]
-				if !existed {
-					checked[path] = entry
-					continue
-				}
-				if entry.size == prev.size {
-					// Size hasn't changed – file is stable
-					if _, alreadyQueued := stable[path]; !alreadyQueued {
-						stable[path] = stableEntry{size: entry.size, opts: entry.opts}
-						s.log.Info("[监控] 文件就绪，加入队列: %s", path)
-						// Pass the opts that were captured when the event fired,
-						// preserving per-directory overrides (e.g. is_anime).
-						s.AddTaskWithPriority(path, entry.opts, true)
-					}
+func (s *Service) resolvePathExtras(filePath string) map[string]interface{} {
+	s.mu.Lock()
+	paths := make([]PathConfig, len(s.watchedDirs))
+	copy(paths, s.watchedDirs)
+	s.mu.Unlock()
 
-					// Remove from pending
-					s.pendingFileMu.Lock()
-					delete(s.pendingFiles, path)
-					s.pendingFileMu.Unlock()
-					delete(checked, path)
-				} else {
-					checked[path] = entry
-				}
-			}
-
-			// Clean up stable entries that are no longer in pending
-			for path := range stable {
-				if _, inPending := current[path]; !inPending {
-					delete(stable, path)
-				}
+	cleanFile := filepath.Clean(filePath)
+	bestLen := -1
+	var best map[string]interface{}
+	for _, pc := range paths {
+		root := filepath.Clean(pc.Path)
+		if root == "" {
+			continue
+		}
+		if strings.HasPrefix(cleanFile, root) {
+			if len(root) > bestLen {
+				bestLen = len(root)
+				best = pc.Extras
 			}
 		}
 	}
+	if best == nil {
+		return map[string]interface{}{}
+	}
+	return best
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -910,6 +1061,11 @@ func (s *Service) worker() {
 					case <-time.After(2 * time.Second):
 					}
 				}
+				if !s.waitForFileReady(item.Path, 10*time.Second, 1*time.Second) {
+					s.log.Warn("[跳过] 文件无法读取或已消失: %s", item.Path)
+					s.decrementLogicalCount()
+					continue
+				}
 				s.processItem(item)
 			}
 		}
@@ -922,8 +1078,17 @@ func (s *Service) popNext() (QueueItem, bool) {
 	if len(s.queue) == 0 {
 		return QueueItem{}, false
 	}
-	item := s.queue[0]
-	s.queue = s.queue[1:]
+	bestIdx := 0
+	best := s.queue[0]
+	for i := 1; i < len(s.queue); i++ {
+		cur := s.queue[i]
+		if cur.Priority < best.Priority || (cur.Priority == best.Priority && cur.Seq < best.Seq) {
+			best = cur
+			bestIdx = i
+		}
+	}
+	item := best
+	s.queue = append(s.queue[:bestIdx], s.queue[bestIdx+1:]...)
 	return item, true
 }
 
@@ -948,11 +1113,54 @@ func (s *Service) processItem(item QueueItem) {
 		if err := s.store.SaveTask(rec); err != nil {
 			s.log.Error("[任务] 保存忽略记录失败 [%s]: %v", item.UUID, err)
 		}
+		s.decrementLogicalCount()
 		return
 	}
+	opts := item.Options
+	customConfig := s.resolvePathExtras(item.Path)
+	if opts.IsAnime == nil {
+		if v, ok := customConfig["is_anime"]; ok {
+			if b, ok := v.(bool); ok {
+				opts.IsAnime = &b
+			}
+		}
+	}
+	if opts.IsMovie == nil {
+		if v, ok := customConfig["is_movie"]; ok {
+			if b, ok := v.(bool); ok {
+				opts.IsMovie = &b
+			}
+		}
+	}
+	finalOverrides := map[string]interface{}{}
+	for k, v := range customConfig {
+		if k == "path" || k == "scan_now" || k == "is_anime" || k == "is_movie" {
+			continue
+		}
+		if v == nil {
+			continue
+		}
+		if s, ok := v.(string); ok && strings.TrimSpace(s) == "" {
+			continue
+		}
+		finalOverrides[k] = v
+	}
+	for k, v := range opts.ConfigOverrides {
+		if v == nil {
+			continue
+		}
+		if s, ok := v.(string); ok && strings.TrimSpace(s) == "" {
+			continue
+		}
+		finalOverrides[k] = v
+	}
+	if len(finalOverrides) > 0 {
+		opts.ConfigOverrides = finalOverrides
+	}
+
 	s.log.Info("[任务] 开始处理 [%s]: %s", item.UUID, item.Path)
 
-	rec := s.processor.Process(item.Path, item.Options.toRenameOpts(), item.UUID)
+	rec := s.processor.Process(item.Path, opts.toRenameOpts(), item.UUID)
 
 	if err := s.store.SaveTask(rec); err != nil {
 		s.log.Error("[任务] 保存任务记录失败 [%s]: %v", item.UUID, err)
@@ -971,4 +1179,6 @@ func (s *Service) processItem(item QueueItem) {
 	} else {
 		s.log.Error("[任务] 失败 [%s]: %s", item.UUID, rec.ErrMsg)
 	}
+
+	s.decrementLogicalCount()
 }

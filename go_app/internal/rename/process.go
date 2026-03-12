@@ -239,17 +239,42 @@ func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) e
 			return fmt.Errorf("TMDB剧集查询失败: %w", err)
 		}
 		if tv == nil {
-			return fmt.Errorf("TMDB未找到剧集: %q", searchName)
+			p.log.Info("[处理] TV 未命中，尝试电影兜底: %q", searchName)
+			movie, movieErr := p.resolveMovie(searchName, year, tmdbID)
+			if movieErr != nil {
+				return fmt.Errorf("TMDB电影兜底查询失败: %w", movieErr)
+			}
+			if movie == nil {
+				return fmt.Errorf("TMDB未找到剧集: %q", searchName)
+			}
+
+			isMovie = true
+			rec.IsMovie = &isMovie
+			rec.SeasonID = nil
+
+			tmdbID = movie.ID
+			tmdbTitle = movie.Title
+			if len(movie.ReleaseDate) >= 4 {
+				tmdbYear, _ = strconv.Atoi(movie.ReleaseDate[:4])
+			}
+			tmdbResult = movie
+			rec.TMDBID = strconv.Itoa(tmdbID)
+			targetRoot = p.targetRootDir(cfg, isAnime, isMovie)
+			if targetRoot == "" {
+				return fmt.Errorf("目标目录未配置 (is_anime=%v, is_movie=%v)", isAnime, isMovie)
+			}
+			p.log.Info("[处理] TV 自动识别未命中，改为匹配电影: %s (%d) [tmdb:%d]", tmdbTitle, tmdbYear, tmdbID)
+		} else {
+			tmdbID = tv.ID
+			tmdbTitle = tv.Name
+			if len(tv.FirstAirDate) >= 4 {
+				tmdbYear, _ = strconv.Atoi(tv.FirstAirDate[:4])
+			}
+			tmdbResult = tv
+			rec.TMDBID = strconv.Itoa(tmdbID)
+			rec.SeasonID = &seasonNum
+			p.log.Info("[处理] 匹配剧集: %s (%d) 第%d季 [tmdb:%d]", tmdbTitle, tmdbYear, seasonNum, tmdbID)
 		}
-		tmdbID = tv.ID
-		tmdbTitle = tv.Name
-		if len(tv.FirstAirDate) >= 4 {
-			tmdbYear, _ = strconv.Atoi(tv.FirstAirDate[:4])
-		}
-		tmdbResult = tv
-		rec.TMDBID = strconv.Itoa(tmdbID)
-		rec.SeasonID = &seasonNum
-		p.log.Info("[处理] 匹配剧集: %s (%d) 第%d季 [tmdb:%d]", tmdbTitle, tmdbYear, seasonNum, tmdbID)
 	}
 
 	// ── 5. Build rename mapping ────────────────────────────────────────────────

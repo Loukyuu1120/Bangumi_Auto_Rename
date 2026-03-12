@@ -356,7 +356,7 @@ func (h *Handler) handleBatchRetry(w http.ResponseWriter, r *http.Request) {
 			_ = h.store.DeleteTaskFiles(id, deleteTarget, deleteSource, cleanupDirs)
 		}
 
-		h.svc.AddTaskWithID(id, rec.Path, opts, true)
+		h.svc.AddTaskWithID(id, rec.Path, opts, monitor.PriorityManual, true)
 		queued++
 	}
 
