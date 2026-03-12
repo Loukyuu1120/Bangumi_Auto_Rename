@@ -19,6 +19,15 @@ type RenderContext struct {
 	VideoFormat   string // e.g. "1080p"
 	FileExt       string // e.g. ".mkv"
 	TMDBId        string
+	WebSource     string
+	VideoCodec    string
+	AudioCodec    string
+	FPS           string
+	Channels      string
+	ReleaseGroup  string
+	Customization string
+	Edition       string
+	HDR           string
 }
 
 // RenderTemplate processes a Jinja2-like template string using the provided context.
@@ -40,15 +49,29 @@ func RenderTemplate(tmpl string, ctx RenderContext) string {
 		"videoFormat":    ctx.VideoFormat,
 		"fileExt":        ctx.FileExt,
 		"tmdb_id":        ctx.TMDBId,
+		"tmdbid":         ctx.TMDBId,
+		"webSource":      ctx.WebSource,
+		"videoCodec":     ctx.VideoCodec,
+		"audioCodec":     ctx.AudioCodec,
+		"fps":            ctx.FPS,
+		"channels":       ctx.Channels,
+		"releaseGroup":   ctx.ReleaseGroup,
+		"customization":  ctx.Customization,
+		"edition":        ctx.Edition,
+		"hdr":            ctx.HDR,
 	}
 
 	result := tmpl
 
-	// Process {% if var %}...{% else %}...{% endif %} blocks (else branch)
-	result = processIfElse(result, vars)
-
-	// Process {% if var %}...{% endif %} blocks (no else)
-	result = processIf(result, vars)
+	// Process {% if %} blocks iteratively to handle nesting
+	for i := 0; i < 6; i++ {
+		next := processIfElse(result, vars)
+		next = processIf(next, vars)
+		if next == result {
+			break
+		}
+		result = next
+	}
 
 	// Replace {{variable}} placeholders
 	result = replaceVars(result, vars)
@@ -62,7 +85,7 @@ func RenderTemplate(tmpl string, ctx RenderContext) string {
 // processIfElse handles {% if var %}...{% else %}...{% endif %} constructs.
 func processIfElse(s string, vars map[string]string) string {
 	// Pattern: {% if VAR %}THEN{% else %}ELSE{% endif %}
-	re := regexp.MustCompile(`\{%\s*if\s+(\w+)\s*%\}(.*?)\{%\s*else\s*%\}(.*?)\{%\s*endif\s*%\}`)
+	re := regexp.MustCompile(`(?s)\{%\s*if\s+(\w+)\s*%\}(.*?)\{%\s*else\s*%\}(.*?)\{%\s*endif\s*%\}`)
 	return re.ReplaceAllStringFunc(s, func(match string) string {
 		sub := re.FindStringSubmatch(match)
 		if sub == nil {
@@ -81,7 +104,7 @@ func processIfElse(s string, vars map[string]string) string {
 
 // processIf handles {% if var %}...{% endif %} constructs (without else).
 func processIf(s string, vars map[string]string) string {
-	re := regexp.MustCompile(`\{%\s*if\s+(\w+)\s*%\}(.*?)\{%\s*endif\s*%\}`)
+	re := regexp.MustCompile(`(?s)\{%\s*if\s+(\w+)\s*%\}(.*?)\{%\s*endif\s*%\}`)
 	return re.ReplaceAllStringFunc(s, func(match string) string {
 		sub := re.FindStringSubmatch(match)
 		if sub == nil {
@@ -99,18 +122,42 @@ func processIf(s string, vars map[string]string) string {
 
 // replaceVars substitutes all {{varName}} placeholders.
 func replaceVars(s string, vars map[string]string) string {
-	re := regexp.MustCompile(`\{\{\s*(\w+)\s*\}\}`)
+	re := regexp.MustCompile(`\{\{\s*([^}]+?)\s*\}\}`)
 	return re.ReplaceAllStringFunc(s, func(match string) string {
 		sub := re.FindStringSubmatch(match)
 		if sub == nil {
 			return match
 		}
-		if val, ok := vars[sub[1]]; ok {
-			return val
+		expr := strings.TrimSpace(sub[1])
+		parts := strings.Split(expr, "|")
+		if len(parts) == 0 {
+			return ""
 		}
-		// Unknown variable: remove it
-		return ""
+		key := strings.TrimSpace(parts[0])
+		val, ok := vars[key]
+		if !ok {
+			return ""
+		}
+		for _, f := range parts[1:] {
+			val = applyFilter(strings.TrimSpace(f), val)
+		}
+		return val
 	})
+}
+
+func applyFilter(filterExpr, value string) string {
+	if filterExpr == "" {
+		return value
+	}
+	reSingle := regexp.MustCompile(`(?i)^replace\(\s*'([^']*)'\s*,\s*'([^']*)'\s*\)\s*$`)
+	if m := reSingle.FindStringSubmatch(filterExpr); m != nil {
+		return strings.ReplaceAll(value, m[1], m[2])
+	}
+	reDouble := regexp.MustCompile(`(?i)^replace\(\s*\"([^\"]*)\"\s*,\s*\"([^\"]*)\"\s*\)\s*$`)
+	if m := reDouble.FindStringSubmatch(filterExpr); m != nil {
+		return strings.ReplaceAll(value, m[1], m[2])
+	}
+	return value
 }
 
 // isTruthy reports whether a string value should be considered "true" in a
@@ -190,6 +237,7 @@ func BuildRenderContext(
 	videoFormat string,
 	fileExt string,
 	tmdbID string,
+	media MediaInfo,
 ) RenderContext {
 	se := ""
 	if season > 0 && episode > 0 {
@@ -215,5 +263,14 @@ func BuildRenderContext(
 		VideoFormat:   videoFormat,
 		FileExt:       fileExt,
 		TMDBId:        tmdbID,
+		WebSource:     SanitizeForPath(media.Source),
+		VideoCodec:    SanitizeForPath(media.VideoCodec),
+		AudioCodec:    SanitizeForPath(media.AudioCodec),
+		FPS:           SanitizeForPath(media.FPS),
+		Channels:      SanitizeForPath(media.Channels),
+		ReleaseGroup:  SanitizeForPath(media.Group),
+		Customization: "",
+		Edition:       "",
+		HDR:           SanitizeForPath(media.HDR),
 	}
 }

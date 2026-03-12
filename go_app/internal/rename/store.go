@@ -114,6 +114,111 @@ func (s *Store) DeleteTask(uuid string, deleteRecord bool) error {
 	return nil
 }
 
+// DeleteTaskFiles removes source/target files for a task UUID and optionally
+// cleans up empty directories (no video files). It does not delete the task
+// or record JSON files.
+func (s *Store) DeleteTaskFiles(uuid string, deleteTarget, deleteSource, cleanupDirs bool) error {
+	var mapping map[string]string
+	recPath := filepath.Join(s.recordDir, uuid+".json")
+	if data, err := os.ReadFile(recPath); err == nil {
+		_ = json.Unmarshal(data, &mapping)
+	}
+
+	var taskPath string
+	if data, err := os.ReadFile(filepath.Join(s.taskDir, uuid+".json")); err == nil {
+		var rec TaskRecord
+		if jsonErr := json.Unmarshal(data, &rec); jsonErr == nil {
+			taskPath = rec.Path
+		}
+	}
+
+	dirsToCheck := map[string]struct{}{}
+
+	if deleteTarget && len(mapping) > 0 {
+		for _, tgt := range mapping {
+			if tgt == "" {
+				continue
+			}
+			t := filepath.Clean(tgt)
+			parent := filepath.Dir(t)
+			// collect up to 3 levels for cleanup consideration
+			for i := 0; i < 3; i++ {
+				if parent == "." || parent == string(filepath.Separator) {
+					break
+				}
+				dirsToCheck[parent] = struct{}{}
+				parent = filepath.Dir(parent)
+			}
+
+			// delete target file
+			_ = os.Remove(t)
+
+			// delete sibling files with same prefix (subtitles/nfo/images)
+			base := strings.TrimSuffix(filepath.Base(t), filepath.Ext(t))
+			if entries, err := os.ReadDir(filepath.Dir(t)); err == nil {
+				for _, e := range entries {
+					if e.IsDir() {
+						continue
+					}
+					name := e.Name()
+					if strings.HasPrefix(strings.TrimSuffix(name, filepath.Ext(name)), base) {
+						_ = os.Remove(filepath.Join(filepath.Dir(t), name))
+					}
+				}
+			}
+		}
+	}
+
+	if cleanupDirs && len(dirsToCheck) > 0 {
+		for dir := range dirsToCheck {
+			if dir == "" || dir == "." || dir == string(filepath.Separator) {
+				continue
+			}
+			if !hasVideoFiles(dir) {
+				_ = os.RemoveAll(dir)
+			}
+		}
+	}
+
+	if deleteSource {
+		maybe := map[string]struct{}{}
+		if taskPath != "" {
+			maybe[taskPath] = struct{}{}
+		}
+		for src := range mapping {
+			if src != "" {
+				maybe[src] = struct{}{}
+			}
+		}
+		for src := range maybe {
+			_ = os.Remove(src)
+		}
+	}
+
+	return nil
+}
+
+func hasVideoFiles(dir string) bool {
+	found := false
+	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || found {
+			return nil
+		}
+		if d.IsDir() {
+			if strings.HasPrefix(d.Name(), ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		if VideoSuffix[ext] {
+			found = true
+		}
+		return nil
+	})
+	return found
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Read operations
 // ─────────────────────────────────────────────────────────────────────────────
@@ -150,6 +255,8 @@ func (s *Store) GetRecord(uuid string) map[string]string {
 }
 
 // ListTasks returns all TaskRecords sorted newest-first by ProcessedAt.
+// Uses a stable secondary sort on UUID so the order is deterministic even
+// when many records share the same (or empty) ProcessedAt value.
 func (s *Store) ListTasks() []*TaskRecord {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -160,8 +267,11 @@ func (s *Store) ListTasks() []*TaskRecord {
 		list = append(list, &cp)
 	}
 
-	sort.Slice(list, func(i, j int) bool {
-		return list[i].ProcessedAt > list[j].ProcessedAt
+	sort.SliceStable(list, func(i, j int) bool {
+		if list[i].ProcessedAt != list[j].ProcessedAt {
+			return list[i].ProcessedAt > list[j].ProcessedAt
+		}
+		return list[i].UUID > list[j].UUID
 	})
 	return list
 }
@@ -275,6 +385,8 @@ func (s *Store) HasSavedQueue() bool {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // loadAll scans taskDir and populates the in-memory cache.
+// It also performs an in-memory migration for records produced by the
+// Python version of the application, which used a different schema.
 func (s *Store) loadAll() error {
 	entries, err := os.ReadDir(s.taskDir)
 	if err != nil {
@@ -298,6 +410,31 @@ func (s *Store) loadAll() error {
 		if rec.UUID == "" {
 			rec.UUID = uuid
 		}
+
+		// ── Migrate Python-format records ────────────────────────────────
+		// Python stored a single "target_path" string; normalise to slice.
+		if rec.TargetPath != "" && len(rec.TargetPaths) == 0 {
+			rec.TargetPaths = []string{rec.TargetPath}
+		}
+
+		// Python records had no "status" field.  Infer it from available data.
+		if rec.Status == "" {
+			if len(rec.TargetPaths) > 0 || rec.TargetPath != "" {
+				rec.Status = StatusSuccess
+			} else {
+				rec.Status = StatusFailed
+			}
+		}
+
+		// Python records had no "processed_at" field.
+		// Fall back to the JSON file's modification time.
+		if rec.ProcessedAt == "" {
+			if info, err2 := entry.Info(); err2 == nil {
+				rec.ProcessedAt = info.ModTime().Format(time.RFC3339[:19])
+			}
+		}
+		// ─────────────────────────────────────────────────────────────────
+
 		s.cache[uuid] = &rec
 	}
 	return nil

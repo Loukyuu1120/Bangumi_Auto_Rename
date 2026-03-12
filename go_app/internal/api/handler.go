@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"bangumi_auto_rename/internal/ai"
 	"bangumi_auto_rename/internal/config"
 	"bangumi_auto_rename/internal/logger"
 	"bangumi_auto_rename/internal/monitor"
@@ -83,6 +84,7 @@ func (h *Handler) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/monitor/resume", h.withCORS(h.handleMonitorResume))
 	mux.HandleFunc("/api/monitor/restart", h.withCORS(h.handleMonitorRestart))
 	mux.HandleFunc("/api/monitor/status", h.withCORS(h.handleMonitorStatus))
+	mux.HandleFunc("/api/monitor/exclude", h.withCORS(h.handleMonitorExclude))
 
 	// ── Configuration ────────────────────────────────────────────────────────
 	mux.HandleFunc("/api/config", h.withCORS(h.handleConfig))
@@ -189,13 +191,10 @@ func (h *Handler) handleTaskByID(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodDelete:
 		deleteFiles := r.URL.Query().Get("delete_files") == "true"
-		if deleteFiles {
-			rec := h.store.GetRecord(uuid)
-			if rec != nil {
-				for _, target := range rec {
-					_ = os.Remove(target)
-				}
-			}
+		deleteSource := r.URL.Query().Get("delete_source") == "true"
+		cleanupDirs := r.URL.Query().Get("cleanup_dirs") == "true"
+		if deleteFiles || deleteSource || cleanupDirs {
+			_ = h.store.DeleteTaskFiles(uuid, deleteFiles, deleteSource, cleanupDirs)
 		}
 		if err := h.store.DeleteTask(uuid, true); err != nil {
 			jsonError(w, err.Error(), http.StatusInternalServerError)
@@ -214,8 +213,10 @@ func (h *Handler) handleBatchDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		UUIDs       []string `json:"uuids"`
-		DeleteFiles bool     `json:"delete_files"`
+		UUIDs        []string `json:"uuids"`
+		DeleteFiles  bool     `json:"delete_files"`
+		DeleteSource bool     `json:"delete_source"`
+		CleanupDirs  bool     `json:"cleanup_dirs"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -224,13 +225,8 @@ func (h *Handler) handleBatchDelete(w http.ResponseWriter, r *http.Request) {
 
 	deleted := 0
 	for _, id := range body.UUIDs {
-		if body.DeleteFiles {
-			rec := h.store.GetRecord(id)
-			if rec != nil {
-				for _, target := range rec {
-					_ = os.Remove(target)
-				}
-			}
+		if body.DeleteFiles || body.DeleteSource || body.CleanupDirs {
+			_ = h.store.DeleteTaskFiles(id, body.DeleteFiles, body.DeleteSource, body.CleanupDirs)
 		}
 		if err := h.store.DeleteTask(id, true); err == nil {
 			deleted++
@@ -308,7 +304,30 @@ func (h *Handler) handleBatchRetry(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		h.svc.AddTask(rec.Path, opts)
+		// Optional cleanup before retry
+		deleteTarget := false
+		deleteSource := false
+		cleanupDirs := false
+		if v, ok := body.Settings["delete_transferred"]; ok {
+			if b, ok := v.(bool); ok {
+				deleteTarget = b
+			}
+		}
+		if v, ok := body.Settings["delete_source"]; ok {
+			if b, ok := v.(bool); ok {
+				deleteSource = b
+			}
+		}
+		if v, ok := body.Settings["cleanup_dirs"]; ok {
+			if b, ok := v.(bool); ok {
+				cleanupDirs = b
+			}
+		}
+		if deleteTarget || deleteSource || cleanupDirs {
+			_ = h.store.DeleteTaskFiles(id, deleteTarget, deleteSource, cleanupDirs)
+		}
+
+		h.svc.AddTaskWithPriority(rec.Path, opts, true)
 		queued++
 	}
 
@@ -596,11 +615,27 @@ func (h *Handler) handleMonitorRestart(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	if err := h.svc.StartWatchers(paths, excludeDirs); err != nil {
+	if err := h.svc.StartWatchers(paths, excludeDirs, cfg.MonitorMode); err != nil {
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	jsonOK(w, map[string]string{"status": "restarted"})
+}
+
+func (h *Handler) handleMonitorExclude(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		ExcludeDirs []string `json:"exclude_dirs"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	h.svc.UpdateExcludeDirs(body.ExcludeDirs)
+	jsonOK(w, map[string]string{"status": "updated"})
 }
 
 func (h *Handler) handleMonitorStatus(w http.ResponseWriter, r *http.Request) {
@@ -628,20 +663,94 @@ func (h *Handler) handleConfig(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, h.cfg.GetConfig())
 
 	case http.MethodPut, http.MethodPost:
-		var body config.Config
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		var raw map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		scanTargets := []monitor.PathConfig{}
+		if mp, ok := raw["monitor_paths"]; ok {
+			cleaned, targets := extractScanTargets(mp)
+			raw["monitor_paths"] = cleaned
+			scanTargets = targets
+		}
+
+		payload, err := json.Marshal(raw)
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		var body config.Config
+		if err := json.Unmarshal(payload, &body); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		if err := h.cfg.SetConfig(body); err != nil {
 			jsonError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		h.svc.UpdateExcludeDirs(h.cfg.GetMonitorExcludeDirs())
+
+		if len(scanTargets) > 0 {
+			exclude := h.cfg.GetMonitorExcludeDirs()
+			added := h.svc.ScanNow(scanTargets, exclude)
+			if added > 0 {
+				h.svc.RegisterBatchCount(added)
+			}
+		}
 		jsonOK(w, map[string]string{"status": "saved"})
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func extractScanTargets(raw interface{}) (interface{}, []monitor.PathConfig) {
+	if raw == nil {
+		return raw, nil
+	}
+
+	// Attempt to parse JSON string form
+	if s, ok := raw.(string); ok {
+		var list []interface{}
+		if err := json.Unmarshal([]byte(s), &list); err == nil {
+			cleaned, targets := extractScanTargets(list)
+			return cleaned, targets
+		}
+		return raw, nil
+	}
+
+	items, ok := raw.([]interface{})
+	if !ok {
+		return raw, nil
+	}
+
+	cleaned := make([]interface{}, 0, len(items))
+	var targets []monitor.PathConfig
+	for _, item := range items {
+		switch entry := item.(type) {
+		case string:
+			cleaned = append(cleaned, entry)
+		case map[string]interface{}:
+			path, _ := entry["path"].(string)
+			scanNow, _ := entry["scan_now"].(bool)
+			delete(entry, "scan_now")
+			cleaned = append(cleaned, entry)
+			if scanNow && path != "" {
+				extras := make(map[string]interface{})
+				for k, v := range entry {
+					if k == "path" {
+						continue
+					}
+					extras[k] = v
+				}
+				targets = append(targets, monitor.PathConfig{Path: path, Extras: extras})
+			}
+		}
+	}
+
+	return cleaned, targets
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -791,17 +900,52 @@ func (h *Handler) handleAITest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Name == "" {
-		body.Name = "test"
+		body.Name = "进击的巨人 (2013)"
 	}
 
-	// Use the processor's AI client indirectly via a dummy metadata call
 	cfg := h.cfg.GetConfig()
 	if !cfg.AIEnabled {
-		jsonOK(w, map[string]interface{}{"ok": false, "message": "AI未启用"})
+		jsonOK(w, map[string]interface{}{"ok": false, "message": "AI未启用，请先在配置中开启"})
 		return
 	}
 
-	jsonOK(w, map[string]interface{}{"ok": true, "message": "AI已启用，请在添加任务时勾选使用AI选项"})
+	aiClient := ai.New(h.cfg)
+	if !aiClient.IsAvailable() {
+		jsonOK(w, map[string]interface{}{"ok": false, "message": "AI不可用，请检查 API Key 是否已配置"})
+		return
+	}
+
+	ctx := map[string]interface{}{
+		"folder_name": body.Name,
+		"full_path":   body.Name,
+		"file_names":  []string{body.Name + ".mkv"},
+	}
+
+	start := time.Now()
+	meta := aiClient.AnalyzeMetadata(ctx)
+	elapsed := time.Since(start).Seconds()
+
+	if meta == nil {
+		jsonOK(w, map[string]interface{}{
+			"ok":      false,
+			"message": fmt.Sprintf("AI 请求失败（耗时 %.1fs），请检查 API Key 和网络连接", elapsed),
+		})
+		return
+	}
+
+	mediaType := "剧集"
+	if meta.IsMovie {
+		mediaType = "电影"
+	}
+	message := fmt.Sprintf(
+		"✅ AI 连接成功（耗时 %.1fs）\n识别结果：%s（%d）[%s] | 置信度：%s",
+		elapsed, meta.Name, meta.Year, mediaType, meta.Confidence,
+	)
+	jsonOK(w, map[string]interface{}{
+		"ok":      true,
+		"message": message,
+		"result":  meta,
+	})
 }
 
 func (h *Handler) handleTMDBTest(w http.ResponseWriter, r *http.Request) {

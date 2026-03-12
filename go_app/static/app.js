@@ -10,6 +10,42 @@ const S = {
   configData: {},
   logLines: [],
   autoRefreshTimer: null,
+  _monitorPathEditIndex: null,
+  _secondaryRules: null,
+  _lastCheckedIndex: null,
+};
+
+// ─────────────────── DEFAULT SECONDARY RULES ───────────────────
+const DEFAULT_SECONDARY_RULES = {
+  movie: [
+    { name: "演唱会", conditions: { genre_ids: "10402" } },
+    { name: "纪录片电影", conditions: { genre_ids: "99" } },
+    { name: "动漫电影", conditions: { genre_ids: "16", origin_country: "JP" } },
+    { name: "动画电影", conditions: { genre_ids: "16" } },
+    { name: "华语电影", conditions: { original_language: "zh,cn,bo,za" } },
+    { name: "外语电影", conditions: {} },
+  ],
+  tv: [
+    { name: "儿童", conditions: { genre_ids: "10762" } },
+    {
+      name: "国漫",
+      conditions: { genre_ids: "16", origin_country: "CN,TW,HK" },
+    },
+    { name: "日番", conditions: { genre_ids: "16", origin_country: "JP" } },
+    {
+      name: "美漫",
+      conditions: { genre_ids: "16", origin_country: "US,CA,GB,FR,DE" },
+    },
+    { name: "纪录片剧集", conditions: { genre_ids: "99" } },
+    { name: "综艺", conditions: { genre_ids: "10764,10767" } },
+    { name: "国产剧", conditions: { origin_country: "CN,TW,HK,SG" } },
+    {
+      name: "欧美剧",
+      conditions: { origin_country: "US,FR,GB,DE,ES,IT,NL,PT,RU,UK" },
+    },
+    { name: "日韩剧", conditions: { origin_country: "JP,KP,KR,TH,IN,SG" } },
+    { name: "其它", conditions: {} },
+  ],
 };
 
 // ─────────────────── NOTIFY ───────────────────
@@ -170,25 +206,45 @@ function renderTaskTable(items) {
   const tbody = document.getElementById("taskTableBody");
   if (!items || items.length === 0) {
     tbody.innerHTML =
-      '<tr><td colspan="8" style="text-align:center;color:#9ca3af;padding:32px;">暂无任务</td></tr>';
+      '<tr><td colspan="7" style="text-align:center;color:#9ca3af;padding:32px;">暂无任务</td></tr>';
     return;
   }
   tbody.innerHTML = items
-    .map((t) => {
+    .map((t, i) => {
       const chk = S.selected.has(t.uuid) ? "checked" : "";
-      const nameCell = `<div style="font-weight:600;font-size:12px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${t.name || ""}">${t.name || "—"}</div>
-      <div style="font-size:11px;color:#9ca3af;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${t.path}">${t.path}</div>`;
-      const errCell =
+
+      // Resolve target path: new records use target_paths[], Python records use target_path string
+      const targetPath =
+        t.target_paths && t.target_paths.length > 0
+          ? t.target_paths[0]
+          : t.target_path || "";
+
+      const cellStyle =
+        "font-size:11px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+
+      // Name row
+      const nameRow = `<div style="font-weight:600;font-size:12px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escHtml(t.name || "")}">${escHtml(t.name || "—")}</div>`;
+
+      // Source path row (迁移前)
+      const srcRow = `<div style="${cellStyle}color:#6b7280;" title="${escHtml(t.path)}">📂 ${escHtml(t.path)}</div>`;
+
+      // Target path row (迁移后) — only shown when available
+      const tgtRow = targetPath
+        ? `<div style="${cellStyle}color:#16a34a;" title="${escHtml(targetPath)}">✅ ${escHtml(targetPath)}</div>`
+        : "";
+
+      // Error row
+      const errRow =
         t.status === "failed" && t.error
-          ? `<div style="font-size:11px;color:#dc2626;margin-top:2px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${t.error}">${t.error}</div>`
+          ? `<div style="${cellStyle}color:#dc2626;" title="${escHtml(t.error)}">❌ ${escHtml(t.error)}</div>`
           : "";
+
       return `<tr>
-      <td><input type="checkbox" class="chk row-chk" data-uuid="${t.uuid}" ${chk} onchange="onRowCheck(this)"/></td>
-      <td>${nameCell}${errCell}</td>
+      <td><input type="checkbox" class="chk row-chk" data-uuid="${t.uuid}" data-index="${i}" ${chk} onclick="onRowCheck(this, event)"/></td>
+      <td>${nameRow}${srcRow}${tgtRow}${errRow}</td>
       <td>${badgeForStatus(t.status)}</td>
       <td>${t.season_id != null ? t.season_id : "—"}</td>
-      <td>${t.episode_id > 0 ? t.episode_id : "—"}</td>
-      <td style="font-size:11px;color:#6b7280;">${t.tmdb_id || "—"}</td>
+      <td style="font-size:11px;color:#6b7280;">${escHtml(t.tmdb_id || "—")}</td>
       <td style="font-size:11px;color:#9ca3af;">${t.processed_at || "—"}</td>
       <td>
         <button class="btn-outline" style="padding:3px 8px;font-size:11px;" onclick="openEdit('${t.uuid}')">✏️</button>
@@ -222,10 +278,27 @@ function goPage(p) {
   loadTasks();
 }
 
-function onRowCheck(el) {
+function onRowCheck(el, evt) {
   const uuid = el.dataset.uuid;
-  if (el.checked) S.selected.add(uuid);
-  else S.selected.delete(uuid);
+  const idx = parseInt(el.dataset.index || "-1", 10);
+  if (evt && evt.shiftKey && S._lastCheckedIndex != null && idx >= 0) {
+    const start = Math.min(S._lastCheckedIndex, idx);
+    const end = Math.max(S._lastCheckedIndex, idx);
+    const state = el.checked;
+    document.querySelectorAll(".row-chk").forEach((c) => {
+      const ci = parseInt(c.dataset.index || "-1", 10);
+      if (ci >= start && ci <= end) {
+        c.checked = state;
+        const id = c.dataset.uuid;
+        if (state) S.selected.add(id);
+        else S.selected.delete(id);
+      }
+    });
+  } else {
+    if (el.checked) S.selected.add(uuid);
+    else S.selected.delete(uuid);
+  }
+  if (idx >= 0) S._lastCheckedIndex = idx;
   updateSelectionLabel();
 }
 
@@ -331,22 +404,20 @@ async function submitEdit() {
 
 // ─────────────────── SINGLE TASK ACTIONS ───────────────────
 async function retrySingle(uuid) {
+  const doCleanup = confirm("重试前是否清理已转移目标文件和空目录？");
+  const settings = doCleanup
+    ? { delete_transferred: true, cleanup_dirs: true }
+    : {};
   const { ok } = await POST("/api/tasks/retry", {
     uuids: [uuid],
-    settings: {},
+    settings,
   });
   notify(ok ? "已加入重试队列" : "重试提交失败", ok ? "positive" : "negative");
   if (ok) setTimeout(loadTasks, 800);
 }
 
 async function deleteSingle(uuid) {
-  if (!confirm("确认删除此任务记录？")) return;
-  const { ok } = await DEL(`/api/tasks/${uuid}`);
-  notify(ok ? "已删除" : "删除失败", ok ? "positive" : "negative");
-  if (ok) {
-    S.selected.delete(uuid);
-    loadTasks();
-  }
+  openDeleteModal([uuid]);
 }
 
 // ─────────────────── BATCH OPERATIONS ───────────────────
@@ -384,6 +455,11 @@ async function submitBatchRetry() {
   if (seasonID) settings.season_id = seasonID;
   if (offset) settings.episode_offset = offset;
 
+  const delTarget = document.getElementById("bRetryDelTarget")?.checked;
+  const cleanDirs = document.getElementById("bRetryCleanupDirs")?.checked;
+  if (delTarget) settings.delete_transferred = true;
+  if (cleanDirs) settings.cleanup_dirs = true;
+
   const { ok, data } = await POST("/api/tasks/retry", {
     uuids: [...S.selected],
     settings,
@@ -401,17 +477,41 @@ async function batchDelete() {
     notify("请先选择任务", "warning");
     return;
   }
-  if (!confirm(`确认删除选中的 ${S.selected.size} 条任务记录？`)) return;
+  openDeleteModal([...S.selected]);
+}
+
+function openDeleteModal(uuids) {
+  S._deleteTargets = uuids || [];
+  document.getElementById("deleteTaskCount").textContent =
+    `将删除 ${S._deleteTargets.length} 条任务记录`;
+  document.getElementById("delTargetFiles").checked = false;
+  document.getElementById("delSourceFiles").checked = false;
+  document.getElementById("delCleanupDirs").checked = false;
+  openModal("deleteTaskModal");
+}
+
+async function confirmDeleteTasks() {
+  const uuids = S._deleteTargets || [];
+  if (uuids.length === 0) {
+    closeModal("deleteTaskModal");
+    return;
+  }
+  const deleteFiles = document.getElementById("delTargetFiles").checked;
+  const deleteSource = document.getElementById("delSourceFiles").checked;
+  const cleanupDirs = document.getElementById("delCleanupDirs").checked;
   const { ok, data } = await POST("/api/tasks/delete", {
-    uuids: [...S.selected],
-    delete_files: false,
+    uuids,
+    delete_files: deleteFiles,
+    delete_source: deleteSource,
+    cleanup_dirs: cleanupDirs,
   });
+  closeModal("deleteTaskModal");
   notify(
     ok ? `已删除 ${data.deleted || 0} 条` : "删除失败",
     ok ? "positive" : "negative",
   );
   if (ok) {
-    S.selected.clear();
+    uuids.forEach((u) => S.selected.delete(u));
     loadTasks();
   }
 }
@@ -576,6 +676,7 @@ const CONFIG_LABELS = {
   scrape_image_types: "🖼 刮削图片类型",
   subtitle_extensions: "💬 字幕扩展名",
   secondary_classification: "📂 二级分类",
+  secondary_rules: "🎨 二级分类规则",
   docker_mnt: "🐳 Docker挂载路径",
   log_level: "📝 日志等级",
   ai_provider: "🤖 AI提供商",
@@ -593,8 +694,8 @@ const CONFIG_LABELS = {
   ai_auto_save: "💾 自动保存 AI 分析",
   monitor_enabled: "👁 启用监控",
   monitor_mode: "⚙ 监控模式",
-  monitor_paths: "📁 监控目录 (JSON)",
-  monitor_exclude_dirs: "🚫 监控排除目录 (JSON)",
+  monitor_paths: "📁 监控目录",
+  monitor_exclude_dirs: "🚫 监控排除目录",
 };
 
 const CONFIG_SELECT_OPTIONS = {
@@ -614,15 +715,30 @@ const CONFIG_BOOL_KEYS = new Set([
   "ai_auto_save",
   "monitor_enabled",
 ]);
-const CONFIG_JSON_KEYS = new Set([
+const CONFIG_JSON_KEYS = new Set(["exclude_dirs"]);
+const CONFIG_HIDDEN_KEYS = new Set([]);
+
+// Keys that get a friendly UI instead of raw JSON textareas
+const CONFIG_FRIENDLY_KEYS = new Set([
   "scrape_image_types",
   "subtitle_extensions",
-  "exclude_dirs",
+  "secondary_rules",
   "monitor_paths",
   "monitor_exclude_dirs",
-  "secondary_rules",
 ]);
-const CONFIG_HIDDEN_KEYS = new Set(["secondary_rules"]);
+
+// Predefined options for checkbox-style friendly keys
+const SCRAPE_IMAGE_OPTIONS = [
+  "poster",
+  "backdrop",
+  "logo",
+  "banner",
+  "thumb",
+  "art",
+  "clearlogo",
+  "landscape",
+];
+const SUBTITLE_EXT_OPTIONS = [".ass", ".srt", ".sub", ".ssa", ".vtt"];
 
 async function openConfig() {
   const { ok, data } = await GET("/api/config");
@@ -665,6 +781,7 @@ function renderConfigForm(cfg) {
         "scrape_image_types",
         "subtitle_extensions",
         "secondary_classification",
+        "secondary_rules",
       ],
     },
     { label: "日志", keys: ["log_level"] },
@@ -711,7 +828,9 @@ function renderConfigForm(cfg) {
       const val = cfg[key];
       let input = "";
 
-      if (CONFIG_BOOL_KEYS.has(key)) {
+      if (CONFIG_FRIENDLY_KEYS.has(key)) {
+        input = renderFriendlyConfig(key, val);
+      } else if (CONFIG_BOOL_KEYS.has(key)) {
         const checked = val ? "checked" : "";
         input = `<label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" class="chk" id="cfg_${key}" ${checked}/><span style="font-size:13px;">启用</span></label>`;
       } else if (CONFIG_SELECT_OPTIONS[key]) {
@@ -745,11 +864,493 @@ function renderConfigForm(cfg) {
   form.innerHTML = html;
 }
 
+// ─────────────────── FRIENDLY CONFIG RENDERERS ───────────────────
+
+function renderFriendlyConfig(key, val) {
+  if (key === "scrape_image_types")
+    return renderCheckboxList(key, SCRAPE_IMAGE_OPTIONS, toStringArray(val));
+  if (key === "subtitle_extensions")
+    return renderCheckboxList(key, SUBTITLE_EXT_OPTIONS, toStringArray(val));
+  if (key === "secondary_rules") return renderSecondaryRules(val);
+  if (key === "monitor_paths") return renderMonitorPaths(val);
+  if (key === "monitor_exclude_dirs")
+    return renderStringListEditor(
+      key,
+      toStringArray(val),
+      "输入排除目录关键词",
+    );
+  return "";
+}
+
+function toStringArray(val) {
+  if (!val) return [];
+  if (Array.isArray(val))
+    return val.map((v) =>
+      typeof v === "string" ? v : v.path || JSON.stringify(v),
+    );
+  if (typeof val === "string") {
+    try {
+      const p = JSON.parse(val);
+      return Array.isArray(p)
+        ? p.map((v) => (typeof v === "string" ? v : v.path || ""))
+        : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function renderCheckboxList(key, options, selected) {
+  const items = options
+    .map((opt) => {
+      const checked = selected.includes(opt) ? "checked" : "";
+      return `<label style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;cursor:pointer;font-size:13px;">
+      <input type="checkbox" class="chk friendly-chk" data-cfg-key="${key}" value="${escHtml(opt)}" ${checked}/>${escHtml(opt)}
+    </label>`;
+    })
+    .join("");
+  return `<div id="cfg_${key}" style="display:flex;flex-wrap:wrap;gap:4px 0;">${items}</div>`;
+}
+
+function renderMonitorPaths(val) {
+  // Parse monitor_paths: can be [{path, is_anime?, ...}] or ["str"] or JSON string
+  let paths = [];
+  const raw = val || [];
+  const arr = Array.isArray(raw)
+    ? raw
+    : (() => {
+        try {
+          return JSON.parse(raw);
+        } catch {
+          return [];
+        }
+      })();
+  for (const item of arr) {
+    if (typeof item === "string") {
+      paths.push({ path: item, is_anime: null, is_movie: null });
+    } else if (item && typeof item === "object") {
+      paths.push({
+        path: item.path || "",
+        is_anime:
+          item.is_anime === true
+            ? true
+            : item.is_anime === false
+              ? false
+              : null,
+        is_movie:
+          item.is_movie === true
+            ? true
+            : item.is_movie === false
+              ? false
+              : null,
+        tv_rename_format: item.tv_rename_format || "",
+        movie_rename_format: item.movie_rename_format || "",
+        mode: item.mode || "",
+        overwrite_mode: item.overwrite_mode || "",
+        scan_now: item.scan_now === true,
+      });
+    }
+  }
+
+  // Store in global state for dynamic add/remove
+  S._monitorPaths = paths;
+
+  return `<div id="cfg_monitor_paths">
+    <div id="monitorPathsList">${renderMonitorPathItems(paths)}</div>
+    <div style="display:flex;gap:8px;margin-top:8px;">
+      <input type="text" id="newMonitorPathInput" placeholder="输入目录路径，如 /media/downloads" style="flex:1;"/>
+      <select id="newMonitorPathAnime" style="width:auto;">
+        <option value="">自动</option>
+        <option value="true">是动漫</option>
+        <option value="false">非动漫</option>
+      </select>
+      <button class="btn-outline" style="padding:4px 12px;font-size:12px;white-space:nowrap;" onclick="addMonitorPath()">+ 添加</button>
+    </div>
+  </div>`;
+}
+
+function renderMonitorPathItems(paths) {
+  if (!paths || paths.length === 0) {
+    return '<div style="color:#9ca3af;font-size:12px;padding:8px 0;">暂未配置监控目录</div>';
+  }
+  return paths
+    .map((p, i) => {
+      const animeLabel =
+        p.is_anime === true ? "动漫" : p.is_anime === false ? "非动漫" : "自动";
+      const animeBadge =
+        p.is_anime === true
+          ? '<span style="background:#dbeafe;color:#2563eb;padding:1px 6px;border-radius:9999px;font-size:10px;margin-left:6px;">动漫</span>'
+          : p.is_anime === false
+            ? '<span style="background:#f3f4f6;color:#6b7280;padding:1px 6px;border-radius:9999px;font-size:10px;margin-left:6px;">非动漫</span>'
+            : "";
+      const movieBadge =
+        p.is_movie === true
+          ? '<span style="background:#fee2e2;color:#b91c1c;padding:1px 6px;border-radius:9999px;font-size:10px;margin-left:6px;">电影</span>'
+          : p.is_movie === false
+            ? '<span style="background:#e0f2fe;color:#0369a1;padding:1px 6px;border-radius:9999px;font-size:10px;margin-left:6px;">电视剧</span>'
+            : "";
+      const tvBadge = p.tv_rename_format
+        ? '<span style="background:#ecfccb;color:#4d7c0f;padding:1px 6px;border-radius:9999px;font-size:10px;margin-left:6px;">TV 模板</span>'
+        : "";
+      const movieTplBadge = p.movie_rename_format
+        ? '<span style="background:#fee2e2;color:#b91c1c;padding:1px 6px;border-radius:9999px;font-size:10px;margin-left:6px;">Movie 模板</span>'
+        : "";
+      return `<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:#f9fafb;border-radius:8px;margin-bottom:4px;">
+      <span style="font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escHtml(p.path)}">📁 ${escHtml(p.path)}</span>
+      ${animeBadge}${movieBadge}${tvBadge}${movieTplBadge}
+      <button class="btn-outline" style="padding:2px 8px;font-size:11px;flex-shrink:0;" onclick="openMonitorPathEditor(${i})">配置</button>
+      <button class="btn-outline" style="padding:2px 8px;font-size:11px;color:#dc2626;border-color:#dc2626;flex-shrink:0;" onclick="removeMonitorPath(${i})">✕</button>
+    </div>`;
+    })
+    .join("");
+}
+
+function addMonitorPath() {
+  const input = document.getElementById("newMonitorPathInput");
+  const animeSelect = document.getElementById("newMonitorPathAnime");
+  const path = input.value.trim();
+  if (!path) {
+    notify("请输入目录路径", "warning");
+    return;
+  }
+
+  const animeVal = animeSelect.value;
+  const entry = {
+    path,
+    is_anime: animeVal === "true" ? true : animeVal === "false" ? false : null,
+    is_movie: null,
+    tv_rename_format: "",
+    movie_rename_format: "",
+    mode: "",
+    overwrite_mode: "",
+    scan_now: false,
+  };
+  S._monitorPaths.push(entry);
+
+  document.getElementById("monitorPathsList").innerHTML =
+    renderMonitorPathItems(S._monitorPaths);
+  input.value = "";
+  animeSelect.value = "";
+}
+
+function removeMonitorPath(idx) {
+  S._monitorPaths.splice(idx, 1);
+  document.getElementById("monitorPathsList").innerHTML =
+    renderMonitorPathItems(S._monitorPaths);
+}
+
+function openMonitorPathEditor(idx) {
+  const p = (S._monitorPaths || [])[idx];
+  if (!p) return;
+  S._monitorPathEditIndex = idx;
+  document.getElementById("monitorPathEditPath").value = p.path || "";
+  document.getElementById("monitorPathEditAnime").value =
+    p.is_anime === true ? "true" : p.is_anime === false ? "false" : "";
+  document.getElementById("monitorPathEditMovie").value =
+    p.is_movie === true ? "true" : p.is_movie === false ? "false" : "";
+  document.getElementById("monitorPathTvTemplate").value =
+    p.tv_rename_format || "";
+  document.getElementById("monitorPathMovieTemplate").value =
+    p.movie_rename_format || "";
+  document.getElementById("monitorPathMode").value = p.mode || "";
+  document.getElementById("monitorPathOverwrite").value =
+    p.overwrite_mode || "";
+  document.getElementById("monitorPathScanNow").checked = p.scan_now === true;
+  openModal("monitorPathModal");
+}
+
+function saveMonitorPathEditor() {
+  const idx = S._monitorPathEditIndex;
+  if (idx === null || idx === undefined) return;
+  const p = (S._monitorPaths || [])[idx];
+  if (!p) return;
+
+  const animeVal = document.getElementById("monitorPathEditAnime").value;
+  const movieVal = document.getElementById("monitorPathEditMovie").value;
+  const tvFormat = document
+    .getElementById("monitorPathTvTemplate")
+    .value.trim();
+  const movieFormat = document
+    .getElementById("monitorPathMovieTemplate")
+    .value.trim();
+  const mode = document.getElementById("monitorPathMode").value;
+  const overwrite = document.getElementById("monitorPathOverwrite").value;
+  const scanNow = document.getElementById("monitorPathScanNow").checked;
+
+  p.is_anime = animeVal === "true" ? true : animeVal === "false" ? false : null;
+  p.is_movie = movieVal === "true" ? true : movieVal === "false" ? false : null;
+  p.tv_rename_format = tvFormat;
+  p.movie_rename_format = movieFormat;
+  p.mode = mode;
+  p.overwrite_mode = overwrite;
+  p.scan_now = scanNow;
+
+  document.getElementById("monitorPathsList").innerHTML =
+    renderMonitorPathItems(S._monitorPaths);
+  closeModal("monitorPathModal");
+}
+
+function renderStringListEditor(key, items, placeholder) {
+  S["_list_" + key] = [...items];
+
+  return `<div id="cfg_${key}">
+    <div id="${key}List">${renderStringListItems(key, items)}</div>
+    <div style="display:flex;gap:8px;margin-top:8px;">
+      <input type="text" id="new_${key}_input" placeholder="${escHtml(placeholder)}" style="flex:1;"/>
+      <button class="btn-outline" style="padding:4px 12px;font-size:12px;white-space:nowrap;" onclick="addStringListItem('${key}')">+ 添加</button>
+    </div>
+  </div>`;
+}
+
+function renderStringListItems(key, items) {
+  if (!items || items.length === 0) {
+    return '<div style="color:#9ca3af;font-size:12px;padding:8px 0;">暂未配置</div>';
+  }
+  return items
+    .map(
+      (item, i) =>
+        `<div style="display:flex;align-items:center;gap:8px;padding:4px 10px;background:#f9fafb;border-radius:8px;margin-bottom:4px;">
+      <span style="font-size:13px;flex:1;">${escHtml(item)}</span>
+      <button class="btn-outline" style="padding:2px 8px;font-size:11px;color:#dc2626;border-color:#dc2626;" onclick="removeStringListItem('${key}',${i})">✕</button>
+    </div>`,
+    )
+    .join("");
+}
+
+function addStringListItem(key) {
+  const input = document.getElementById(`new_${key}_input`);
+  const val = input.value.trim();
+  if (!val) return;
+  S["_list_" + key].push(val);
+  document.getElementById(`${key}List`).innerHTML = renderStringListItems(
+    key,
+    S["_list_" + key],
+  );
+  input.value = "";
+}
+
+function removeStringListItem(key, idx) {
+  S["_list_" + key].splice(idx, 1);
+  document.getElementById(`${key}List`).innerHTML = renderStringListItems(
+    key,
+    S["_list_" + key],
+  );
+}
+
+// ─────────────────── SECONDARY RULES EDITOR ───────────────────
+
+function renderSecondaryRules(val) {
+  let rules = { movie: [], tv: [] };
+  try {
+    if (val && typeof val === "object") {
+      rules.movie = Array.isArray(val.movie)
+        ? JSON.parse(JSON.stringify(val.movie))
+        : [];
+      rules.tv = Array.isArray(val.tv)
+        ? JSON.parse(JSON.stringify(val.tv))
+        : [];
+    }
+  } catch (e) {}
+  S._secondaryRules = rules;
+
+  return `<div id="cfg_secondary_rules">
+  <div style="font-size:11px;color:#6b7280;margin-bottom:8px;line-height:1.6;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:8px;">
+    规则按顺序匹配，第一个命中的规则生效。所有条件留空则为兜底规则（匹配其余所有内容）。<br>
+    <strong>genre_ids：</strong>16=动漫 &nbsp;99=纪录片 &nbsp;10762=儿童 &nbsp;10764=真人秀 &nbsp;10767=综艺 &nbsp;10402=音乐<br>
+    <strong>origin_country：</strong>CN=中国 &nbsp;HK=香港 &nbsp;TW=台湾 &nbsp;JP=日本 &nbsp;KR=韩国 &nbsp;US=美国 &nbsp;GB=英国
+  </div>
+  <div style="margin-bottom:12px;">
+    <div style="font-size:12px;font-weight:600;color:#374151;margin-bottom:6px;">🎬 电影规则</div>
+    <div style="font-size:11px;color:#9ca3af;margin-bottom:4px;display:flex;gap:4px;padding:0 2px;">
+      <span style="width:20px;"></span>
+      <span style="width:100px;">文件夹名称</span>
+      <span style="width:110px;">genre_ids</span>
+      <span style="width:120px;">origin_country</span>
+      <span style="width:80px;">语言(lang)</span>
+    </div>
+    <div id="sec_movie_list">${renderSecRuleItems("movie")}</div>
+    <button class="btn-gray" style="margin-top:6px;font-size:12px;padding:3px 12px;" onclick="addSecRule('movie')">+ 添加电影规则</button>
+  </div>
+  <div>
+    <div style="font-size:12px;font-weight:600;color:#374151;margin-bottom:6px;">📺 TV 规则</div>
+    <div style="font-size:11px;color:#9ca3af;margin-bottom:4px;display:flex;gap:4px;padding:0 2px;">
+      <span style="width:20px;"></span>
+      <span style="width:100px;">文件夹名称</span>
+      <span style="width:110px;">genre_ids</span>
+      <span style="width:120px;">origin_country</span>
+      <span style="width:80px;">语言(lang)</span>
+    </div>
+    <div id="sec_tv_list">${renderSecRuleItems("tv")}</div>
+    <button class="btn-gray" style="margin-top:6px;font-size:12px;padding:3px 12px;" onclick="addSecRule('tv')">+ 添加 TV 规则</button>
+  </div>
+  <div style="margin-top:10px;">
+    <button class="btn-outline" style="font-size:12px;padding:3px 12px;" onclick="resetSecRules()">↩ 重置为默认规则</button>
+  </div>
+</div>`;
+}
+
+function renderSecRuleItems(type) {
+  const rules = (S._secondaryRules || {})[type] || [];
+  if (rules.length === 0) {
+    return '<div style="color:#9ca3af;font-size:12px;padding:4px 2px;">暂无规则</div>';
+  }
+  return rules
+    .map((rule, idx) => {
+      const conds = rule.conditions || {};
+      const isLast = idx === rules.length - 1;
+      return `<div style="display:flex;align-items:center;gap:4px;padding:4px 6px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:4px;margin-bottom:3px;">
+      <span style="color:#9ca3af;font-size:11px;width:20px;text-align:center;flex-shrink:0;">#${idx + 1}</span>
+      <input type="text" value="${escHtml(rule.name || "")}" placeholder="文件夹名称"
+        title="分类文件夹名称"
+        style="width:100px;font-size:12px;padding:2px 4px;border:1px solid #d1d5db;border-radius:3px;"
+        oninput="updateSecRule('${type}',${idx},'name',null,this.value)"/>
+      <input type="text" value="${escHtml(conds.genre_ids || "")}" placeholder="如: 16,99"
+        title="类型ID，逗号分隔，如: 16,99"
+        style="width:110px;font-size:12px;padding:2px 4px;border:1px solid #d1d5db;border-radius:3px;"
+        oninput="updateSecRule('${type}',${idx},'conditions','genre_ids',this.value)"/>
+      <input type="text" value="${escHtml(conds.origin_country || "")}" placeholder="如: CN,JP,US"
+        title="国家/地区代码，逗号分隔，如: CN,JP"
+        style="width:120px;font-size:12px;padding:2px 4px;border:1px solid #d1d5db;border-radius:3px;"
+        oninput="updateSecRule('${type}',${idx},'conditions','origin_country',this.value)"/>
+      <input type="text" value="${escHtml(conds.original_language || "")}" placeholder="如: zh,ja"
+        title="语言代码，逗号分隔，如: zh,ja"
+        style="width:80px;font-size:12px;padding:2px 4px;border:1px solid #d1d5db;border-radius:3px;"
+        oninput="updateSecRule('${type}',${idx},'conditions','original_language',this.value)"/>
+      <button onclick="moveSecRule('${type}',${idx},-1)" title="上移"
+        style="padding:2px 6px;font-size:11px;background:#e5e7eb;border:1px solid #d1d5db;border-radius:3px;cursor:pointer;"
+        ${idx === 0 ? "disabled" : ""}>▲</button>
+      <button onclick="moveSecRule('${type}',${idx},1)" title="下移"
+        style="padding:2px 6px;font-size:11px;background:#e5e7eb;border:1px solid #d1d5db;border-radius:3px;cursor:pointer;"
+        ${isLast ? "disabled" : ""}>▼</button>
+      <button onclick="removeSecRule('${type}',${idx})" title="删除此规则"
+        style="padding:2px 6px;font-size:11px;color:#ef4444;background:#fee2e2;border:1px solid #fca5a5;border-radius:3px;cursor:pointer;">×</button>
+    </div>`;
+    })
+    .join("");
+}
+
+function updateSecRule(type, idx, field, subfield, value) {
+  if (!S._secondaryRules || !S._secondaryRules[type]) return;
+  const rule = S._secondaryRules[type][idx];
+  if (!rule) return;
+  if (subfield) {
+    if (!rule.conditions) rule.conditions = {};
+    rule.conditions[subfield] = value;
+  } else {
+    rule[field] = value;
+  }
+}
+
+function addSecRule(type) {
+  if (!S._secondaryRules) S._secondaryRules = { movie: [], tv: [] };
+  S._secondaryRules[type].push({ name: "新分类", conditions: {} });
+  const el = document.getElementById(`sec_${type}_list`);
+  if (el) el.innerHTML = renderSecRuleItems(type);
+}
+
+function removeSecRule(type, idx) {
+  if (!S._secondaryRules || !S._secondaryRules[type]) return;
+  S._secondaryRules[type].splice(idx, 1);
+  const el = document.getElementById(`sec_${type}_list`);
+  if (el) el.innerHTML = renderSecRuleItems(type);
+}
+
+function moveSecRule(type, idx, dir) {
+  if (!S._secondaryRules || !S._secondaryRules[type]) return;
+  const arr = S._secondaryRules[type];
+  const newIdx = idx + dir;
+  if (newIdx < 0 || newIdx >= arr.length) return;
+  [arr[idx], arr[newIdx]] = [arr[newIdx], arr[idx]];
+  const el = document.getElementById(`sec_${type}_list`);
+  if (el) el.innerHTML = renderSecRuleItems(type);
+}
+
+function resetSecRules() {
+  if (!confirm("确认重置为默认规则？当前规则将被覆盖。")) return;
+  S._secondaryRules = JSON.parse(JSON.stringify(DEFAULT_SECONDARY_RULES));
+  const movieEl = document.getElementById("sec_movie_list");
+  if (movieEl) movieEl.innerHTML = renderSecRuleItems("movie");
+  const tvEl = document.getElementById("sec_tv_list");
+  if (tvEl) tvEl.innerHTML = renderSecRuleItems("tv");
+}
+
+// ─────────────────── AI TEST ───────────────────
+
+async function testAI() {
+  const nameEl = document.getElementById("aiTestName");
+  const name = nameEl ? nameEl.value.trim() : "";
+  const statusEl = document.getElementById("aiTestStatus");
+  statusEl.textContent = "🔄 测试中…";
+  statusEl.style.color = "#6b7280";
+
+  const { ok, data } = await POST("/api/ai/test", {
+    name: name || "进击的巨人 (2013)",
+  });
+
+  if (ok && data.ok) {
+    statusEl.textContent = data.message;
+    statusEl.style.color = "#16a34a";
+  } else {
+    statusEl.textContent = "❌ " + (data?.message || "测试失败");
+    statusEl.style.color = "#dc2626";
+  }
+}
+
+// Collect friendly config values for save
+function collectFriendlyValue(key) {
+  if (key === "secondary_rules") {
+    return S._secondaryRules || { movie: [], tv: [] };
+  }
+  if (key === "scrape_image_types" || key === "subtitle_extensions") {
+    const checks = document.querySelectorAll(
+      `input.friendly-chk[data-cfg-key="${key}"]:checked`,
+    );
+    return Array.from(checks).map((c) => c.value);
+  }
+  if (key === "monitor_paths") {
+    return (S._monitorPaths || []).map((p) => {
+      const hasExtras =
+        p.is_anime !== null ||
+        p.is_movie !== null ||
+        (p.tv_rename_format && p.tv_rename_format.trim() !== "") ||
+        (p.movie_rename_format && p.movie_rename_format.trim() !== "") ||
+        (p.mode && p.mode.trim() !== "") ||
+        (p.overwrite_mode && p.overwrite_mode.trim() !== "") ||
+        p.scan_now === true;
+      if (!hasExtras) return p.path;
+      const entry = { path: p.path };
+      if (p.is_anime !== null) entry.is_anime = p.is_anime;
+      if (p.is_movie !== null) entry.is_movie = p.is_movie;
+      if (p.tv_rename_format && p.tv_rename_format.trim() !== "")
+        entry.tv_rename_format = p.tv_rename_format.trim();
+      if (p.movie_rename_format && p.movie_rename_format.trim() !== "")
+        entry.movie_rename_format = p.movie_rename_format.trim();
+      if (p.mode && p.mode.trim() !== "") entry.mode = p.mode.trim();
+      if (p.overwrite_mode && p.overwrite_mode.trim() !== "")
+        entry.overwrite_mode = p.overwrite_mode.trim();
+      if (p.scan_now === true) entry.scan_now = true;
+      return entry;
+    });
+  }
+  if (key === "monitor_exclude_dirs") {
+    return S["_list_" + key] || [];
+  }
+  return [];
+}
+
 async function saveConfig() {
   const cfg = { ...S.configData };
 
   Object.keys(CONFIG_LABELS).forEach((key) => {
     if (CONFIG_HIDDEN_KEYS.has(key)) return;
+
+    // Friendly keys are collected via collectFriendlyValue, not from a single DOM element
+    if (CONFIG_FRIENDLY_KEYS.has(key)) {
+      cfg[key] = collectFriendlyValue(key);
+      return;
+    }
+
     const el = document.getElementById(`cfg_${key}`);
     if (!el) return;
 
@@ -772,7 +1373,22 @@ async function saveConfig() {
   if (ok) {
     closeModal("configModal");
     notify("配置已保存", "positive");
-    await POST("/api/monitor/restart", {});
+    S.configData = cfg;
+    if (S._monitorPaths) {
+      S._monitorPaths.forEach((p) => {
+        p.scan_now = false;
+      });
+    }
+    const needRestart = ["monitor_enabled", "monitor_mode", "monitor_paths"].some(
+      (k) => JSON.stringify(cfg[k]) !== JSON.stringify(S.configData[k]),
+    );
+    if (needRestart) {
+      await POST("/api/monitor/restart", {});
+    } else {
+      await POST("/api/monitor/exclude", {
+        exclude_dirs: cfg.monitor_exclude_dirs || [],
+      });
+    }
   } else {
     notify("保存失败", "negative");
   }

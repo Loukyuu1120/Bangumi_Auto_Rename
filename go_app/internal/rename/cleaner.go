@@ -57,6 +57,13 @@ var keywordsToClean = []string{
 	"DBD-raws", "Remux", "AVC", "H264", "H265", "DTS", "DTS-HD",
 	"TrueHD", "Atmos", "HDR", "DV", "Dolby", "AAC", "AC3", "HQ",
 	"Web-DL", "BluRay",
+	// Streaming platform tags
+	"ATVP", "AMZN", "NF", "DSNP", "HMAX", "PCOK", "PMTP",
+	"HULU", "CRAV", "STAN", "ITVX", "RED",
+	// Additional codecs / formats
+	"DDP", "EAC3", "OPUS", "LPCM", "PCM", "MP3",
+	"WEBRip", "HDTV", "BDRip", "DVDRip", "WEBDL",
+	"内封简繁中字", "内封简繁", "中字",
 }
 
 // bracketPattern matches common bracket types and their contents.
@@ -65,8 +72,8 @@ var bracketPattern = regexp.MustCompile(`\[.*?\]|【.*?】|《.*?》|<.*?>|\(.*?
 // codePatterns match technical encoding info that is noise in titles.
 var codePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(2160|1080|720|480|576)[pP]`),
-	regexp.MustCompile(`(?i)x264|x265|h264|h265|hevc|avc|mpeg2|vp9|av1`),
-	regexp.MustCompile(`(?i)(dts-?hd|dts|truehd|atmos|ac3|aac|flac|opus|mp3|pcm)(\W*\d+\.\d)?(audio|ch|channel)?`),
+	regexp.MustCompile(`(?i)(x|h)[\W_]?26[45]|hevc|avc|mpeg2|vp9|av1`),
+	regexp.MustCompile(`(?i)(dts-?hd|dts|truehd|atmos|ac3|aac|flac|opus|mp3|pcm|ddp|eac3)([\W_]*\d+\.\d)?(audio|ch|channel)?`),
 	regexp.MustCompile(`(?i)\b\d{1,2}\.\d(audio|ch|channel|sound)\b`),
 	regexp.MustCompile(`(?i)hdr|dv|dolby|10bit|8bit`),
 	regexp.MustCompile(`(?i)remux|bluray|web-dl|webrip|hdtv|bdrip|dvdrip`),
@@ -88,7 +95,7 @@ var seasonPatterns = []*regexp.Regexp{
 
 // episodePatterns attempt to extract episode (and optionally season) numbers.
 var episodePatterns = []*regexp.Regexp{
-	regexp.MustCompile(`第\s*(\d+)\s*季\s*(\d+)(?!\d)`),    // 第1季06
+	regexp.MustCompile(`第\s*(\d+)\s*季\s*(\d{1,3})`),      // 第1季06
 	regexp.MustCompile(`[Ss]([\d]{1,2})[Ee]([\d]{1,3})`), // S01E06
 	regexp.MustCompile(`[Ee]([\d]{1,3})`),                // E06
 	regexp.MustCompile(`[Ee][Pp]([\d]{1,3})`),            // EP06
@@ -156,6 +163,13 @@ func RemoveTag(title, tag string) string {
 
 // CleanNoise removes common encoding noise words and bracket content from a title.
 func CleanNoise(title string) string {
+	// Remove video file extension if present
+	if ext := strings.ToLower(filepath.Ext(title)); ext != "" {
+		if VideoSuffix[ext] {
+			title = strings.TrimSuffix(title, filepath.Ext(title))
+		}
+	}
+
 	// Remove bracket content
 	title = bracketPattern.ReplaceAllString(title, " ")
 
@@ -163,6 +177,10 @@ func CleanNoise(title string) string {
 	for _, p := range codePatterns {
 		title = p.ReplaceAllString(title, " ")
 	}
+
+	// Remove copy markers like "的副本 3" and release-group suffixes like "-ABC"
+	title = regexp.MustCompile(`\s*的副本\s*\d*$`).ReplaceAllString(title, "")
+	title = regexp.MustCompile(`-[A-Za-z0-9]+$`).ReplaceAllString(title, "")
 
 	// Remove known noise keywords (case-insensitive)
 	for _, kw := range keywordsToClean {
@@ -174,6 +192,83 @@ func CleanNoise(title string) string {
 	wsRe := regexp.MustCompile(`\s{2,}`)
 	title = wsRe.ReplaceAllString(strings.TrimSpace(title), " ")
 	return title
+}
+
+// ParseSearchName extracts a clean search title and year from a raw filename.
+// It mirrors the Python parser: truncate at year/season markers and strip
+// trailing technical tags to keep only the show/movie title.
+func ParseSearchName(input string) (string, int) {
+	name := filepath.Base(input)
+	if ext := strings.ToLower(filepath.Ext(name)); ext != "" {
+		if VideoSuffix[ext] {
+			name = strings.TrimSuffix(name, filepath.Ext(name))
+		}
+	}
+
+	clean := name
+	year := 0
+	yearRe := regexp.MustCompile(`(?i)(?:[.\s\-_\(\[（【]|^)([12][90]\d{2})(?:[.\s\-_\)\]）】]|$)`)
+	if idx := yearRe.FindStringSubmatchIndex(clean); idx != nil {
+		yearStr := clean[idx[2]:idx[3]]
+		if y, err := strconv.Atoi(yearStr); err == nil {
+			year = y
+		}
+		if idx[2] > 0 {
+			clean = clean[:idx[2]]
+		}
+	}
+
+	// Remove bracket content/tags
+	clean = bracketPattern.ReplaceAllString(clean, " ")
+	// Go RE2 doesn't support lookahead; use a safe fallback to drop "A <CJK>" prefixes.
+	clean = regexp.MustCompile(`^[A-Za-z]\s+[\p{Han}]`).ReplaceAllStringFunc(clean, func(s string) string {
+		parts := strings.Fields(s)
+		if len(parts) >= 2 {
+			return parts[len(parts)-1]
+		}
+		return ""
+	})
+
+	// Truncate at season/episode markers
+	seasonMarkers := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)[.\s\-_]S(\d{1,2})(?:E|EP)(\d{1,3})`),
+		regexp.MustCompile(`(?i)[.\s\-_]S(\d{1,2})\s*-\s*S?(\d{1,2})`),
+		regexp.MustCompile(`(?i)[.\s\-_]S(\d{1,2})(?:$|[.\s\-_])`),
+		regexp.MustCompile(`(?i)[.\s\-_]Season[.\s\-_]*(\d{1,2})`),
+		regexp.MustCompile(`(?i)[.\s\-_]?第\s*(\d+|[零一二三四五六七八九十百千万]+)\s*季`),
+	}
+	cutAt := -1
+	for _, re := range seasonMarkers {
+		if loc := re.FindStringIndex(clean); loc != nil {
+			if cutAt == -1 || loc[0] < cutAt {
+				cutAt = loc[0]
+			}
+		}
+	}
+	if cutAt >= 0 {
+		clean = clean[:cutAt]
+	}
+
+	// If no year/season, truncate at resolution or codec markers
+	if year == 0 && cutAt < 0 {
+		resRe := regexp.MustCompile(`(?i)[.\s\-_](1080p|2160p|720p|480p|576p|4k)`)
+		if loc := resRe.FindStringIndex(clean); loc != nil {
+			clean = clean[:loc[0]]
+		} else {
+			codecRe := regexp.MustCompile(`(?i)[.\s\-_]((x|h)\.?26[45]|hevc|avc)`)
+			if loc := codecRe.FindStringIndex(clean); loc != nil {
+				clean = clean[:loc[0]]
+			}
+		}
+	}
+
+	clean = strings.ReplaceAll(clean, "：", " ")
+	clean = strings.ReplaceAll(clean, ":", " ")
+	clean = strings.NewReplacer(".", " ", "_", " ").Replace(clean)
+	clean = regexp.MustCompile(`\s+`).ReplaceAllString(clean, " ")
+	clean = strings.Trim(clean, " .-[]()")
+
+	return clean, year
 }
 
 // ExtractSeason tries to parse a season number from a string.
@@ -252,13 +347,13 @@ func ExtractEpisode(stem string) EpisodeInfo {
 
 // ExtractTMDBID looks for patterns like {tmdb-12345} or [tmdbid=12345] and returns the ID string.
 func ExtractTMDBID(s string) string {
+	// Matches tmdb=123, [tmdb=123], {tmdb:123}, 【tmdb-123】, tmdbid:123, etc.
 	patterns := []*regexp.Regexp{
-		regexp.MustCompile(`\{tmdb-(\d+)\}`),
-		regexp.MustCompile(`(?i)\[tmdbid=(\d+)\]`),
-		regexp.MustCompile(`(?i)tmdb[_-]?id[=:](\d+)`),
+		regexp.MustCompile(`(?i)[\[\(\\{【［]?\s*tmdb(?:id)?\s*[-:=]\s*(\d+)\s*[\]\)\\}】］]?`),
+		regexp.MustCompile(`(?i)\btmdb(?:id)?\s*(\d+)\b`),
 	}
-	for _, p := range patterns {
-		if m := p.FindStringSubmatch(s); m != nil {
+	for _, re := range patterns {
+		if m := re.FindStringSubmatch(s); m != nil {
 			return m[1]
 		}
 	}
@@ -374,6 +469,10 @@ type MediaInfo struct {
 	HDR        string
 	QualityTag string
 	Resolution string
+	FPS        string
+	Channels   string
+	Group      string
+	Part       string
 }
 
 var mediaMapping = map[string]map[string][]string{
@@ -442,6 +541,36 @@ func ExtractMediaInfo(filename string) MediaInfo {
 	resRe := regexp.MustCompile(`(2160|1080|720|480)[pPiI]`)
 	if m := resRe.FindStringSubmatch(filename); m != nil {
 		info.Resolution = m[0]
+	}
+
+	// FPS
+	fpsRe := regexp.MustCompile(`(?i)(\d{2,3})\s?FPS`)
+	if m := fpsRe.FindStringSubmatch(filename); m != nil {
+		info.FPS = strings.ToLower(m[1] + "fps")
+	}
+
+	// Channels
+	chanRe := regexp.MustCompile(`([257]\.[01])`)
+	if m := chanRe.FindStringSubmatch(filename); m != nil {
+		info.Channels = m[1]
+	}
+
+	// Release group
+	groupRe := regexp.MustCompile(`-([a-zA-Z0-9_]+)(?:\[.*?\])?(?:\.[a-zA-Z0-9]{2,4})?$`)
+	if m := groupRe.FindStringSubmatch(filename); m != nil {
+		grp := m[1]
+		upperGrp := strings.ToUpper(grp)
+		if upperGrp != "DL" && upperGrp != "RIP" && upperGrp != "H264" && upperGrp != "H265" &&
+			upperGrp != "HEVC" && upperGrp != "AAC" && upperGrp != "MKV" && upperGrp != "MP4" &&
+			upperGrp != "STRM" && upperGrp != "ASS" {
+			info.Group = grp
+		}
+	}
+
+	// Part / disc
+	partRe := regexp.MustCompile(`(?i)(?:CD|PART|DISC)\s?(\d+)`)
+	if m := partRe.FindStringSubmatch(filename); m != nil {
+		info.Part = "CD" + m[1]
 	}
 
 	return info

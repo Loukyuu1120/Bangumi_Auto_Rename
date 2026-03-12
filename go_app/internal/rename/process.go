@@ -42,8 +42,11 @@ const (
 
 // TaskRecord is the persisted record for one processed file.
 type TaskRecord struct {
-	UUID        string     `json:"uuid"`
-	Path        string     `json:"path"`
+	UUID string `json:"uuid"`
+	Path string `json:"path"`
+	// TargetPath is kept for backwards-compatibility with Python-generated records
+	// (which used a singular "target_path" string).  New records use TargetPaths.
+	TargetPath  string     `json:"target_path,omitempty"`
 	Name        string     `json:"name"`
 	Status      TaskStatus `json:"status"`
 	ErrMsg      string     `json:"error,omitempty"`
@@ -124,6 +127,46 @@ func (p *Processor) Process(srcPath string, opts TaskOptions, uuid string) *Task
 func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) error {
 	cfg := p.cfg.GetConfig()
 
+	// Pick up embedded TMDB ID from path if present.
+	if opts.CusTMDBID == "" {
+		if embeddedID := extractTMDBIDFromPath(srcPath); embeddedID != "" {
+			opts.CusTMDBID = embeddedID
+			rec.TMDBID = embeddedID
+			p.log.Info("[处理] 使用路径内 TMDB ID: %s", embeddedID)
+		}
+	}
+
+	// If TMDB ID is provided, infer movie vs TV by querying TMDB directly.
+	if opts.CusTMDBID != "" {
+		if id, err := strconv.Atoi(opts.CusTMDBID); err == nil && id > 0 {
+			if movie, err := p.tmdb.GetMovieDetail(id, "external_ids"); err == nil && movie != nil {
+				b := true
+				opts.IsMovie = &b
+			} else if tv, err := p.tmdb.GetTVDetail(id, "external_ids"); err == nil && tv != nil {
+				b := false
+				opts.IsMovie = &b
+			} else if opts.IsMovie == nil && opts.IsAnime == nil {
+				// Fallback heuristic when TMDB lookup fails
+				stem := strings.TrimSuffix(filepath.Base(srcPath), filepath.Ext(srcPath))
+				ep := ExtractEpisode(stem)
+				isMovieGuess := true
+				if ep.Found {
+					isMovieGuess = false
+				} else {
+					if _, ok := ExtractSeason(stem); ok {
+						isMovieGuess = false
+					} else {
+						parent := filepath.Base(filepath.Dir(srcPath))
+						if _, ok := ExtractSeason(parent); ok || IsSeasonName(parent) {
+							isMovieGuess = false
+						}
+					}
+				}
+				opts.IsMovie = &isMovieGuess
+			}
+		}
+	}
+
 	// ── 1. Determine media type ──────────────────────────────────────────────
 	isAnime, isMovie := p.detectMediaType(srcPath, opts)
 	rec.IsAnime = &isAnime
@@ -189,13 +232,14 @@ func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) e
 	}
 
 	// ── 5. Build rename mapping ────────────────────────────────────────────────
-	renameMap, err := p.buildRenameMap(srcPath, opts, cfg, isAnime, isMovie, tmdbTitle, tmdbYear, tmdbID, tmdbResult, targetRoot)
+	renameMap, episodeNum, err := p.buildRenameMap(srcPath, opts, cfg, isAnime, isMovie, tmdbTitle, tmdbYear, tmdbID, tmdbResult, targetRoot)
 	if err != nil {
 		return fmt.Errorf("构建重命名映射失败: %w", err)
 	}
 	if len(renameMap) == 0 {
 		return fmt.Errorf("无有效文件映射")
 	}
+	rec.EpisodeID = episodeNum
 
 	// ── 6. Apply file operations ──────────────────────────────────────────────
 	targets, err := p.applyFileOps(renameMap, cfg, opts.ConfigOverrides)
@@ -221,20 +265,34 @@ func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) e
 				scraper.ScrapeMovie(targets[0], movie)
 			}
 		} else {
-			if tv, ok := tmdbResult.(*TMDBTVDetail); ok && len(targets) > 0 {
+			if tv, ok := tmdbResult.(*TMDBTVDetail); ok && len(targets) > 0 && rec.SeasonID != nil {
 				workDir := filepath.Dir(filepath.Dir(targets[0]))
 				scraper.ScrapeTV(workDir, tv)
-				if rec.SeasonID != nil {
-					seasonDir := filepath.Dir(targets[0])
-					scraper.ScrapeSeason(workDir, *rec.SeasonID, tv, seasonDir)
-					for _, ep := range tv.Seasons {
-						if ep.SeasonNumber == *rec.SeasonID {
-							for i, epFile := range targets {
-								if i < len(ep.Episodes) {
-									scraper.ScrapeEpisode(epFile, tv, *rec.SeasonID, ep.Episodes[i].EpisodeNumber)
-								}
-							}
+
+				seasonNum := *rec.SeasonID
+				seasonDir := filepath.Dir(targets[0])
+
+				// 获取完整的季信息（包含集数列表）
+				seasonDetail, err := p.tmdb.GetSeasonDetail(tv.ID, seasonNum)
+				if err != nil {
+					p.log.Warn("[刮削] 获取第 %d 季详情失败: %v", seasonNum, err)
+				} else {
+					// 更新 TV 详情中的季信息
+					for i := range tv.Seasons {
+						if tv.Seasons[i].SeasonNumber == seasonNum {
+							tv.Seasons[i].Episodes = seasonDetail.Episodes
 							break
+						}
+					}
+				}
+
+				scraper.ScrapeSeason(workDir, seasonNum, tv, seasonDir)
+
+				// 刮削每一集（只处理视频文件，使用正确集数）
+				if seasonDetail != nil && len(seasonDetail.Episodes) > 0 {
+					for _, targetFile := range targets {
+						if IsVideoFile(targetFile) {
+							scraper.ScrapeEpisode(targetFile, tv, seasonNum, episodeNum)
 						}
 					}
 				}
@@ -245,6 +303,19 @@ func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) e
 	rec.Status = StatusSuccess
 	p.log.Info("[处理] 完成: %s → %v", srcPath, targets)
 	return nil
+}
+
+func extractTMDBIDFromPath(path string) string {
+	if id := ExtractTMDBID(path); id != "" {
+		return id
+	}
+	parts := strings.Split(path, string(filepath.Separator))
+	for _, p := range parts {
+		if id := ExtractTMDBID(p); id != "" {
+			return id
+		}
+	}
+	return ""
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -267,7 +338,8 @@ func (p *Processor) detectMediaType(srcPath string, opts TaskOptions) (isAnime b
 
 func (p *Processor) chooseSearchQuery(srcPath string, opts TaskOptions, rec *TaskRecord) (name string, year int) {
 	if opts.CusName != "" {
-		name, year = DivideByYear(opts.CusName)
+		name, year = ParseSearchName(opts.CusName)
+		name = strings.Join(strings.Fields(name), " ")
 		return name, year
 	}
 
@@ -283,22 +355,31 @@ func (p *Processor) chooseSearchQuery(srcPath string, opts TaskOptions, rec *Tas
 		stem = parent
 	}
 
-	// Clean noise from the stem
-	cleaned := CleanNoise(stem)
+	// Parse filename into a clean search name (Python-compatible)
+	cleaned, year := ParseSearchName(stem)
+	name = strings.TrimSpace(cleaned)
 
-	// Check for embedded TMDB ID
-	if embeddedID := ExtractTMDBID(srcPath); embeddedID != "" && opts.CusTMDBID == "" {
-		opts.CusTMDBID = embeddedID
-		rec.TMDBID = embeddedID
+	// If name is still weak or empty, fall back to parent / grandparent
+	if name == "" || IsWeakFilename(name) || len([]rune(name)) < 2 {
+		parent := filepath.Dir(srcPath)
+		if parent != "." && parent != string(filepath.Separator) {
+			pname := filepath.Base(parent)
+			if IsSeasonName(pname) {
+				grand := filepath.Dir(parent)
+				if grand != "." && grand != string(filepath.Separator) {
+					pname = filepath.Base(grand)
+				}
+			}
+			fallbackName, fallbackYear := ParseSearchName(pname)
+			if fallbackName != "" {
+				name = fallbackName
+			}
+			if year == 0 && fallbackYear > 0 {
+				year = fallbackYear
+			}
+		}
 	}
 
-	name, year = DivideByYear(cleaned)
-	name = strings.TrimSpace(name)
-
-	// Remove season markers from the name
-	for _, p := range seasonPatterns {
-		name = p.ReplaceAllString(name, "")
-	}
 	name = strings.TrimSpace(strings.NewReplacer("-", " ", "_", " ").Replace(name))
 	name = strings.Join(strings.Fields(name), " ")
 
@@ -462,7 +543,7 @@ func (p *Processor) buildRenameMap(
 	tmdbID int,
 	tmdbResult interface{},
 	targetRoot string,
-) (map[string]string, error) {
+) (map[string]string, int, error) {
 	result := make(map[string]string)
 
 	ext := strings.ToLower(filepath.Ext(srcPath))
@@ -479,15 +560,23 @@ func (p *Processor) buildRenameMap(
 			}
 		}
 
-		ctx := BuildRenderContext(tmdbTitle, "", tmdbYear, 0, 0, "", videoFormat, ext, strconv.Itoa(tmdbID))
+		ctx := BuildRenderContext(tmdbTitle, "", tmdbYear, 0, 0, "", videoFormat, ext, strconv.Itoa(tmdbID), mediaInfo)
 		relPath := RenderTemplate(format, ctx)
-		target := filepath.Join(targetRoot, filepath.FromSlash(relPath))
+
+		// 应用二级分类
+		category := GetCategoryFolder(tmdbResult, isMovie, isAnime, cfg)
+		var target string
+		if category != "" {
+			target = filepath.Join(targetRoot, category, filepath.FromSlash(relPath))
+		} else {
+			target = filepath.Join(targetRoot, filepath.FromSlash(relPath))
+		}
 		result[srcPath] = target
 
 		// Accompanying subtitle / NFO files
 		p.addAccompanyingFiles(srcPath, filepath.Dir(target), stem, filepath.Base(target[:len(target)-len(ext)]), result)
 
-		return result, nil
+		return result, 0, nil
 	}
 
 	// TV show
@@ -519,14 +608,22 @@ func (p *Processor) buildRenameMap(
 		}
 	}
 
-	ctx := BuildRenderContext(tmdbTitle, "", tmdbYear, season, episode, "", videoFormat, ext, strconv.Itoa(tmdbID))
+	ctx := BuildRenderContext(tmdbTitle, "", tmdbYear, season, episode, "", videoFormat, ext, strconv.Itoa(tmdbID), mediaInfo)
 	relPath := RenderTemplate(format, ctx)
-	target := filepath.Join(targetRoot, filepath.FromSlash(relPath))
+
+	// 应用二级分类
+	category := GetCategoryFolder(tmdbResult, isMovie, isAnime, cfg)
+	var target string
+	if category != "" {
+		target = filepath.Join(targetRoot, category, filepath.FromSlash(relPath))
+	} else {
+		target = filepath.Join(targetRoot, filepath.FromSlash(relPath))
+	}
 	result[srcPath] = target
 
 	p.addAccompanyingFiles(srcPath, filepath.Dir(target), stem, filepath.Base(target[:len(target)-len(ext)]), result)
 
-	return result, nil
+	return result, episode, nil
 }
 
 // addAccompanyingFiles appends subtitle / NFO files that share the same stem

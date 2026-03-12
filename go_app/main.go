@@ -112,7 +112,7 @@ func main() {
 			})
 		}
 
-		if err := svc.StartWatchers(watchPaths, excludeDirs); err != nil {
+		if err := svc.StartWatchers(watchPaths, excludeDirs, cfgSnap.MonitorMode); err != nil {
 			log.Warn("文件监控启动失败: %v", err)
 		} else {
 			log.Info("文件监控已启动，监控目录数: %d", len(watchPaths))
