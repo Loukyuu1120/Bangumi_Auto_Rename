@@ -177,17 +177,40 @@ func (h *Handler) handleTaskByID(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodPut:
 		// Update task metadata (used by the Edit dialog)
+		existing := h.store.GetTask(uuid)
+		if existing == nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+
 		var body rename.TaskRecord
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		body.UUID = uuid
-		if err := h.store.SaveTask(&body); err != nil {
+
+		updated := *existing
+		updated.UUID = uuid
+		if body.Name != "" {
+			updated.Name = body.Name
+		}
+		updated.IsAnime = body.IsAnime
+		updated.IsMovie = body.IsMovie
+		updated.UseAI = body.UseAI
+		updated.SeasonID = body.SeasonID
+		updated.Offset = body.Offset
+		updated.TMDBID = body.TMDBID
+		if body.Status != "" {
+			updated.Status = body.Status
+		}
+		updated.ErrMsg = ""
+		updated.ProcessedAt = body.ProcessedAt
+
+		if err := h.store.SaveTask(&updated); err != nil {
 			jsonError(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		jsonOK(w, body)
+		jsonOK(w, updated)
 
 	case http.MethodDelete:
 		deleteFiles := r.URL.Query().Get("delete_files") == "true"
@@ -261,7 +284,8 @@ func (h *Handler) handleBatchRetry(w http.ResponseWriter, r *http.Request) {
 			IsAnime:     rec.IsAnime,
 			IsMovie:     rec.IsMovie,
 			UseAI:       rec.UseAI,
-			CusTMDBID:   rec.TMDBID,
+			CusName:     rec.Name,
+			CusTMDBID:   "",
 			CusOffset:   rec.Offset,
 			CusSeasonID: rec.SeasonID,
 		}
@@ -285,8 +309,8 @@ func (h *Handler) handleBatchRetry(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if v, ok := body.Settings["tmdb_id"]; ok {
-			if s, ok := v.(string); ok && s != "" {
-				opts.CusTMDBID = s
+			if s, ok := v.(string); ok {
+				opts.CusTMDBID = strings.TrimSpace(s)
 			}
 		}
 		if v, ok := body.Settings["season_id"]; ok {
@@ -327,7 +351,7 @@ func (h *Handler) handleBatchRetry(w http.ResponseWriter, r *http.Request) {
 			_ = h.store.DeleteTaskFiles(id, deleteTarget, deleteSource, cleanupDirs)
 		}
 
-		h.svc.AddTaskWithPriority(rec.Path, opts, true)
+		h.svc.AddTaskWithID(id, rec.Path, opts, true)
 		queued++
 	}
 

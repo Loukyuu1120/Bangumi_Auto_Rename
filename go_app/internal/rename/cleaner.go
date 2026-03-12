@@ -102,10 +102,11 @@ var episodePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`第([0-9一二三四五六七八九零]+)[话集]`),        // 第06集
 	regexp.MustCompile(`([\d]{1,3})[Ee]pisode`),
 	regexp.MustCompile(`([\d]{1,3})[Ee]ps`),
-	regexp.MustCompile(`\[(\d{1,3})\]`),              // [06]
-	regexp.MustCompile(`【(\d{1,3})】`),                // 【06】
-	regexp.MustCompile(` - (\d{1,3})(?:\D|$)`),       //  - 06
-	regexp.MustCompile(`\s(\d{1,3})(?:\.\w{2,4})?$`), // trailing number
+	regexp.MustCompile(`[\[【]\s*(\d{1,4})\s*(?:[vV]\d)?\s*[\]】]`), // [06] [12v2] 【03】
+	regexp.MustCompile(`\[(\d{1,3})\]`),                           // [06]
+	regexp.MustCompile(`【(\d{1,3})】`),                             // 【06】
+	regexp.MustCompile(` - (\d{1,3})(?:\D|$)`),                    //  - 06
+	regexp.MustCompile(`\s(\d{1,3})(?:\.\w{2,4})?$`),              // trailing number
 }
 
 var numMap = map[string]int{
@@ -161,7 +162,60 @@ func RemoveTag(title, tag string) string {
 	return strings.TrimSpace(re.ReplaceAllString(title, ""))
 }
 
-// CleanNoise removes common encoding noise words and bracket content from a title.
+func cleanTitleCaseInsensitive(title string) string {
+	lowerKeywords := make([]string, 0, len(keywordsToClean))
+	for _, kw := range keywordsToClean {
+		lowerKeywords = append(lowerKeywords, strings.ToLower(kw))
+	}
+	j := strings.Join(lowerKeywords, "|")
+	keywordRe := regexp.MustCompile(j)
+	cleaned := title
+	for _, pattern := range []string{
+		`\[.*?\]`, `【.*?】`, `《.*?》`, `<.*?>`, `\(.*?\)`, `（.*?）`,
+	} {
+		matches := regexp.MustCompile(pattern).FindAllString(cleaned, -1)
+		for _, match := range matches {
+			if keywordRe.MatchString(strings.ToLower(match)) {
+				cleaned = strings.ReplaceAll(cleaned, match, "")
+			}
+		}
+	}
+	cleaned = strings.TrimSpace(cleaned)
+	if strings.HasPrefix(cleaned, "[") && strings.HasSuffix(cleaned, "]") && len(cleaned) > 2 {
+		return strings.TrimSpace(cleaned[1 : len(cleaned)-1])
+	}
+	return cleaned
+}
+
+// RemoveBracketTags removes bracketed segments. When skip is true, keeps the
+// 2nd occurrence of each bracket pattern (Python behavior).
+func RemoveBracketTags(title string, skip bool) string {
+	s := title
+	if skip {
+		for _, pattern := range []string{
+			`\[.*?\]`, `【.*?】`, `《.*?》`, `<.*?>`, `\(.*?\)`, `（.*?）`,
+		} {
+			count := 0
+			re := regexp.MustCompile(pattern)
+			s = re.ReplaceAllStringFunc(s, func(m string) string {
+				count++
+				if count == 2 {
+					return m
+				}
+				return ""
+			})
+		}
+	} else {
+		s = bracketPattern.ReplaceAllString(s, "")
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		s = cleanTitleCaseInsensitive(title)
+	}
+	return strings.TrimSpace(s)
+}
+
+// CleanNoise removes common encoding noise words from a title.
 func CleanNoise(title string) string {
 	// Remove video file extension if present
 	if ext := strings.ToLower(filepath.Ext(title)); ext != "" {
@@ -170,16 +224,12 @@ func CleanNoise(title string) string {
 		}
 	}
 
-	// Remove bracket content
-	title = bracketPattern.ReplaceAllString(title, " ")
-
 	// Remove code patterns
 	for _, p := range codePatterns {
 		title = p.ReplaceAllString(title, " ")
 	}
 
-	// Remove copy markers like "的副本 3" and release-group suffixes like "-ABC"
-	title = regexp.MustCompile(`\s*的副本\s*\d*$`).ReplaceAllString(title, "")
+	// Remove release-group suffixes like "-ABC"
 	title = regexp.MustCompile(`-[A-Za-z0-9]+$`).ReplaceAllString(title, "")
 
 	// Remove known noise keywords (case-insensitive)
@@ -192,6 +242,30 @@ func CleanNoise(title string) string {
 	wsRe := regexp.MustCompile(`\s{2,}`)
 	title = wsRe.ReplaceAllString(strings.TrimSpace(title), " ")
 	return title
+}
+
+// RemoveSeason removes season markers from a string.
+func RemoveSeason(s string) string {
+	for _, p := range seasonPatterns {
+		s = p.ReplaceAllString(s, "")
+	}
+	return strings.TrimSpace(s)
+}
+
+// RemoveEpisode removes episode markers from a string.
+func RemoveEpisode(s string) string {
+	for _, p := range episodePatterns {
+		s = p.ReplaceAllString(s, "")
+	}
+	return strings.TrimSpace(s)
+}
+
+// RemoveCode removes technical code patterns.
+func RemoveCode(s string) string {
+	for _, p := range codePatterns {
+		s = p.ReplaceAllString(s, "")
+	}
+	return s
 }
 
 // ParseSearchName extracts a clean search title and year from a raw filename.
@@ -208,7 +282,9 @@ func ParseSearchName(input string) (string, int) {
 	clean := name
 	year := 0
 	yearRe := regexp.MustCompile(`(?i)(?:[.\s\-_\(\[（【]|^)([12][90]\d{2})(?:[.\s\-_\)\]）】]|$)`)
-	if idx := yearRe.FindStringSubmatchIndex(clean); idx != nil {
+	if idxs := yearRe.FindAllStringSubmatchIndex(clean, -1); len(idxs) > 0 {
+		// Prefer the last year occurrence (Python behavior in multi-year names)
+		idx := idxs[len(idxs)-1]
 		yearStr := clean[idx[2]:idx[3]]
 		if y, err := strconv.Atoi(yearStr); err == nil {
 			year = y
@@ -219,7 +295,7 @@ func ParseSearchName(input string) (string, int) {
 	}
 
 	// Remove bracket content/tags
-	clean = bracketPattern.ReplaceAllString(clean, " ")
+	clean = RemoveBracketTags(clean, false)
 	// Go RE2 doesn't support lookahead; use a safe fallback to drop "A <CJK>" prefixes.
 	clean = regexp.MustCompile(`^[A-Za-z]\s+[\p{Han}]`).ReplaceAllStringFunc(clean, func(s string) string {
 		parts := strings.Fields(s)
@@ -264,9 +340,11 @@ func ParseSearchName(input string) (string, int) {
 
 	clean = strings.ReplaceAll(clean, "：", " ")
 	clean = strings.ReplaceAll(clean, ":", " ")
+	clean = strings.ReplaceAll(clean, "（", " ")
+	clean = strings.ReplaceAll(clean, "）", " ")
 	clean = strings.NewReplacer(".", " ", "_", " ").Replace(clean)
 	clean = regexp.MustCompile(`\s+`).ReplaceAllString(clean, " ")
-	clean = strings.Trim(clean, " .-[]()")
+	clean = strings.Trim(clean, " .-[]()（）")
 
 	return clean, year
 }
@@ -274,6 +352,12 @@ func ParseSearchName(input string) (string, int) {
 // ExtractSeason tries to parse a season number from a string.
 // Returns (season, found).
 func ExtractSeason(s string) (int, bool) {
+	s = RemoveCode(s)
+	for _, p := range s0TagPatterns {
+		if p.MatchString(s) {
+			return 0, true
+		}
+	}
 	for i, p := range seasonPatterns {
 		m := p.FindStringSubmatch(s)
 		if m == nil {
@@ -333,16 +417,29 @@ func ExtractEpisode(stem string) EpisodeInfo {
 		// Chinese numerals
 		if !IsDigit(capGroup) {
 			n := ChineseToNumber(capGroup)
-			if n > 0 {
+			if n > 0 && isValidEpisodeNumber(n) {
 				return EpisodeInfo{Episode: n, Found: true}
 			}
 			continue
 		}
-		if n, err := strconv.Atoi(capGroup); err == nil && n > 0 {
+		if n, err := strconv.Atoi(capGroup); err == nil && n > 0 && isValidEpisodeNumber(n) {
 			return EpisodeInfo{Episode: n, Found: true}
 		}
 	}
 	return EpisodeInfo{}
+}
+
+func isValidEpisodeNumber(n int) bool {
+	if n <= 0 {
+		return false
+	}
+	if n == 480 || n == 576 || n == 720 || n == 1080 || n == 2160 || n == 264 || n == 265 {
+		return false
+	}
+	if n > 1900 && n < 2100 {
+		return false
+	}
+	return true
 }
 
 // ExtractTMDBID looks for patterns like {tmdb-12345} or [tmdbid=12345] and returns the ID string.
@@ -370,9 +467,24 @@ func IsWeakFilename(stem string) bool {
 	if IsDigit(clean) {
 		return true
 	}
-	// Looks purely like SxxExx
-	if regexp.MustCompile(`^[Ss]\d{1,2}[Ee]\d{1,3}$`).MatchString(clean) {
+	if regexp.MustCompile(`(?i)^[Ee](P)?\d+(\s*v\d+)?$`).MatchString(clean) {
 		return true
+	}
+	// Looks purely like SxxExx
+	if regexp.MustCompile(`(?i)^[Ss]\d{1,2}[Ee](P)?\d{1,3}$`).MatchString(clean) {
+		return true
+	}
+	if len([]rune(clean)) <= 4 && !containsChinese(clean) {
+		return true
+	}
+	return false
+}
+
+func containsChinese(s string) bool {
+	for _, r := range s {
+		if r >= 0x4E00 && r <= 0x9FFF {
+			return true
+		}
 	}
 	return false
 }
@@ -380,13 +492,25 @@ func IsWeakFilename(stem string) bool {
 // IsSeasonName reports whether a directory name looks like a season folder
 // (e.g. "Season 1", "S02", "第一季").
 func IsSeasonName(name string) bool {
-	patterns := []*regexp.Regexp{
-		regexp.MustCompile(`(?i)^Season\s*\d+$`),
-		regexp.MustCompile(`(?i)^S\d{1,2}$`),
-		regexp.MustCompile(`^第[一二三四五六七八九零十百千万\d]+季$`),
+	stem := strings.TrimSpace(name)
+	if regexp.MustCompile(`^\d{1,2}$`).MatchString(stem) {
+		return true
 	}
-	for _, p := range patterns {
-		if p.MatchString(strings.TrimSpace(name)) {
+	if regexp.MustCompile(`(?i)^S\d+$`).MatchString(stem) {
+		return true
+	}
+	if regexp.MustCompile(`(?i)^(S|Season)\s*\d+\s*-\s*(S|Season)?\s*\d+$`).MatchString(stem) {
+		return true
+	}
+	if regexp.MustCompile(`(?i)^(SP|OVA|specials?)$`).MatchString(stem) {
+		return true
+	}
+	if regexp.MustCompile(`(?i)^(Season|S)\s*\d+([ ._-]|$)`).MatchString(stem) {
+		return true
+	}
+	for _, p := range seasonPatterns {
+		remain := strings.TrimSpace(p.ReplaceAllString(stem, ""))
+		if remain == "" || regexp.MustCompile(`[.\-_\[\]\(\)\s]+`).MatchString(remain) {
 			return true
 		}
 	}

@@ -127,6 +127,15 @@ func (p *Processor) Process(srcPath string, opts TaskOptions, uuid string) *Task
 func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) error {
 	cfg := p.cfg.GetConfig()
 
+	if opts.CusName != "" {
+		p.log.Info("[处理] 使用任务覆盖标题: %q", opts.CusName)
+	}
+	if opts.CusTMDBID != "" {
+		p.log.Info("[处理] 使用强制 TMDB ID: %s", opts.CusTMDBID)
+	} else {
+		p.log.Info("[处理] 本次未指定强制 TMDB ID，将走正常搜索流程")
+	}
+
 	// Pick up embedded TMDB ID from path if present.
 	if opts.CusTMDBID == "" {
 		if embeddedID := extractTMDBIDFromPath(srcPath); embeddedID != "" {
@@ -169,6 +178,13 @@ func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) e
 
 	// ── 1. Determine media type ──────────────────────────────────────────────
 	isAnime, isMovie := p.detectMediaType(srcPath, opts)
+	// If media type wasn't explicitly set, use episode markers to bias to TV.
+	if opts.IsMovie == nil {
+		stem := strings.TrimSuffix(filepath.Base(srcPath), filepath.Ext(srcPath))
+		if ep := ExtractEpisode(stem); ep.Found {
+			isMovie = false
+		}
+	}
 	rec.IsAnime = &isAnime
 	rec.IsMovie = &isMovie
 
@@ -193,7 +209,12 @@ func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) e
 		id, err := strconv.Atoi(opts.CusTMDBID)
 		if err == nil {
 			tmdbID = id
+			p.log.Info("[处理] 解析强制 TMDB ID 成功: %d", tmdbID)
+		} else {
+			p.log.Warn("[处理] 强制 TMDB ID 无法解析为数字: %q", opts.CusTMDBID)
 		}
+	} else {
+		p.log.Info("[处理] 未携带强制 TMDB ID，后续将依赖搜索结果")
 	}
 
 	if isMovie {
@@ -329,6 +350,20 @@ func (p *Processor) detectMediaType(srcPath string, opts TaskOptions) (isAnime b
 	if opts.IsAnime != nil {
 		isAnime = *opts.IsAnime
 	}
+	// If unspecified, infer TV when episode markers exist.
+	stem := strings.TrimSuffix(filepath.Base(srcPath), filepath.Ext(srcPath))
+	parent := filepath.Base(filepath.Dir(srcPath))
+	hasEpisodeMarkers := false
+	if ep := ExtractEpisode(stem); ep.Found {
+		hasEpisodeMarkers = true
+	} else if _, ok := ExtractSeason(stem); ok {
+		hasEpisodeMarkers = true
+	} else if _, ok := ExtractSeason(parent); ok || IsSeasonName(parent) {
+		hasEpisodeMarkers = true
+	}
+	if hasEpisodeMarkers {
+		isMovie = false
+	}
 	return isAnime, isMovie
 }
 
@@ -450,13 +485,37 @@ func (p *Processor) resolveMovie(name string, year, forceID int) (*TMDBMovieDeta
 		return nil, nil
 	}
 
-	return p.tmdb.GetMovieDetail(best.ID, "credits,external_ids,release_dates,images")
+	detail, err := p.tmdb.GetMovieDetail(best.ID, "credits,external_ids,release_dates,images")
+	if err != nil {
+		return nil, err
+	}
+	if detail == nil {
+		return nil, nil
+	}
+	if year > 0 && len(detail.ReleaseDate) >= 4 {
+		if y, err := strconv.Atoi(detail.ReleaseDate[:4]); err == nil {
+			if y > 0 && absInt(y-year) > 1 {
+				return nil, nil
+			}
+		}
+	}
+	return detail, nil
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func (p *Processor) resolveTV(srcPath, name string, year, forceID int, opts TaskOptions) (*TMDBTVDetail, int, error) {
+	p.log.Info("[处理] resolveTV: name=%q year=%d forceID=%d cusName=%q cusTMDBID=%q", name, year, forceID, opts.CusName, opts.CusTMDBID)
+
 	seasonNum := 1
 	if opts.CusSeasonID != nil && *opts.CusSeasonID > 0 {
 		seasonNum = *opts.CusSeasonID
+		p.log.Info("[处理] 使用强制季号: %d", seasonNum)
 	} else {
 		// Try to detect season from path
 		dir := filepath.Dir(srcPath)
@@ -471,23 +530,63 @@ func (p *Processor) resolveTV(srcPath, name string, year, forceID int, opts Task
 	var err error
 
 	if forceID > 0 {
+		p.log.Info("[处理] 跳过 TV 搜索，直接使用强制 TMDB ID 获取详情: %d", forceID)
 		detail, err = p.tmdb.GetTVDetail(forceID, "credits,external_ids,content_ratings,images")
 		if err != nil {
 			return nil, seasonNum, err
 		}
 	} else {
+		p.log.Info("[处理] 未指定强制 TMDB ID，开始搜索 TV: %q", name)
+		// ── API search ───────────────────────────────────────────────────────
+		// SearchTV internally tries zh-CN+year, zh-CN+0, en-US+year, en-US+0
+		// and returns on the first non-empty page, so a single call is enough.
 		results, searchErr := p.tmdb.SearchTV(name, year)
 		if searchErr != nil {
 			return nil, seasonNum, searchErr
 		}
-		if len(results) == 0 && year > 0 {
-			results, searchErr = p.tmdb.SearchTV(name, 0)
-			if searchErr != nil {
-				return nil, seasonNum, searchErr
-			}
+		p.log.Info("[处理] TV API 搜索返回 %d 条结果", len(results))
+
+		if year > 0 && len(results) > 0 {
+			results = filterResultsByYear(results, year, false)
+			p.log.Info("[处理] 年份过滤后剩余 %d 条 TV 结果", len(results))
 		}
+
+		// ── Web-scraping fallback (mirrors Python's _search_tmdb_web) ────────
+		// Two trigger conditions (matching Python's behaviour):
+		//   1. API returned zero results.
+		//   2. API returned results, but filterResultsByYear found no year-
+		//      appropriate candidates and silently fell back to the original
+		//      list (e.g. only returning old shows like "K" from 2012 when we
+		//      need a 2025 show).  In that case len(results)>0 but none of the
+		//      candidates are anywhere near the target year, so we must not
+		//      accept them without first trying the web search.
+		needsWebFallback := len(results) == 0 ||
+			(year > 0 && len(results) > 0 && !hasYearAppropriateResult(results, year, false, 3))
+		p.log.Info("[处理] TV 网页兜底判定: needsWebFallback=%v", needsWebFallback)
+
+		if needsWebFallback {
+			p.log.Info("[处理] API搜索未找到合适年份结果 %q，尝试网页兜底搜索...", name)
+			if webResults, webErr := p.tmdb.SearchTMDBWeb(name, "tv"); webErr == nil && len(webResults) > 0 {
+				p.log.Info("[处理] 网页搜索返回 %d 条结果", len(webResults))
+				filtered := webResults
+				if year > 0 {
+					filtered = filterResultsByYear(webResults, year, false)
+					if len(filtered) == 0 {
+						filtered = webResults // keep unfiltered web results rather than nothing
+					}
+				}
+				results = filtered
+			} else if webErr != nil {
+				p.log.Warn("[处理] 网页兜底搜索失败: %v", webErr)
+				// results unchanged — proceed with whatever the API gave us
+			}
+			// If web scraping also returned nothing, results stays as-is
+			// (either the API's stale list or empty); the AI fallback below
+			// will handle the empty case.
+		}
+
+		// ── AI fallback ──────────────────────────────────────────────────────
 		if len(results) == 0 {
-			// AI fallback
 			if p.ai.IsAvailable() {
 				p.log.Info("[处理] TMDB未找到 %q，尝试AI推断...", name)
 				ctx := map[string]interface{}{
@@ -520,13 +619,78 @@ func (p *Processor) resolveTV(srcPath, name string, year, forceID int, opts Task
 			return nil, seasonNum, nil
 		}
 
+		p.log.Info("[处理] TV 最佳匹配候选: id=%d name=%q first_air_date=%q", best.ID, best.Name, best.FirstAirDate)
 		detail, err = p.tmdb.GetTVDetail(best.ID, "credits,external_ids,content_ratings,images")
 		if err != nil {
 			return nil, seasonNum, err
 		}
 	}
 
+	// ── Year sanity check ────────────────────────────────────────────────────
+	// Python never hard-rejects on year; it only adjusts scores.  We use a
+	// generous ±3-year window so that:
+	//   • Multi-season shows (S1 aired years ago) are not rejected.
+	//   • Shows whose TMDB first_air_date differs slightly from the filename
+	//     year (e.g. cross-year premiere) are not dropped.
+	if detail != nil && year > 0 && len(detail.FirstAirDate) >= 4 {
+		if y, err := strconv.Atoi(detail.FirstAirDate[:4]); err == nil {
+			if y > 0 && absInt(y-year) > 3 {
+				p.log.Warn("[处理] 年份差异过大 (TMDB=%d, 文件=%d)，跳过: %s", y, year, detail.Name)
+				return nil, seasonNum, nil
+			}
+		}
+	}
+
 	return detail, seasonNum, nil
+}
+
+// hasYearAppropriateResult reports whether any result in the slice has an
+// air/release date within ±tolerance years of the target year.
+// isMovie selects ReleaseDate vs FirstAirDate.
+func hasYearAppropriateResult(results []TMDBSearchResult, year int, isMovie bool, tolerance int) bool {
+	if year <= 0 {
+		return len(results) > 0
+	}
+	for _, r := range results {
+		dateStr := r.FirstAirDate
+		if isMovie {
+			dateStr = r.ReleaseDate
+		}
+		if len(dateStr) < 4 {
+			continue
+		}
+		var y int
+		fmt.Sscanf(dateStr[:4], "%d", &y)
+		if y > 0 && absInt(y-year) <= tolerance {
+			return true
+		}
+	}
+	return false
+}
+
+func filterResultsByYear(results []TMDBSearchResult, year int, isMovie bool) []TMDBSearchResult {
+	if year <= 0 {
+		return results
+	}
+	var out []TMDBSearchResult
+	for _, r := range results {
+		dateStr := r.FirstAirDate
+		if isMovie {
+			dateStr = r.ReleaseDate
+		}
+		if len(dateStr) < 4 {
+			continue
+		}
+		var y int
+		fmt.Sscanf(dateStr[:4], "%d", &y)
+		if y > 0 && absInt(y-year) <= 1 {
+			out = append(out, r)
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+	return results
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

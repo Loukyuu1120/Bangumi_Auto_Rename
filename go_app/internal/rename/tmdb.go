@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -188,39 +189,241 @@ func NewTMDBClient(apiKey string) *TMDBClient {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Web-scraping fallback (mirrors Python's _search_tmdb_web)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// SearchTMDBWeb scrapes TMDB's public search page as a last-resort fallback
+// when the v3 API search returns zero results (e.g. newly-indexed shows whose
+// search index hasn't been refreshed yet).  It mirrors Python's
+// _search_tmdb_web() helper in get_info.py.
+//
+// mediaType must be "tv" or "movie".
+func (c *TMDBClient) SearchTMDBWeb(query, mediaType string) ([]TMDBSearchResult, error) {
+	params := url.Values{}
+	params.Set("query", query)
+	params.Set("language", "zh-CN")
+	searchURL := "https://www.themoviedb.org/search?" + params.Encode()
+
+	req, err := http.NewRequest("GET", searchURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("tmdb web search: build request: %w", err)
+	}
+	// Mimic a real browser so TMDB serves the SSR HTML with results.
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Referer", "https://www.themoviedb.org/")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("tmdb web search: request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("tmdb web search: read body: %w", err)
+	}
+
+	return parseTMDBWebHTML(string(body), mediaType), nil
+}
+
+// parseTMDBWebHTML extracts TMDBSearchResult entries from TMDB's HTML search
+// page.  It uses regexp instead of a full HTML parser so that no extra
+// dependency is required.
+//
+// Strategy (matches Python's BeautifulSoup selectors):
+//   - Find every <a> opening tag that has class="result" AND an href containing
+//     "/<mediaType>/<id>".  This is equivalent to Python's
+//     card.select_one("a.result") inside a "div.card".
+//   - For each unique ID, capture the nearest <h2> text as the title and the
+//     nearest 4-digit year as the air/release date.
+//
+// Using class="result" as the gate prevents false positives from navigation
+// links, trending banners, or any other /tv/ID href that appears on the page
+// outside the actual search-result cards.
+func parseTMDBWebHTML(html, mediaType string) []TMDBSearchResult {
+	// Step 1: match the complete opening <a …> tag (attributes can be up to
+	// ~500 chars; [^>] also matches newlines so multi-line tags are handled).
+	aTagRe := regexp.MustCompile(`<a\b[^>]{0,500}>`)
+
+	// Step 2: within that tag, require class="…result…"
+	classResultRe := regexp.MustCompile(`\bclass="[^"]*\bresult\b`)
+
+	// Step 3: within that tag, extract the media-type ID from the href
+	hrefIDRe := regexp.MustCompile(`href="/` + regexp.QuoteMeta(mediaType) + `/(\d+)`)
+
+	// Title: first <h2> text in the window after the tag
+	h2Re := regexp.MustCompile(`<h2[^>]*>\s*([^<]{1,300}?)\s*</h2>`)
+
+	// Year: prefer a span whose class contains "release_date"
+	yearRe := regexp.MustCompile(`(?i)release_date[^>]*>([^<]{0,60}?)(\d{4})`)
+
+	// Fallback: any bare 20xx year in the window
+	bareYearRe := regexp.MustCompile(`\b(20\d{2})\b`)
+
+	seen := make(map[int]bool)
+	var results []TMDBSearchResult
+
+	for _, loc := range aTagRe.FindAllStringIndex(html, -1) {
+		tag := html[loc[0]:loc[1]]
+
+		// Must be a "result" link (Python: a.result)
+		if !classResultRe.MatchString(tag) {
+			continue
+		}
+
+		// Must link to the requested media type
+		m := hrefIDRe.FindStringSubmatch(tag)
+		if m == nil {
+			continue
+		}
+
+		id := 0
+		fmt.Sscanf(m[1], "%d", &id)
+		if id == 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+
+		// Inspect a 2000-char window after the opening tag for title/year.
+		windowEnd := loc[1] + 2000
+		if windowEnd > len(html) {
+			windowEnd = len(html)
+		}
+		window := html[loc[0]:windowEnd]
+
+		// Title from nearest <h2>
+		name := ""
+		if tm := h2Re.FindStringSubmatch(window); tm != nil {
+			name = unescapeHTMLEntities(strings.TrimSpace(tm[1]))
+		}
+
+		// Year: prefer span.release_date, fall back to any bare 20xx year
+		dateStr := ""
+		if ym := yearRe.FindStringSubmatch(window); ym != nil {
+			dateStr = ym[2] + "-01-01"
+		} else if ym := bareYearRe.FindStringSubmatch(window); ym != nil {
+			dateStr = ym[1] + "-01-01"
+		}
+
+		r := TMDBSearchResult{
+			ID:           id,
+			Name:         name,
+			OriginalName: name,
+		}
+		if mediaType == "tv" {
+			r.FirstAirDate = dateStr
+		} else {
+			r.ReleaseDate = dateStr
+		}
+		results = append(results, r)
+
+		if len(results) >= 10 {
+			break
+		}
+	}
+
+	return results
+}
+
+// unescapeHTMLEntities replaces the most common HTML entities with their
+// plain-text equivalents.
+func unescapeHTMLEntities(s string) string {
+	s = strings.ReplaceAll(s, "&amp;", "&")
+	s = strings.ReplaceAll(s, "&lt;", "<")
+	s = strings.ReplaceAll(s, "&gt;", ">")
+	s = strings.ReplaceAll(s, "&#39;", "'")
+	s = strings.ReplaceAll(s, "&apos;", "'")
+	s = strings.ReplaceAll(s, "&quot;", `"`)
+	s = strings.ReplaceAll(s, "&nbsp;", " ")
+	return s
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Search helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 // SearchTV searches TMDB for TV shows matching query and optional year.
 func (c *TMDBClient) SearchTV(query string, year int) ([]TMDBSearchResult, error) {
-	params := url.Values{}
-	params.Set("query", query)
-	params.Set("language", "zh-CN")
-	if year > 0 {
-		params.Set("first_air_date_year", fmt.Sprintf("%d", year))
+	type attempt struct {
+		lang string
+		year int
+	}
+	attempts := []attempt{
+		{lang: "zh-CN", year: year},
+		{lang: "zh-CN", year: 0},
+		{lang: "en-US", year: year},
+		{lang: "en-US", year: 0},
 	}
 
-	var resp TMDBSearchResponse
-	if err := c.get("/search/tv", params, &resp); err != nil {
-		return nil, err
+	var lastErr error
+	for i, a := range attempts {
+		if i > 0 && a.year == attempts[i-1].year && a.lang == attempts[i-1].lang {
+			continue
+		}
+		params := url.Values{}
+		params.Set("query", query)
+		params.Set("language", a.lang)
+		if a.year > 0 {
+			params.Set("first_air_date_year", fmt.Sprintf("%d", a.year))
+		}
+		var resp TMDBSearchResponse
+		if err := c.get("/search/tv", params, &resp); err != nil {
+			lastErr = err
+			continue
+		}
+		if len(resp.Results) > 0 {
+			return resp.Results, nil
+		}
 	}
-	return resp.Results, nil
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, nil
 }
 
 // SearchMovie searches TMDB for movies matching query and optional year.
 func (c *TMDBClient) SearchMovie(query string, year int) ([]TMDBSearchResult, error) {
-	params := url.Values{}
-	params.Set("query", query)
-	params.Set("language", "zh-CN")
-	if year > 0 {
-		params.Set("year", fmt.Sprintf("%d", year))
+	type attempt struct {
+		lang string
+		year int
+	}
+	attempts := []attempt{
+		{lang: "zh-CN", year: year},
+		{lang: "zh-CN", year: 0},
+		{lang: "en-US", year: year},
+		{lang: "en-US", year: 0},
 	}
 
-	var resp TMDBSearchResponse
-	if err := c.get("/search/movie", params, &resp); err != nil {
-		return nil, err
+	var lastErr error
+	for i, a := range attempts {
+		if i > 0 && a.year == attempts[i-1].year && a.lang == attempts[i-1].lang {
+			continue
+		}
+		params := url.Values{}
+		params.Set("query", query)
+		params.Set("language", a.lang)
+		if a.year > 0 {
+			params.Set("year", fmt.Sprintf("%d", a.year))
+		}
+		var resp TMDBSearchResponse
+		if err := c.get("/search/movie", params, &resp); err != nil {
+			lastErr = err
+			continue
+		}
+		if len(resp.Results) > 0 {
+			return resp.Results, nil
+		}
 	}
-	return resp.Results, nil
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

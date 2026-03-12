@@ -317,10 +317,12 @@ func (s *Service) AddTask(path string, opts TaskOptions) string {
 	return s.AddTaskWithPriority(path, opts, false)
 }
 
-// AddTaskWithPriority enqueues a task. When priority is true, it is inserted
-// at the front of the queue.
-func (s *Service) AddTaskWithPriority(path string, opts TaskOptions, priority bool) string {
-	id := uuid.New().String()
+// AddTaskWithID enqueues a task using a caller-supplied UUID so retries/edits
+// can reuse the existing task record instead of creating duplicates.
+func (s *Service) AddTaskWithID(id, path string, opts TaskOptions, priority bool) string {
+	if id == "" {
+		id = uuid.New().String()
+	}
 	item := QueueItem{
 		UUID:    id,
 		Path:    path,
@@ -329,6 +331,12 @@ func (s *Service) AddTaskWithPriority(path string, opts TaskOptions, priority bo
 	}
 
 	s.mu.Lock()
+	for i, q := range s.queue {
+		if q.UUID == id || q.Path == path {
+			s.queue = append(s.queue[:i], s.queue[i+1:]...)
+			break
+		}
+	}
 	if priority {
 		s.queue = append([]QueueItem{item}, s.queue...)
 	} else {
@@ -344,6 +352,12 @@ func (s *Service) AddTaskWithPriority(path string, opts TaskOptions, priority bo
 
 	s.log.Info("[任务] 已加入队列: %s", path)
 	return id
+}
+
+// AddTaskWithPriority enqueues a task. When priority is true, it is inserted
+// at the front of the queue.
+func (s *Service) AddTaskWithPriority(path string, opts TaskOptions, priority bool) string {
+	return s.AddTaskWithID("", path, opts, priority)
 }
 
 // RegisterBatchCount sets the expected total count for the current batch

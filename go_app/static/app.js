@@ -102,8 +102,19 @@ function showTab(name) {
   if (name === "info") {
     refreshStats();
     refreshLogs();
+    if (S.autoRefreshTimer) clearInterval(S.autoRefreshTimer);
+    S.autoRefreshTimer = setInterval(() => {
+      refreshStats();
+      refreshLogs();
+    }, 5000);
   }
-  if (name === "tasks") loadTasks();
+  if (name === "tasks") {
+    if (S.autoRefreshTimer) {
+      clearInterval(S.autoRefreshTimer);
+      S.autoRefreshTimer = null;
+    }
+    loadTasks();
+  }
 }
 
 // ─────────────────── DROPDOWN MENU ───────────────────
@@ -327,6 +338,7 @@ async function openEdit(uuid) {
   }
 
   document.getElementById("editUUID").value = uuid;
+  document.getElementById("editPath").value = data.path || "";
   document.getElementById("editName").value = data.name || "";
   document.getElementById("editSeason").value =
     data.season_id != null ? data.season_id : "";
@@ -369,17 +381,18 @@ async function submitEdit() {
   const offsetRaw = document.getElementById("editOffset").value;
   const tmdbID = document.getElementById("editTMDBID").value.trim();
   const name = document.getElementById("editName").value.trim();
+  const path = document.getElementById("editPath").value;
 
   const body = {
     uuid,
-    path: "", // will be preserved server-side
+    path,
     name: name || null,
     is_anime: toTriBool(animeVal),
     is_movie: toTriBool(movieVal),
     use_ai: aiVal === "启用",
     season_id: seasonRaw !== "" ? parseInt(seasonRaw, 10) : null,
     episode_offset: offsetRaw !== "" ? parseInt(offsetRaw, 10) : 0,
-    tmdb_id: tmdbID || null,
+    tmdb_id: tmdbID,
     status: "pending",
   };
 
@@ -1379,9 +1392,11 @@ async function saveConfig() {
         p.scan_now = false;
       });
     }
-    const needRestart = ["monitor_enabled", "monitor_mode", "monitor_paths"].some(
-      (k) => JSON.stringify(cfg[k]) !== JSON.stringify(S.configData[k]),
-    );
+    const needRestart = [
+      "monitor_enabled",
+      "monitor_mode",
+      "monitor_paths",
+    ].some((k) => JSON.stringify(cfg[k]) !== JSON.stringify(S.configData[k]));
     if (needRestart) {
       await POST("/api/monitor/restart", {});
     } else {
@@ -1417,6 +1432,31 @@ async function refreshStats() {
       st.style.color = "#9ca3af";
     }
   }
+
+  const { ok: qok, data: qd } = await GET("/api/queue");
+  if (qok) {
+    renderQueueDetail(qd.items || []);
+  }
+}
+
+function renderQueueDetail(items) {
+  const listEl = document.getElementById("queueDetailList");
+  const countEl = document.getElementById("queueDetailCount");
+  if (!listEl || !countEl) return;
+  const total = Array.isArray(items) ? items.length : 0;
+  countEl.textContent = `当前队列: ${total}`;
+  if (!items || items.length === 0) {
+    listEl.innerHTML = '<div style="color:#9ca3af;">队列为空</div>';
+    return;
+  }
+  const sliced = items.slice(0, 200);
+  listEl.innerHTML = sliced
+    .map((it) => {
+      const p = it.path || "";
+      const name = p.split("/").pop() || p;
+      return `<div style="padding:2px 4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${escHtml(p)}">${escHtml(name)}</div>`;
+    })
+    .join("");
 }
 
 async function testTMDB() {

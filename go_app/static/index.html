@@ -256,6 +256,14 @@ input[type=checkbox].chk{width:15px;height:15px;accent-color:var(--main);cursor:
       <button class="btn-outline" onclick="monitorPause()">⏸ 暂停</button>
       <button class="btn-outline" onclick="monitorResume()">▶ 恢复</button>
       <button class="btn-outline" onclick="monitorRestart()">🔄 重启监控</button>
+      <button class="btn-outline" style="color:#dc2626;border-color:#dc2626;" onclick="clearQueue()">🗑 清空队列</button>
+    </div>
+    <div style="margin-top:10px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+        <span style="font-size:12px;color:#6b7280;">队列详情（最新前 200 条）</span>
+        <span id="queueDetailCount" style="font-size:12px;color:#9ca3af;">—</span>
+      </div>
+      <div id="queueDetailList" style="margin-top:6px;border:1px solid #e5e7eb;border-radius:8px;padding:6px;max-height:220px;overflow:auto;font-size:12px;background:#fafafa;"></div>
     </div>
   </div>
 
@@ -300,6 +308,7 @@ input[type=checkbox].chk{width:15px;height:15px;accent-color:var(--main);cursor:
   <div class="modal-box">
     <h3>✏️ 编辑任务</h3>
     <input type="hidden" id="editUUID"/>
+    <input type="hidden" id="editPath"/>
 
     <div class="cfg-row">
       <span class="cfg-label">名称</span>
