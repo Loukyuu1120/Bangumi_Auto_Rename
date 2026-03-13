@@ -190,9 +190,7 @@ func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) e
 
 	// ── 2. Choose search query ────────────────────────────────────────────────
 	searchName, year := p.chooseSearchQuery(srcPath, opts, rec)
-	if strings.TrimSpace(opts.CusName) == "" {
-		rec.Name = ""
-	} else {
+	if strings.TrimSpace(opts.CusName) != "" {
 		rec.Name = searchName
 	}
 	p.log.Info("[处理] 搜索词: %q  年份: %d  动画: %v  电影: %v", searchName, year, isAnime, isMovie)
@@ -279,6 +277,12 @@ func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) e
 			rec.SeasonID = &seasonNum
 			p.log.Info("[处理] 匹配剧集: %s (%d) 第%d季 [tmdb:%d]", tmdbTitle, tmdbYear, seasonNum, tmdbID)
 		}
+	}
+
+	// Back-fill the display name with the TMDB-identified title when no custom
+	// name was provided — otherwise the task list would show "—".
+	if strings.TrimSpace(rec.Name) == "" && tmdbTitle != "" {
+		rec.Name = tmdbTitle
 	}
 
 	// ── 5. Build rename mapping ────────────────────────────────────────────────

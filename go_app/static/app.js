@@ -352,6 +352,11 @@ function updateSelectionLabel() {
   const el = document.getElementById("selectedCount");
   if (el)
     el.textContent = S.selected.size > 0 ? `已选 ${S.selected.size} 条` : "";
+  if (S.selected.size === 0) {
+    const ca = document.getElementById("checkAll");
+    if (ca) ca.checked = false;
+    document.querySelectorAll(".row-chk").forEach((c) => (c.checked = false));
+  }
 }
 
 // ─────────────────── EDIT TASK ───────────────────
@@ -491,7 +496,6 @@ async function submitBatchRetry() {
   const seasonID = document.getElementById("bRetrySeasonID")?.value.trim();
   const offset = document.getElementById("bRetryOffset")?.value.trim();
   if (customName) settings.name = customName;
-  else settings.clear_name = true;
   if (tmdbID) settings.tmdb_id = tmdbID;
   if (seasonID) settings.season_id = seasonID;
   if (offset) settings.episode_offset = offset;
@@ -510,7 +514,11 @@ async function submitBatchRetry() {
     ok ? `已将 ${data.queued || 0} 个任务加入队列` : "批量重试失败",
     ok ? "positive" : "negative",
   );
-  if (ok) setTimeout(loadTasks, 800);
+  if (ok) {
+    S.selected.clear();
+    updateSelectionLabel();
+    setTimeout(loadTasks, 800);
+  }
 }
 
 async function batchDelete() {
@@ -553,6 +561,7 @@ async function confirmDeleteTasks() {
   );
   if (ok) {
     uuids.forEach((u) => S.selected.delete(u));
+    updateSelectionLabel();
     loadTasks();
   }
 }
