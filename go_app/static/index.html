@@ -409,6 +409,13 @@ input[type=checkbox].chk{width:15px;height:15px;accent-color:var(--main);cursor:
       </div>
     </div>
     <div class="cfg-row">
+      <span class="cfg-label">标题（覆盖）</span>
+      <div class="cfg-val">
+        <input type="text" id="bRetryName" placeholder="留空则从文件名中读取"/>
+        <div style="margin-top:6px;font-size:12px;color:#9ca3af;">批量重试时可指定搜索标题；留空则清空旧标题并从文件名重新读取。</div>
+      </div>
+    </div>
+    <div class="cfg-row">
       <span class="cfg-label">TMDB ID（覆盖）</span>
       <div class="cfg-val"><input type="text" id="bRetryTMDBID" placeholder="留空不修改"/></div>
     </div>
