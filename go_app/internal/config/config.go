@@ -46,6 +46,9 @@ type Config struct {
 	MonitorMode             string      `json:"monitor_mode"`
 	MonitorPaths            interface{} `json:"monitor_paths"`
 	MonitorExcludeDirs      interface{} `json:"monitor_exclude_dirs"`
+	TitleLanguages          []string    `json:"title_languages"`
+	OverviewLanguages       []string    `json:"overview_languages"`
+	BatchRetryDefaultName   string      `json:"batch_retry_default_name"`
 }
 
 // DefaultConfig returns a Config populated with default values
@@ -85,6 +88,9 @@ func DefaultConfig() Config {
 		MonitorMode:             "compatibility",
 		MonitorPaths:            []interface{}{},
 		MonitorExcludeDirs:      []interface{}{},
+		TitleLanguages:          []string{"zh-CN", "en-US"},
+		OverviewLanguages:       []string{"zh-CN", "en-US"},
+		BatchRetryDefaultName:   "",
 	}
 }
 

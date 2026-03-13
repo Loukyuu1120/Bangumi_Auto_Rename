@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -444,6 +445,11 @@ func (c *TMDBClient) GetTVDetail(id int, appendToResponse string) (*TMDBTVDetail
 	if err := c.get(fmt.Sprintf("/tv/%d", id), params, &detail); err != nil {
 		return nil, err
 	}
+
+	if err := c.enrichTVDetailPreferredText(&detail, appendToResponse); err != nil {
+		return nil, err
+	}
+
 	return &detail, nil
 }
 
@@ -460,6 +466,11 @@ func (c *TMDBClient) GetMovieDetail(id int, appendToResponse string) (*TMDBMovie
 	if err := c.get(fmt.Sprintf("/movie/%d", id), params, &detail); err != nil {
 		return nil, err
 	}
+
+	if err := c.enrichMovieDetailPreferredText(&detail, appendToResponse); err != nil {
+		return nil, err
+	}
+
 	return &detail, nil
 }
 
@@ -603,6 +614,328 @@ func wordOverlap(a, b []string) int {
 		}
 	}
 	return count
+}
+
+type tmdbAltTitleItem struct {
+	Title string
+	Lang  string
+}
+
+type tmdbTVTranslationsResponse struct {
+	Translations []struct {
+		ISO6391  string `json:"iso_639_1"`
+		ISO31661 string `json:"iso_3166_1"`
+		Data     struct {
+			Name     string `json:"name"`
+			Overview string `json:"overview"`
+		} `json:"data"`
+	} `json:"translations"`
+}
+
+type tmdbMovieTranslationsResponse struct {
+	Translations []struct {
+		ISO6391  string `json:"iso_639_1"`
+		ISO31661 string `json:"iso_3166_1"`
+		Data     struct {
+			Title    string `json:"title"`
+			Overview string `json:"overview"`
+		} `json:"data"`
+	} `json:"translations"`
+}
+
+type tmdbTVAlternativeTitlesResponse struct {
+	Results []struct {
+		Title    string `json:"title"`
+		ISO31661 string `json:"iso_3166_1"`
+	} `json:"results"`
+}
+
+type tmdbMovieAlternativeTitlesResponse struct {
+	Titles []struct {
+		Title    string `json:"title"`
+		ISO31661 string `json:"iso_3166_1"`
+	} `json:"titles"`
+}
+
+func preferredLangOrder() []string {
+	return []string{"zh-CN", "zh", "en-US", "en"}
+}
+
+func langRank(tag string) int {
+	tag = strings.TrimSpace(strings.ToLower(tag))
+	order := preferredLangOrder()
+	for i, v := range order {
+		if strings.ToLower(v) == tag {
+			return i
+		}
+	}
+	if strings.HasPrefix(tag, "zh") {
+		return 0
+	}
+	if strings.HasPrefix(tag, "en") {
+		return 2
+	}
+	return 99
+}
+
+func normalizeLangTag(lang, region string) string {
+	lang = strings.TrimSpace(strings.ToLower(lang))
+	region = strings.TrimSpace(strings.ToUpper(region))
+	if lang == "" {
+		return ""
+	}
+	if region == "" {
+		return lang
+	}
+	return lang + "-" + region
+}
+
+func pickPreferredTitle(current string, candidates []tmdbAltTitleItem) string {
+	best := strings.TrimSpace(current)
+	bestRank := 99
+	if best != "" {
+		bestRank = 98
+	}
+
+	for _, item := range candidates {
+		title := strings.TrimSpace(item.Title)
+		if title == "" {
+			continue
+		}
+		rank := langRank(item.Lang)
+		if rank < bestRank {
+			best = title
+			bestRank = rank
+		}
+	}
+
+	return best
+}
+
+func pickPreferredOverview(current string, candidates map[string]string) string {
+	best := strings.TrimSpace(current)
+	bestRank := 99
+	if best != "" {
+		bestRank = 98
+	}
+
+	keys := make([]string, 0, len(candidates))
+	for k := range candidates {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return langRank(keys[i]) < langRank(keys[j])
+	})
+
+	for _, lang := range keys {
+		text := strings.TrimSpace(candidates[lang])
+		if text == "" {
+			continue
+		}
+		rank := langRank(lang)
+		if rank < bestRank {
+			best = text
+			bestRank = rank
+		}
+	}
+
+	return best
+}
+
+func containsAppendValue(appendToResponse, target string) bool {
+	for _, part := range strings.Split(appendToResponse, ",") {
+		if strings.TrimSpace(part) == target {
+			return true
+		}
+	}
+	return false
+}
+
+func mergeAppendValue(appendToResponse string, values ...string) string {
+	seen := map[string]bool{}
+	var parts []string
+
+	for _, part := range strings.Split(appendToResponse, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" || seen[part] {
+			continue
+		}
+		seen[part] = true
+		parts = append(parts, part)
+	}
+
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		parts = append(parts, value)
+	}
+
+	return strings.Join(parts, ",")
+}
+
+func (c *TMDBClient) enrichTVDetailPreferredText(detail *TMDBTVDetail, appendToResponse string) error {
+	if detail == nil {
+		return nil
+	}
+
+	params := url.Values{}
+	params.Set("include_image_language", "zh,cn,null,en")
+
+	appendValue := mergeAppendValue(appendToResponse, "translations", "alternative_titles")
+	if appendValue != "" {
+		params.Set("append_to_response", appendValue)
+	}
+
+	var raw struct {
+		Name              string                          `json:"name"`
+		Overview          string                          `json:"overview"`
+		Translations      tmdbTVTranslationsResponse      `json:"translations"`
+		AlternativeTitles tmdbTVAlternativeTitlesResponse `json:"alternative_titles"`
+	}
+	if err := c.get(fmt.Sprintf("/tv/%d", detail.ID), params, &raw); err != nil {
+		return err
+	}
+
+	var titles []tmdbAltTitleItem
+	overviews := map[string]string{}
+
+	for _, tr := range raw.Translations.Translations {
+		langTag := normalizeLangTag(tr.ISO6391, tr.ISO31661)
+		if tr.Data.Name != "" {
+			titles = append(titles, tmdbAltTitleItem{Title: tr.Data.Name, Lang: langTag})
+		}
+		if tr.Data.Overview != "" {
+			overviews[langTag] = tr.Data.Overview
+		}
+	}
+
+	for _, alt := range raw.AlternativeTitles.Results {
+		if alt.Title == "" {
+			continue
+		}
+		langTag := normalizeLangTag("", alt.ISO31661)
+		if strings.EqualFold(alt.ISO31661, "CN") {
+			langTag = "zh-CN"
+		} else if strings.EqualFold(alt.ISO31661, "US") {
+			langTag = "en-US"
+		}
+		titles = append(titles, tmdbAltTitleItem{Title: alt.Title, Lang: langTag})
+	}
+
+	detail.Name = pickPreferredTitle(detail.Name, titles)
+	detail.Overview = pickPreferredOverview(detail.Overview, overviews)
+
+	if !containsAppendValue(appendToResponse, "translations") {
+		detail.Logos = filterPreferredLogos(detail.Logos)
+	}
+
+	return nil
+}
+
+func (c *TMDBClient) enrichMovieDetailPreferredText(detail *TMDBMovieDetail, appendToResponse string) error {
+	if detail == nil {
+		return nil
+	}
+
+	params := url.Values{}
+	params.Set("include_image_language", "zh,cn,null,en")
+
+	appendValue := mergeAppendValue(appendToResponse, "translations", "alternative_titles")
+	if appendValue != "" {
+		params.Set("append_to_response", appendValue)
+	}
+
+	var raw struct {
+		Title             string                             `json:"title"`
+		Overview          string                             `json:"overview"`
+		Translations      tmdbMovieTranslationsResponse      `json:"translations"`
+		AlternativeTitles tmdbMovieAlternativeTitlesResponse `json:"alternative_titles"`
+	}
+	if err := c.get(fmt.Sprintf("/movie/%d", detail.ID), params, &raw); err != nil {
+		return err
+	}
+
+	var titles []tmdbAltTitleItem
+	overviews := map[string]string{}
+
+	for _, tr := range raw.Translations.Translations {
+		langTag := normalizeLangTag(tr.ISO6391, tr.ISO31661)
+		if tr.Data.Title != "" {
+			titles = append(titles, tmdbAltTitleItem{Title: tr.Data.Title, Lang: langTag})
+		}
+		if tr.Data.Overview != "" {
+			overviews[langTag] = tr.Data.Overview
+		}
+	}
+
+	for _, alt := range raw.AlternativeTitles.Titles {
+		if alt.Title == "" {
+			continue
+		}
+		langTag := normalizeLangTag("", alt.ISO31661)
+		if strings.EqualFold(alt.ISO31661, "CN") {
+			langTag = "zh-CN"
+		} else if strings.EqualFold(alt.ISO31661, "US") {
+			langTag = "en-US"
+		}
+		titles = append(titles, tmdbAltTitleItem{Title: alt.Title, Lang: langTag})
+	}
+
+	detail.Title = pickPreferredTitle(detail.Title, titles)
+	detail.Overview = pickPreferredOverview(detail.Overview, overviews)
+
+	if !containsAppendValue(appendToResponse, "translations") {
+		detail.Logos = filterPreferredLogos(detail.Logos)
+	}
+
+	return nil
+}
+
+func filterPreferredLogos(logos []struct {
+	FilePath string `json:"file_path"`
+	ISO6391  string `json:"iso_639_1"`
+}) []struct {
+	FilePath string `json:"file_path"`
+	ISO6391  string `json:"iso_639_1"`
+} {
+	var zh []struct {
+		FilePath string `json:"file_path"`
+		ISO6391  string `json:"iso_639_1"`
+	}
+	var en []struct {
+		FilePath string `json:"file_path"`
+		ISO6391  string `json:"iso_639_1"`
+	}
+	var empty []struct {
+		FilePath string `json:"file_path"`
+		ISO6391  string `json:"iso_639_1"`
+	}
+
+	for _, logo := range logos {
+		lang := strings.ToLower(strings.TrimSpace(logo.ISO6391))
+		switch {
+		case strings.HasPrefix(lang, "zh"):
+			zh = append(zh, logo)
+		case strings.HasPrefix(lang, "en"):
+			en = append(en, logo)
+		case lang == "":
+			empty = append(empty, logo)
+		}
+	}
+
+	if len(zh) > 0 {
+		return zh
+	}
+	if len(en) > 0 {
+		return en
+	}
+	if len(empty) > 0 {
+		return empty
+	}
+	return logos
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

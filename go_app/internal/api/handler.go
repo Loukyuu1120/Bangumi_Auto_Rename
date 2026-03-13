@@ -294,6 +294,9 @@ func (h *Handler) handleBatchRetry(w http.ResponseWriter, r *http.Request) {
 			CusOffset:   rec.Offset,
 			CusSeasonID: rec.SeasonID,
 		}
+		if strings.TrimSpace(rec.Name) == "" {
+			opts.CusName = ""
+		}
 
 		// Apply batch settings overrides
 		if v, ok := body.Settings["is_anime"]; ok {
@@ -316,6 +319,16 @@ func (h *Handler) handleBatchRetry(w http.ResponseWriter, r *http.Request) {
 		if v, ok := body.Settings["tmdb_id"]; ok {
 			if s, ok := v.(string); ok {
 				opts.CusTMDBID = strings.TrimSpace(s)
+			}
+		}
+		if v, ok := body.Settings["name"]; ok {
+			if s, ok := v.(string); ok {
+				opts.CusName = strings.TrimSpace(s)
+			}
+		}
+		if v, ok := body.Settings["clear_name"]; ok {
+			if b, ok := v.(bool); ok && b {
+				opts.CusName = ""
 			}
 		}
 		if v, ok := body.Settings["season_id"]; ok {

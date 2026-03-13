@@ -190,7 +190,11 @@ func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) e
 
 	// ── 2. Choose search query ────────────────────────────────────────────────
 	searchName, year := p.chooseSearchQuery(srcPath, opts, rec)
-	rec.Name = searchName
+	if strings.TrimSpace(opts.CusName) == "" {
+		rec.Name = ""
+	} else {
+		rec.Name = searchName
+	}
 	p.log.Info("[处理] 搜索词: %q  年份: %d  动画: %v  电影: %v", searchName, year, isAnime, isMovie)
 
 	// ── 3. Determine target root directory ────────────────────────────────────
@@ -226,7 +230,7 @@ func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) e
 			return fmt.Errorf("TMDB未找到电影: %q", searchName)
 		}
 		tmdbID = movie.ID
-		tmdbTitle = movie.Title
+		tmdbTitle = preferredMovieTitle(movie)
 		if len(movie.ReleaseDate) >= 4 {
 			tmdbYear, _ = strconv.Atoi(movie.ReleaseDate[:4])
 		}
@@ -253,7 +257,7 @@ func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) e
 			rec.SeasonID = nil
 
 			tmdbID = movie.ID
-			tmdbTitle = movie.Title
+			tmdbTitle = preferredMovieTitle(movie)
 			if len(movie.ReleaseDate) >= 4 {
 				tmdbYear, _ = strconv.Atoi(movie.ReleaseDate[:4])
 			}
@@ -266,7 +270,7 @@ func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) e
 			p.log.Info("[处理] TV 自动识别未命中，改为匹配电影: %s (%d) [tmdb:%d]", tmdbTitle, tmdbYear, tmdbID)
 		} else {
 			tmdbID = tv.ID
-			tmdbTitle = tv.Name
+			tmdbTitle = preferredTVTitle(tv)
 			if len(tv.FirstAirDate) >= 4 {
 				tmdbYear, _ = strconv.Atoi(tv.FirstAirDate[:4])
 			}
@@ -397,7 +401,7 @@ func (p *Processor) detectMediaType(srcPath string, opts TaskOptions) (isAnime b
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (p *Processor) chooseSearchQuery(srcPath string, opts TaskOptions, rec *TaskRecord) (name string, year int) {
-	if opts.CusName != "" {
+	if strings.TrimSpace(opts.CusName) != "" {
 		name, year = ParseSearchName(opts.CusName)
 		name = strings.Join(strings.Fields(name), " ")
 		return name, year
@@ -842,6 +846,32 @@ func (p *Processor) addAccompanyingFiles(srcPath, targetDir, srcStem, targetStem
 		dst := filepath.Join(targetDir, targetStem+ext)
 		out[src] = dst
 	}
+}
+
+func preferredTVTitle(tv *TMDBTVDetail) string {
+	if tv == nil {
+		return ""
+	}
+
+	name := strings.TrimSpace(tv.Name)
+	if name != "" {
+		return name
+	}
+
+	return strings.TrimSpace(tv.OriginalName)
+}
+
+func preferredMovieTitle(movie *TMDBMovieDetail) string {
+	if movie == nil {
+		return ""
+	}
+
+	title := strings.TrimSpace(movie.Title)
+	if title != "" {
+		return title
+	}
+
+	return strings.TrimSpace(movie.OriginalTitle)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -42,7 +42,16 @@ func extractTMDBIDFromPath(path string) string {
 }
 
 // pollInterval is the interval between directory scans in compatibility (polling) mode.
-const pollInterval = 2 * time.Second
+// Override with the BANGUMI_POLL_INTERVAL environment variable (e.g. "5s", "10s", "30s").
+// Values below 1 s are ignored. Default: 5 s.
+var pollInterval = func() time.Duration {
+	if v := os.Getenv("BANGUMI_POLL_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= time.Second {
+			return d
+		}
+	}
+	return 5 * time.Second
+}()
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -134,7 +143,6 @@ type Service struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
-
 }
 
 var (
@@ -153,13 +161,13 @@ func InitService(processor *rename.Processor, store *rename.Store, dataDir strin
 	globalOnce.Do(func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		svc := &Service{
-			processor:    processor,
-			store:        store,
-			log:          logger.Get(),
-			dataDir:      dataDir,
-			workCh:       make(chan struct{}, 512),
-			ctx:          ctx,
-			cancel:       cancel,
+			processor: processor,
+			store:     store,
+			log:       logger.Get(),
+			dataDir:   dataDir,
+			workCh:    make(chan struct{}, 512),
+			ctx:       ctx,
+			cancel:    cancel,
 		}
 		globalService = svc
 		go svc.worker()
@@ -225,7 +233,7 @@ func (s *Service) StartWatchers(paths []PathConfig, excludeDirs []string, mode .
 	}
 
 	if usePolling {
-		s.log.Info("[监控] 使用兼容模式 (轮询)，与 Python 版行为一致")
+		s.log.Info("[监控] 使用兼容模式 (轮询)")
 		pollCtx, pollCancel := context.WithCancel(s.ctx)
 		s.pollCancel = pollCancel
 		go s.pollLoop(pollCtx, paths)

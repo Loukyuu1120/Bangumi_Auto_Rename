@@ -15,4 +15,20 @@ services:
     environment:
       - HTTP_PROXY=http://192.168.0.1:7890
       - HTTPS_PROXY=http://192.168.0.1:7890
+      # ── CPU 优化 ────────────────────────────────────────────────────────────
+      # 限制 Go 调度器使用的逻辑处理器数量。
+      # automaxprocs 会自动从 cgroup quota 推算该值；
+      # 若未设置 CPU 配额则保留此手动兜底值（通常 1-2 已足够）。
+      - GOMAXPROCS=2
+      # 兼容模式（轮询）下的目录扫描间隔，默认 5s。
+      # 若媒体目录文件极多可适当调大（如 10s、30s）以进一步降低 CPU。
+      - BANGUMI_POLL_INTERVAL=5s
+    deploy:
+      resources:
+        limits:
+          # 限制容器最多使用 2 个 CPU 核心，防止空转时抢占宿主机资源。
+          # 可按实际需求调整（如 1.0 / 4.0）。
+          cpus: "2.0"
+          # 按需调整内存上限。
+          memory: 512m
     restart: always

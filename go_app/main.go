@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"syscall"
 	"time"
@@ -17,6 +18,11 @@ import (
 	"bangumi_auto_rename/internal/logger"
 	"bangumi_auto_rename/internal/monitor"
 	"bangumi_auto_rename/internal/rename"
+
+	// Automatically set GOMAXPROCS to match the container's CPU quota.
+	// Without this, Go uses all host CPUs, causing unnecessary scheduler
+	// spinning and elevated idle CPU usage inside Docker containers.
+	_ "go.uber.org/automaxprocs"
 )
 
 func main() {
@@ -71,6 +77,7 @@ func main() {
 	log.Info("  番剧自动重命名 (Go 版) 启动中…")
 	log.Info("  数据目录 : %s", *dataDir)
 	log.Info("  静态目录 : %s", *staticDir)
+	log.Info("  GOMAXPROCS : %d", runtime.GOMAXPROCS(0))
 	log.Info("============================================")
 
 	// ── Configuration ─────────────────────────────────────────────────────────

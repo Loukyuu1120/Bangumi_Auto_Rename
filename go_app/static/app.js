@@ -256,10 +256,10 @@ function renderTaskTable(items) {
           : t.target_path || "";
 
       const cellStyle =
-        "font-size:11px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+        "font-size:11px;max-width:none;overflow:visible;text-overflow:initial;white-space:normal;word-break:break-all;line-height:1.5;";
 
       // Name row
-      const nameRow = `<div style="font-weight:600;font-size:12px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escHtml(t.name || "")}">${escHtml(t.name || "—")}</div>`;
+      const nameRow = `<div style="font-weight:600;font-size:12px;max-width:none;overflow:visible;text-overflow:initial;white-space:normal;word-break:break-all;line-height:1.5;" title="${escHtml(t.name || "")}">${escHtml(t.name || "—")}</div>`;
 
       // Source path row (迁移前)
       const srcRow = `<div style="${cellStyle}color:#6b7280;" title="${escHtml(t.path)}">📂 ${escHtml(t.path)}</div>`;
@@ -486,9 +486,12 @@ async function submitBatchRetry() {
   if (movieV && movieV !== "保持原样") settings.is_movie = movieV;
   if (aiV && aiV !== "保持原样") settings.use_ai = aiV;
 
+  const customName = document.getElementById("bRetryName")?.value.trim();
   const tmdbID = document.getElementById("bRetryTMDBID")?.value.trim();
   const seasonID = document.getElementById("bRetrySeasonID")?.value.trim();
   const offset = document.getElementById("bRetryOffset")?.value.trim();
+  if (customName) settings.name = customName;
+  else settings.clear_name = true;
   if (tmdbID) settings.tmdb_id = tmdbID;
   if (seasonID) settings.season_id = seasonID;
   if (offset) settings.episode_offset = offset;
@@ -912,10 +915,10 @@ function renderFriendlyConfig(key, val) {
   if (key === "secondary_rules") return renderSecondaryRules(val);
   if (key === "monitor_paths") return renderMonitorPaths(val);
   if (key === "monitor_exclude_dirs")
-    return renderStringListEditor(
+    return renderMultilineTextEditor(
       key,
       toStringArray(val),
-      "输入排除目录关键词",
+      "一行一个排除目录关键词，支持正则，例如 C\\+\\+",
     );
   return "";
 }
@@ -1138,6 +1141,14 @@ function renderStringListEditor(key, items, placeholder) {
       <input type="text" id="new_${key}_input" placeholder="${escHtml(placeholder)}" style="flex:1;"/>
       <button class="btn-outline" style="padding:4px 12px;font-size:12px;white-space:nowrap;" onclick="addStringListItem('${key}')">+ 添加</button>
     </div>
+  </div>`;
+}
+
+function renderMultilineTextEditor(key, items, placeholder) {
+  const value = (items || []).join("\n");
+  return `<div id="cfg_${key}">
+    <textarea id="${key}_textarea" rows="8" style="resize:vertical;font-family:monospace;font-size:12px;line-height:1.6;" placeholder="${escHtml(placeholder)}">${escHtml(value)}</textarea>
+    <div style="margin-top:6px;font-size:11px;color:#9ca3af;">一行一条规则，留空行会自动忽略。</div>
   </div>`;
 }
 
@@ -1372,7 +1383,12 @@ function collectFriendlyValue(key) {
     });
   }
   if (key === "monitor_exclude_dirs") {
-    return S["_list_" + key] || [];
+    const textarea = document.getElementById(`${key}_textarea`);
+    if (!textarea) return [];
+    return textarea.value
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
   }
   return [];
 }
