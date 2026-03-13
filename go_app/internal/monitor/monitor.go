@@ -184,31 +184,27 @@ func InitService(processor *rename.Processor, store *rename.Store, dataDir strin
 // "native" (fsnotify, OS-level events).  It stops any previously running
 // watchers first.  If mode is omitted it defaults to "compatibility".
 func (s *Service) StartWatchers(paths []PathConfig, excludeDirs []string, mode ...string) error {
+	// ── Update all shared state under the lock, then release immediately ──────
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Stop existing fsnotify watcher
 	if s.watcher != nil {
 		_ = s.watcher.Close()
 		s.watcher = nil
 	}
-
-	// Cancel any running poll loop
 	if s.pollCancel != nil {
 		s.pollCancel()
 		s.pollCancel = nil
 	}
-
 	s.watchedDirs = paths
 	s.excludeDirs = excludeDirs
 	s.excludePatterns = compileExcludePatterns(excludeDirs, s.log)
+	s.mu.Unlock()
 
 	if len(paths) == 0 {
 		s.log.Info("[监控] 无监控目录配置，跳过启动")
 		return nil
 	}
 
-	// Determine monitoring mode (mirror Python behavior)
+	// ── Determine monitoring mode (mirrors Python MonitorService.start) ───────
 	watchMode := "compatibility"
 	if len(mode) > 0 && mode[0] != "" {
 		watchMode = strings.ToLower(strings.TrimSpace(mode[0]))
@@ -222,6 +218,7 @@ func (s *Service) StartWatchers(paths []PathConfig, excludeDirs []string, mode .
 	if !usePolling && runtime.GOOS == "linux" {
 		limit := getInotifyLimit()
 		s.log.Info("[监控] 当前 max_user_watches: %d", limit)
+		// Quick pre-flight: count files up to 10000/path, matching Python logic.
 		totalFiles := 0
 		for _, pc := range paths {
 			totalFiles += countDirectoryFiles(pc.Path, 10000)
@@ -232,10 +229,13 @@ func (s *Service) StartWatchers(paths []PathConfig, excludeDirs []string, mode .
 		}
 	}
 
+	// ── Start the chosen mode ─────────────────────────────────────────────────
 	if usePolling {
 		s.log.Info("[监控] 使用兼容模式 (轮询)")
+		s.mu.Lock()
 		pollCtx, pollCancel := context.WithCancel(s.ctx)
 		s.pollCancel = pollCancel
+		s.mu.Unlock()
 		go s.pollLoop(pollCtx, paths)
 		s.log.Info("[监控] 服务已启动，模式: [兼容模式(轮询)]，监控 %d 个目录", len(paths))
 		return nil
@@ -243,27 +243,78 @@ func (s *Service) StartWatchers(paths []PathConfig, excludeDirs []string, mode .
 
 	if err := s.startNativeWatchers(paths); err != nil {
 		s.log.Warn("[监控] 原生模式启动失败，回退到轮询: %v", err)
+		s.mu.Lock()
 		pollCtx, pollCancel := context.WithCancel(s.ctx)
 		s.pollCancel = pollCancel
+		s.mu.Unlock()
 		go s.pollLoop(pollCtx, paths)
 	}
 	return nil
 }
 
 // startNativeWatchers starts fsnotify-based watchers (native mode).
+// Mirrors Python watchdog's InotifyObserver behaviour: the watcher and its
+// event loop are started immediately, and the (potentially slow) recursive
+// directory registration runs in a background goroutine so this function
+// returns without blocking.  Must NOT be called while s.mu is held.
 func (s *Service) startNativeWatchers(paths []PathConfig) error {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return err
 	}
 
-	monitoredCount := 0
+	// Validate at least one path exists before committing.
+	validPaths := make([]PathConfig, 0, len(paths))
 	for _, pc := range paths {
-		if _, err := os.Stat(pc.Path); err != nil {
+		if _, statErr := os.Stat(pc.Path); statErr != nil {
 			s.log.Warn("[监控] 路径不存在，跳过: %s", pc.Path)
 			continue
 		}
-		if runtime.GOOS == "linux" {
+		validPaths = append(validPaths, pc)
+	}
+
+	if len(validPaths) == 0 {
+		_ = w.Close()
+		s.log.Warn("[监控] 没有有效的监控目录，服务未启动监听")
+		return nil
+	}
+
+	// Register the watcher and start the event loop NOW — before any directory
+	// walk — so the service is immediately live.  This mirrors Python watchdog's
+	// InotifyObserver.start() which spawns a thread and returns straight away.
+	s.mu.Lock()
+	s.watcher = w
+	s.mu.Unlock()
+
+	go s.watchLoop(w, paths)
+	s.log.Info("[监控] 服务已启动，模式: [高效模式(原生)]，正在后台注册 %d 个监控目录…", len(validPaths))
+
+	// Register all sub-directories with inotify in the background so startup
+	// is non-blocking regardless of library size.
+	go func() {
+		totalDirs := 0
+		for _, pc := range validPaths {
+			// Abort early if the service was shut down while we were walking.
+			select {
+			case <-s.ctx.Done():
+				return
+			default:
+			}
+
+			if runtime.GOOS != "linux" {
+				// Non-Linux: single watch per path (OS handles recursion).
+				if addErr := w.Add(pc.Path); addErr != nil {
+					s.log.Warn("[监控] 添加监控失败 %s: %v", pc.Path, addErr)
+					continue
+				}
+				totalDirs++
+				s.log.Info("[监控] 已添加监控目录: %s", pc.Path)
+				continue
+			}
+
+			// Linux/inotify: must register every subdirectory individually.
+			s.log.Info("[监控] inotify 注册: %s …", pc.Path)
+			dirCount := 0
 			_ = filepath.WalkDir(pc.Path, func(path string, d fs.DirEntry, walkErr error) error {
 				if walkErr != nil {
 					return nil
@@ -274,33 +325,28 @@ func (s *Service) startNativeWatchers(paths []PathConfig) error {
 				if s.shouldExclude(path) {
 					return filepath.SkipDir
 				}
+				// Stop if the service was shut down mid-walk.
+				select {
+				case <-s.ctx.Done():
+					return filepath.SkipAll
+				default:
+				}
 				if addErr := w.Add(path); addErr != nil {
 					s.log.Warn("[监控] 添加目录失败 %s: %v", path, addErr)
 					return nil
 				}
-				monitoredCount++
+				dirCount++
+				if dirCount%1000 == 0 {
+					s.log.Info("[监控] 注册进度 %s: 已注册 %d 个目录…", filepath.Base(pc.Path), dirCount)
+				}
 				return nil
 			})
-			s.log.Info("[监控] 已添加监控目录: %s", pc.Path)
-		} else {
-			if err := w.Add(pc.Path); err != nil {
-				s.log.Warn("[监控] 添加监控失败 %s: %v", pc.Path, err)
-				continue
-			}
-			monitoredCount++
-			s.log.Info("[监控] 已添加监控目录: %s", pc.Path)
+			totalDirs += dirCount
+			s.log.Info("[监控] inotify 注册完成: %s（共 %d 个目录）", pc.Path, dirCount)
 		}
-	}
+		s.log.Info("[监控] inotify 全量注册完成，共 %d 个目录", totalDirs)
+	}()
 
-	if monitoredCount == 0 {
-		_ = w.Close()
-		s.log.Warn("[监控] 没有有效的监控目录，服务未启动监听")
-		return nil
-	}
-
-	s.watcher = w
-	go s.watchLoop(w, paths)
-	s.log.Info("[监控] 服务已启动，模式: [高效模式(原生)]，监控 %d 个目录", monitoredCount)
 	return nil
 }
 
@@ -883,17 +929,18 @@ func compileExcludePatterns(exclude []string, log *logger.Logger) []*regexp.Rege
 	return patterns
 }
 
+// countDirectoryFiles counts the number of regular files under root up to
+// maxCheck.  Mirrors Python's MonitorService.count_directory_files() used as
+// a quick pre-flight check before choosing native vs. polling mode.
 func countDirectoryFiles(root string, maxCheck int) int {
 	count := 0
 	_ = filepath.WalkDir(root, func(_ string, d fs.DirEntry, err error) error {
-		if err != nil {
+		if err != nil || d.IsDir() {
 			return nil
 		}
-		if !d.IsDir() {
-			count++
-			if count > maxCheck {
-				return filepath.SkipDir
-			}
+		count++
+		if count >= maxCheck {
+			return filepath.SkipAll
 		}
 		return nil
 	})
