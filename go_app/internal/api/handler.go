@@ -1003,7 +1003,7 @@ func (h *Handler) handleTMDBTest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Simple connectivity test: search for a known title
-	client := rename.NewTMDBClient(cfg.APIKey)
+	client := rename.NewTMDBClient(cfg.APIKey, cfg.TitleLanguages, cfg.OverviewLanguages)
 	results, err := client.SearchTV("Breaking Bad", 2008)
 	if err != nil {
 		jsonOK(w, map[string]interface{}{"ok": false, "message": "TMDB连接失败: " + err.Error()})

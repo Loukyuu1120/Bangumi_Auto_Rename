@@ -177,15 +177,19 @@ const tmdbBase = "https://api.themoviedb.org/3"
 
 // TMDBClient performs authenticated calls to the TMDB v3 REST API.
 type TMDBClient struct {
-	apiKey string
-	http   *http.Client
+	apiKey            string
+	http              *http.Client
+	titleLanguages    []string
+	overviewLanguages []string
 }
 
 // NewTMDBClient creates a client with the given API key.
-func NewTMDBClient(apiKey string) *TMDBClient {
+func NewTMDBClient(apiKey string, titleLanguages, overviewLanguages []string) *TMDBClient {
 	return &TMDBClient{
-		apiKey: apiKey,
-		http:   &http.Client{Timeout: 15 * time.Second},
+		apiKey:            apiKey,
+		http:              &http.Client{Timeout: 15 * time.Second},
+		titleLanguages:    normalizeLanguagePreferences(titleLanguages, []string{"zh-CN", "zh-SG", "zh", "en-US", "en"}),
+		overviewLanguages: normalizeLanguagePreferences(overviewLanguages, []string{"zh-CN", "zh-SG", "zh", "en-US", "en"}),
 	}
 }
 
@@ -658,24 +662,71 @@ type tmdbMovieAlternativeTitlesResponse struct {
 }
 
 func preferredLangOrder() []string {
-	return []string{"zh-CN", "zh", "en-US", "en"}
+	return []string{"zh-CN", "zh-SG", "zh", "en-US", "en"}
 }
 
-func langRank(tag string) int {
+func normalizeLanguagePreferences(preferences []string, defaults []string) []string {
+	if len(preferences) == 0 {
+		out := make([]string, len(defaults))
+		copy(out, defaults)
+		return out
+	}
+
+	seen := map[string]bool{}
+	out := make([]string, 0, len(preferences)+len(defaults))
+
+	for _, pref := range preferences {
+		pref = strings.TrimSpace(pref)
+		if pref == "" {
+			continue
+		}
+		normalized := strings.ToLower(pref)
+		if seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		out = append(out, pref)
+	}
+
+	for _, pref := range defaults {
+		normalized := strings.ToLower(pref)
+		if seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		out = append(out, pref)
+	}
+
+	if len(out) == 0 {
+		out = append(out, defaults...)
+	}
+
+	return out
+}
+
+func langRankWithOrder(tag string, order []string) int {
 	tag = strings.TrimSpace(strings.ToLower(tag))
-	order := preferredLangOrder()
 	for i, v := range order {
 		if strings.ToLower(v) == tag {
 			return i
 		}
 	}
-	if strings.HasPrefix(tag, "zh") {
+	switch {
+	case tag == "zh-cn" || tag == "zh-sg":
 		return 0
+	case strings.HasPrefix(tag, "zh-tw") || strings.HasPrefix(tag, "zh-hk") || strings.HasPrefix(tag, "zh-mo"):
+		return 10 + len(order)
+	case strings.HasPrefix(tag, "zh"):
+		return 1
+	case strings.HasPrefix(tag, "en"):
+		return 20 + len(order)
+	default:
+		return 99 + len(order)
 	}
-	if strings.HasPrefix(tag, "en") {
-		return 2
-	}
-	return 99
+}
+
+func langRank(tag string) int {
+	return langRankWithOrder(tag, preferredLangOrder())
 }
 
 func normalizeLangTag(lang, region string) string {
@@ -690,11 +741,11 @@ func normalizeLangTag(lang, region string) string {
 	return lang + "-" + region
 }
 
-func pickPreferredTitle(current string, candidates []tmdbAltTitleItem) string {
+func pickPreferredTitle(current string, candidates []tmdbAltTitleItem, order []string) string {
 	best := strings.TrimSpace(current)
-	bestRank := 99
+	bestRank := 99 + len(order)
 	if best != "" {
-		bestRank = 98
+		bestRank = 98 + len(order)
 	}
 
 	for _, item := range candidates {
@@ -702,7 +753,7 @@ func pickPreferredTitle(current string, candidates []tmdbAltTitleItem) string {
 		if title == "" {
 			continue
 		}
-		rank := langRank(item.Lang)
+		rank := langRankWithOrder(item.Lang, order)
 		if rank < bestRank {
 			best = title
 			bestRank = rank
@@ -712,11 +763,11 @@ func pickPreferredTitle(current string, candidates []tmdbAltTitleItem) string {
 	return best
 }
 
-func pickPreferredOverview(current string, candidates map[string]string) string {
+func pickPreferredOverview(current string, candidates map[string]string, order []string) string {
 	best := strings.TrimSpace(current)
-	bestRank := 99
+	bestRank := 99 + len(order)
 	if best != "" {
-		bestRank = 98
+		bestRank = 98 + len(order)
 	}
 
 	keys := make([]string, 0, len(candidates))
@@ -724,7 +775,7 @@ func pickPreferredOverview(current string, candidates map[string]string) string 
 		keys = append(keys, k)
 	}
 	sort.Slice(keys, func(i, j int) bool {
-		return langRank(keys[i]) < langRank(keys[j])
+		return langRankWithOrder(keys[i], order) < langRankWithOrder(keys[j], order)
 	})
 
 	for _, lang := range keys {
@@ -732,7 +783,7 @@ func pickPreferredOverview(current string, candidates map[string]string) string 
 		if text == "" {
 			continue
 		}
-		rank := langRank(lang)
+		rank := langRankWithOrder(lang, order)
 		if rank < bestRank {
 			best = text
 			bestRank = rank
@@ -817,16 +868,20 @@ func (c *TMDBClient) enrichTVDetailPreferredText(detail *TMDBTVDetail, appendToR
 			continue
 		}
 		langTag := normalizeLangTag("", alt.ISO31661)
-		if strings.EqualFold(alt.ISO31661, "CN") {
+		if strings.EqualFold(alt.ISO31661, "CN") || strings.EqualFold(alt.ISO31661, "SG") {
 			langTag = "zh-CN"
+		} else if strings.EqualFold(alt.ISO31661, "TW") {
+			langTag = "zh-TW"
+		} else if strings.EqualFold(alt.ISO31661, "HK") || strings.EqualFold(alt.ISO31661, "MO") {
+			langTag = "zh-HK"
 		} else if strings.EqualFold(alt.ISO31661, "US") {
 			langTag = "en-US"
 		}
 		titles = append(titles, tmdbAltTitleItem{Title: alt.Title, Lang: langTag})
 	}
 
-	detail.Name = pickPreferredTitle(detail.Name, titles)
-	detail.Overview = pickPreferredOverview(detail.Overview, overviews)
+	detail.Name = pickPreferredTitle(detail.Name, titles, c.titleLanguages)
+	detail.Overview = pickPreferredOverview(detail.Overview, overviews, c.overviewLanguages)
 
 	if !containsAppendValue(appendToResponse, "translations") {
 		detail.Logos = filterPreferredLogos(detail.Logos)
@@ -876,16 +931,20 @@ func (c *TMDBClient) enrichMovieDetailPreferredText(detail *TMDBMovieDetail, app
 			continue
 		}
 		langTag := normalizeLangTag("", alt.ISO31661)
-		if strings.EqualFold(alt.ISO31661, "CN") {
+		if strings.EqualFold(alt.ISO31661, "CN") || strings.EqualFold(alt.ISO31661, "SG") {
 			langTag = "zh-CN"
+		} else if strings.EqualFold(alt.ISO31661, "TW") {
+			langTag = "zh-TW"
+		} else if strings.EqualFold(alt.ISO31661, "HK") || strings.EqualFold(alt.ISO31661, "MO") {
+			langTag = "zh-HK"
 		} else if strings.EqualFold(alt.ISO31661, "US") {
 			langTag = "en-US"
 		}
 		titles = append(titles, tmdbAltTitleItem{Title: alt.Title, Lang: langTag})
 	}
 
-	detail.Title = pickPreferredTitle(detail.Title, titles)
-	detail.Overview = pickPreferredOverview(detail.Overview, overviews)
+	detail.Title = pickPreferredTitle(detail.Title, titles, c.titleLanguages)
+	detail.Overview = pickPreferredOverview(detail.Overview, overviews, c.overviewLanguages)
 
 	if !containsAppendValue(appendToResponse, "translations") {
 		detail.Logos = filterPreferredLogos(detail.Logos)

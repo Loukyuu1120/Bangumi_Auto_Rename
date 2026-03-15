@@ -78,7 +78,7 @@ func NewProcessor(cfg *config.Manager) *Processor {
 	c := cfg.GetConfig()
 	return &Processor{
 		cfg:  cfg,
-		tmdb: NewTMDBClient(c.APIKey),
+		tmdb: NewTMDBClient(c.APIKey, c.TitleLanguages, c.OverviewLanguages),
 		ai:   ai.New(cfg),
 		log:  logger.Get(),
 	}
