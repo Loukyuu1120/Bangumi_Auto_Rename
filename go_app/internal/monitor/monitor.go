@@ -97,6 +97,7 @@ type QueueItem struct {
 // PathConfig describes a single monitored directory and its per-path overrides.
 type PathConfig struct {
 	Path   string                 `json:"path"`
+	Mode   string                 `json:"mode,omitempty"`
 	Extras map[string]interface{} `json:"extras,omitempty"`
 }
 
@@ -204,51 +205,77 @@ func (s *Service) StartWatchers(paths []PathConfig, excludeDirs []string, mode .
 		return nil
 	}
 
-	// ── Determine monitoring mode (mirrors Python MonitorService.start) ───────
-	watchMode := "compatibility"
+	globalMode := "compatibility"
 	if len(mode) > 0 && mode[0] != "" {
-		watchMode = strings.ToLower(strings.TrimSpace(mode[0]))
+		globalMode = strings.ToLower(strings.TrimSpace(mode[0]))
 	}
 
-	usePolling := watchMode == "compatibility"
-	if !usePolling && runtime.GOOS != "linux" {
-		s.log.Info("[监控] 当前系统不支持递归原生监听，回退到轮询模式")
-		usePolling = true
+	type groupedPaths struct {
+		mode  string
+		paths []PathConfig
 	}
-	if !usePolling && runtime.GOOS == "linux" {
-		limit := getInotifyLimit()
-		s.log.Info("[监控] 当前 max_user_watches: %d", limit)
-		// Quick pre-flight: count files up to 10000/path, matching Python logic.
-		totalFiles := 0
-		for _, pc := range paths {
-			totalFiles += countDirectoryFiles(pc.Path, 10000)
+
+	groupsByMode := map[string][]PathConfig{}
+	for _, pc := range paths {
+		watchMode := strings.ToLower(strings.TrimSpace(pc.Mode))
+		if watchMode == "" {
+			watchMode = globalMode
 		}
-		if totalFiles > int(float64(limit)*0.8) {
-			s.log.Warn("[监控] 文件数量(%d) 接近系统限制(%d)，强制使用轮询模式", totalFiles, limit)
+		if watchMode != "native" {
+			watchMode = "compatibility"
+		}
+		groupsByMode[watchMode] = append(groupsByMode[watchMode], pc)
+	}
+
+	groups := make([]groupedPaths, 0, len(groupsByMode))
+	if nativePaths := groupsByMode["native"]; len(nativePaths) > 0 {
+		groups = append(groups, groupedPaths{mode: "native", paths: nativePaths})
+	}
+	if compatibilityPaths := groupsByMode["compatibility"]; len(compatibilityPaths) > 0 {
+		groups = append(groups, groupedPaths{mode: "compatibility", paths: compatibilityPaths})
+	}
+
+	for _, group := range groups {
+		usePolling := group.mode == "compatibility"
+		if !usePolling && runtime.GOOS != "linux" {
+			s.log.Info("[监控] 当前系统不支持递归原生监听，目录组回退到轮询模式")
 			usePolling = true
 		}
+		if !usePolling && runtime.GOOS == "linux" {
+			limit := getInotifyLimit()
+			s.log.Info("[监控] 当前 max_user_watches: %d", limit)
+			// Quick pre-flight: count files up to 10000/path, matching Python logic.
+			totalFiles := 0
+			for _, pc := range group.paths {
+				totalFiles += countDirectoryFiles(pc.Path, 10000)
+			}
+			if totalFiles > int(float64(limit)*0.8) {
+				s.log.Warn("[监控] 文件数量(%d) 接近系统限制(%d)，目录组强制使用轮询模式", totalFiles, limit)
+				usePolling = true
+			}
+		}
+
+		if usePolling {
+			s.log.Info("[监控] 使用兼容模式 (轮询)，目录数: %d", len(group.paths))
+			s.mu.Lock()
+			pollCtx, pollCancel := context.WithCancel(s.ctx)
+			s.pollCancel = pollCancel
+			s.mu.Unlock()
+			go s.pollLoop(pollCtx, group.paths)
+			continue
+		}
+
+		if err := s.startNativeWatchers(group.paths); err != nil {
+			s.log.Warn("[监控] 原生模式启动失败，目录组回退到轮询: %v", err)
+			s.mu.Lock()
+			pollCtx, pollCancel := context.WithCancel(s.ctx)
+			s.pollCancel = pollCancel
+			s.mu.Unlock()
+			go s.pollLoop(pollCtx, group.paths)
+		}
 	}
 
-	// ── Start the chosen mode ─────────────────────────────────────────────────
-	if usePolling {
-		s.log.Info("[监控] 使用兼容模式 (轮询)")
-		s.mu.Lock()
-		pollCtx, pollCancel := context.WithCancel(s.ctx)
-		s.pollCancel = pollCancel
-		s.mu.Unlock()
-		go s.pollLoop(pollCtx, paths)
-		s.log.Info("[监控] 服务已启动，模式: [兼容模式(轮询)]，监控 %d 个目录", len(paths))
-		return nil
-	}
-
-	if err := s.startNativeWatchers(paths); err != nil {
-		s.log.Warn("[监控] 原生模式启动失败，回退到轮询: %v", err)
-		s.mu.Lock()
-		pollCtx, pollCancel := context.WithCancel(s.ctx)
-		s.pollCancel = pollCancel
-		s.mu.Unlock()
-		go s.pollLoop(pollCtx, paths)
-	}
+	s.log.Info("[监控] 服务已启动，监控 %d 个目录", len(paths))
 	return nil
 }
 
@@ -801,7 +828,7 @@ func buildTaskOptions(extras map[string]interface{}) TaskOptions {
 	overrides := map[string]interface{}{}
 	for k, v := range extras {
 		switch k {
-		case "path", "scan_now":
+		case "path", "scan_now", "monitor_mode":
 			continue
 		case "is_anime":
 			if b, ok := v.(bool); ok {

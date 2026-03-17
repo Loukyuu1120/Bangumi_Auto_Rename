@@ -651,10 +651,16 @@ func (h *Handler) handleMonitorRestart(w http.ResponseWriter, r *http.Request) {
 
 	paths := make([]monitor.PathConfig, 0, len(rawPaths))
 	for _, p := range rawPaths {
-		paths = append(paths, monitor.PathConfig{
+		pc := monitor.PathConfig{
 			Path:   p.Path,
 			Extras: p.Extras,
-		})
+		}
+		if p.Extras != nil {
+			if mode, ok := p.Extras["monitor_mode"].(string); ok {
+				pc.Mode = strings.TrimSpace(mode)
+			}
+		}
+		paths = append(paths, pc)
 	}
 
 	if err := h.svc.StartWatchers(paths, excludeDirs, cfg.MonitorMode); err != nil {
@@ -777,6 +783,7 @@ func extractScanTargets(raw interface{}) (interface{}, []monitor.PathConfig) {
 		case map[string]interface{}:
 			path, _ := entry["path"].(string)
 			scanNow, _ := entry["scan_now"].(bool)
+			mode, _ := entry["monitor_mode"].(string)
 			delete(entry, "scan_now")
 			cleaned = append(cleaned, entry)
 			if scanNow && path != "" {
@@ -787,7 +794,11 @@ func extractScanTargets(raw interface{}) (interface{}, []monitor.PathConfig) {
 					}
 					extras[k] = v
 				}
-				targets = append(targets, monitor.PathConfig{Path: path, Extras: extras})
+				targets = append(targets, monitor.PathConfig{
+					Path:   path,
+					Mode:   strings.TrimSpace(mode),
+					Extras: extras,
+				})
 			}
 		}
 	}

@@ -48,6 +48,7 @@ type Config struct {
 	MonitorExcludeDirs      interface{} `json:"monitor_exclude_dirs"`
 	TitleLanguages          []string    `json:"title_languages"`
 	OverviewLanguages       []string    `json:"overview_languages"`
+	ScrapeLanguage          string      `json:"scrape_language"`
 	BatchRetryDefaultName   string      `json:"batch_retry_default_name"`
 }
 
@@ -90,6 +91,7 @@ func DefaultConfig() Config {
 		MonitorExcludeDirs:      []interface{}{},
 		TitleLanguages:          []string{"zh-CN", "en-US"},
 		OverviewLanguages:       []string{"zh-CN", "en-US"},
+		ScrapeLanguage:          "zh-CN",
 		BatchRetryDefaultName:   "",
 	}
 }
@@ -258,6 +260,7 @@ func (m *Manager) GetMonitorExcludeDirs() []string {
 // MonitorPathConfig represents a single monitored path entry.
 type MonitorPathConfig struct {
 	Path   string                 `json:"path"`
+	Mode   string                 `json:"mode,omitempty"`
 	Extras map[string]interface{} `json:"-"`
 }
 
@@ -275,7 +278,8 @@ func parseMonitorPaths(raw interface{}) []MonitorPathConfig {
 				result = append(result, MonitorPathConfig{Path: entry})
 			case map[string]interface{}:
 				p, _ := entry["path"].(string)
-				result = append(result, MonitorPathConfig{Path: p, Extras: entry})
+				mode, _ := entry["monitor_mode"].(string)
+				result = append(result, MonitorPathConfig{Path: p, Mode: mode, Extras: entry})
 			}
 		}
 	case string:

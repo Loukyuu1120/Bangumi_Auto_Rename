@@ -206,7 +206,7 @@ func NewTMDBClient(apiKey string, titleLanguages, overviewLanguages []string) *T
 func (c *TMDBClient) SearchTMDBWeb(query, mediaType string) ([]TMDBSearchResult, error) {
 	params := url.Values{}
 	params.Set("query", query)
-	params.Set("language", "zh-CN")
+	params.Set("language", c.primaryAPILanguage())
 	searchURL := "https://www.themoviedb.org/search?" + params.Encode()
 
 	req, err := http.NewRequest("GET", searchURL, nil)
@@ -215,7 +215,7 @@ func (c *TMDBClient) SearchTMDBWeb(query, mediaType string) ([]TMDBSearchResult,
 	}
 	// Mimic a real browser so TMDB serves the SSR HTML with results.
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+	req.Header.Set("Accept-Language", c.acceptLanguageHeader())
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Referer", "https://www.themoviedb.org/")
 
@@ -359,11 +359,12 @@ func (c *TMDBClient) SearchTV(query string, year int) ([]TMDBSearchResult, error
 		lang string
 		year int
 	}
-	attempts := []attempt{
-		{lang: "zh-CN", year: year},
-		{lang: "zh-CN", year: 0},
-		{lang: "en-US", year: year},
-		{lang: "en-US", year: 0},
+	var attempts []attempt
+	for _, lang := range c.searchLanguages() {
+		attempts = append(attempts,
+			attempt{lang: lang, year: year},
+			attempt{lang: lang, year: 0},
+		)
 	}
 
 	var lastErr error
@@ -398,11 +399,12 @@ func (c *TMDBClient) SearchMovie(query string, year int) ([]TMDBSearchResult, er
 		lang string
 		year int
 	}
-	attempts := []attempt{
-		{lang: "zh-CN", year: year},
-		{lang: "zh-CN", year: 0},
-		{lang: "en-US", year: year},
-		{lang: "en-US", year: 0},
+	var attempts []attempt
+	for _, lang := range c.searchLanguages() {
+		attempts = append(attempts,
+			attempt{lang: lang, year: year},
+			attempt{lang: lang, year: 0},
+		)
 	}
 
 	var lastErr error
@@ -439,11 +441,11 @@ func (c *TMDBClient) SearchMovie(query string, year int) ([]TMDBSearchResult, er
 // appendToResponse is passed as append_to_response (e.g. "credits,external_ids,content_ratings,images").
 func (c *TMDBClient) GetTVDetail(id int, appendToResponse string) (*TMDBTVDetail, error) {
 	params := url.Values{}
-	params.Set("language", "zh-CN")
+	params.Set("language", c.primaryAPILanguage())
 	if appendToResponse != "" {
 		params.Set("append_to_response", appendToResponse)
 	}
-	params.Set("include_image_language", "zh,cn,null,en")
+	params.Set("include_image_language", c.includeImageLanguageValue())
 
 	var detail TMDBTVDetail
 	if err := c.get(fmt.Sprintf("/tv/%d", id), params, &detail); err != nil {
@@ -460,11 +462,11 @@ func (c *TMDBClient) GetTVDetail(id int, appendToResponse string) (*TMDBTVDetail
 // GetMovieDetail fetches full movie details.
 func (c *TMDBClient) GetMovieDetail(id int, appendToResponse string) (*TMDBMovieDetail, error) {
 	params := url.Values{}
-	params.Set("language", "zh-CN")
+	params.Set("language", c.primaryAPILanguage())
 	if appendToResponse != "" {
 		params.Set("append_to_response", appendToResponse)
 	}
-	params.Set("include_image_language", "zh,cn,null,en")
+	params.Set("include_image_language", c.includeImageLanguageValue())
 
 	var detail TMDBMovieDetail
 	if err := c.get(fmt.Sprintf("/movie/%d", id), params, &detail); err != nil {
@@ -481,7 +483,7 @@ func (c *TMDBClient) GetMovieDetail(id int, appendToResponse string) (*TMDBMovie
 // GetSeasonDetail fetches a single season with full episode list.
 func (c *TMDBClient) GetSeasonDetail(tvID, seasonNumber int) (*TMDBSeason, error) {
 	params := url.Values{}
-	params.Set("language", "zh-CN")
+	params.Set("language", c.primaryAPILanguage())
 
 	var season TMDBSeason
 	if err := c.get(fmt.Sprintf("/tv/%d/season/%d", tvID, seasonNumber), params, &season); err != nil {
@@ -493,7 +495,7 @@ func (c *TMDBClient) GetSeasonDetail(tvID, seasonNumber int) (*TMDBSeason, error
 // GetTVImages fetches poster/backdrop/logo images for a TV show.
 func (c *TMDBClient) GetTVImages(id int) (map[string][]map[string]interface{}, error) {
 	params := url.Values{}
-	params.Set("include_image_language", "zh,cn,null,en")
+	params.Set("include_image_language", c.includeImageLanguageValue())
 
 	var result map[string][]map[string]interface{}
 	if err := c.get(fmt.Sprintf("/tv/%d/images", id), params, &result); err != nil {
@@ -505,7 +507,7 @@ func (c *TMDBClient) GetTVImages(id int) (map[string][]map[string]interface{}, e
 // GetMovieImages fetches poster/backdrop/logo images for a movie.
 func (c *TMDBClient) GetMovieImages(id int) (map[string][]map[string]interface{}, error) {
 	params := url.Values{}
-	params.Set("include_image_language", "zh,cn,null,en")
+	params.Set("include_image_language", c.includeImageLanguageValue())
 
 	var result map[string][]map[string]interface{}
 	if err := c.get(fmt.Sprintf("/movie/%d/images", id), params, &result); err != nil {
@@ -663,6 +665,95 @@ type tmdbMovieAlternativeTitlesResponse struct {
 
 func preferredLangOrder() []string {
 	return []string{"zh-CN", "zh-SG", "zh", "en-US", "en"}
+}
+
+func normalizeAPILanguage(tag string) string {
+	tag = strings.TrimSpace(strings.ToLower(tag))
+	switch {
+	case tag == "", tag == "zh":
+		return "zh-CN"
+	case tag == "zh-cn", tag == "zh-sg":
+		return "zh-CN"
+	case strings.HasPrefix(tag, "zh-tw"), strings.HasPrefix(tag, "zh-hk"), strings.HasPrefix(tag, "zh-mo"):
+		return "zh-TW"
+	case strings.HasPrefix(tag, "zh"):
+		return "zh-CN"
+	case tag == "en", strings.HasPrefix(tag, "en-"):
+		return "en-US"
+	default:
+		return ""
+	}
+}
+
+func uniqueNonEmptyStrings(items []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		key := strings.ToLower(item)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, item)
+	}
+	return out
+}
+
+func (c *TMDBClient) searchLanguages() []string {
+	candidates := []string{}
+	for _, lang := range c.titleLanguages {
+		if normalized := normalizeAPILanguage(lang); normalized != "" {
+			candidates = append(candidates, normalized)
+		}
+	}
+	candidates = append(candidates, "zh-CN", "en-US")
+	return uniqueNonEmptyStrings(candidates)
+}
+
+func (c *TMDBClient) primaryAPILanguage() string {
+	langs := c.searchLanguages()
+	if len(langs) == 0 {
+		return "zh-CN"
+	}
+	return langs[0]
+}
+
+func (c *TMDBClient) includeImageLanguageValue() string {
+	values := []string{}
+	for _, lang := range c.titleLanguages {
+		lang = strings.TrimSpace(strings.ToLower(lang))
+		switch {
+		case strings.HasPrefix(lang, "zh"):
+			values = append(values, "zh", "cn")
+		case strings.HasPrefix(lang, "en"):
+			values = append(values, "en")
+		}
+	}
+	values = append(values, "zh", "cn", "null", "en")
+	return strings.Join(uniqueNonEmptyStrings(values), ",")
+}
+
+func (c *TMDBClient) acceptLanguageHeader() string {
+	apiLangs := c.searchLanguages()
+	parts := make([]string, 0, len(apiLangs)+2)
+	q := 1.0
+	for i, lang := range apiLangs {
+		if i == 0 {
+			parts = append(parts, lang)
+		} else {
+			parts = append(parts, fmt.Sprintf("%s;q=%.1f", lang, q))
+		}
+		q -= 0.1
+		if q < 0.1 {
+			q = 0.1
+		}
+	}
+	parts = append(parts, "zh;q=0.9", "en;q=0.8")
+	return strings.Join(uniqueNonEmptyStrings(parts), ",")
 }
 
 func normalizeLanguagePreferences(preferences []string, defaults []string) []string {
@@ -833,7 +924,8 @@ func (c *TMDBClient) enrichTVDetailPreferredText(detail *TMDBTVDetail, appendToR
 	}
 
 	params := url.Values{}
-	params.Set("include_image_language", "zh,cn,null,en")
+	params.Set("language", c.primaryAPILanguage())
+	params.Set("include_image_language", c.includeImageLanguageValue())
 
 	appendValue := mergeAppendValue(appendToResponse, "translations", "alternative_titles")
 	if appendValue != "" {
@@ -842,6 +934,8 @@ func (c *TMDBClient) enrichTVDetailPreferredText(detail *TMDBTVDetail, appendToR
 
 	var raw struct {
 		Name              string                          `json:"name"`
+		OriginalName      string                          `json:"original_name"`
+		OriginalLanguage  string                          `json:"original_language"`
 		Overview          string                          `json:"overview"`
 		Translations      tmdbTVTranslationsResponse      `json:"translations"`
 		AlternativeTitles tmdbTVAlternativeTitlesResponse `json:"alternative_titles"`
@@ -880,8 +974,15 @@ func (c *TMDBClient) enrichTVDetailPreferredText(detail *TMDBTVDetail, appendToR
 		titles = append(titles, tmdbAltTitleItem{Title: alt.Title, Lang: langTag})
 	}
 
-	detail.Name = pickPreferredTitle(detail.Name, titles, c.titleLanguages)
-	detail.Overview = pickPreferredOverview(detail.Overview, overviews, c.overviewLanguages)
+	// 强制使用简中：如果主标题是英文但有简中翻译，则强制改用简中
+	shouldForceZhCN := isEnglishLanguage(raw.OriginalLanguage) && hasZhCNTranslation(titles, overviews)
+	if shouldForceZhCN {
+		detail.Name = pickPreferredTitle(detail.Name, titles, []string{"zh-CN", "zh-SG", "zh"})
+		detail.Overview = pickPreferredOverview(detail.Overview, overviews, []string{"zh-CN", "zh-SG", "zh"})
+	} else {
+		detail.Name = pickPreferredTitle(detail.Name, titles, c.titleLanguages)
+		detail.Overview = pickPreferredOverview(detail.Overview, overviews, c.overviewLanguages)
+	}
 
 	if !containsAppendValue(appendToResponse, "translations") {
 		detail.Logos = filterPreferredLogos(detail.Logos)
@@ -896,7 +997,8 @@ func (c *TMDBClient) enrichMovieDetailPreferredText(detail *TMDBMovieDetail, app
 	}
 
 	params := url.Values{}
-	params.Set("include_image_language", "zh,cn,null,en")
+	params.Set("language", c.primaryAPILanguage())
+	params.Set("include_image_language", c.includeImageLanguageValue())
 
 	appendValue := mergeAppendValue(appendToResponse, "translations", "alternative_titles")
 	if appendValue != "" {
@@ -905,6 +1007,8 @@ func (c *TMDBClient) enrichMovieDetailPreferredText(detail *TMDBMovieDetail, app
 
 	var raw struct {
 		Title             string                             `json:"title"`
+		OriginalTitle     string                             `json:"original_title"`
+		OriginalLanguage  string                             `json:"original_language"`
 		Overview          string                             `json:"overview"`
 		Translations      tmdbMovieTranslationsResponse      `json:"translations"`
 		AlternativeTitles tmdbMovieAlternativeTitlesResponse `json:"alternative_titles"`
@@ -943,8 +1047,15 @@ func (c *TMDBClient) enrichMovieDetailPreferredText(detail *TMDBMovieDetail, app
 		titles = append(titles, tmdbAltTitleItem{Title: alt.Title, Lang: langTag})
 	}
 
-	detail.Title = pickPreferredTitle(detail.Title, titles, c.titleLanguages)
-	detail.Overview = pickPreferredOverview(detail.Overview, overviews, c.overviewLanguages)
+	// 强制使用简中：如果主标题是英文但有简中翻译，则强制改用简中
+	shouldForceZhCN := isEnglishLanguage(raw.OriginalLanguage) && hasZhCNTranslation(titles, overviews)
+	if shouldForceZhCN {
+		detail.Title = pickPreferredTitle(detail.Title, titles, []string{"zh-CN", "zh-SG", "zh"})
+		detail.Overview = pickPreferredOverview(detail.Overview, overviews, []string{"zh-CN", "zh-SG", "zh"})
+	} else {
+		detail.Title = pickPreferredTitle(detail.Title, titles, c.titleLanguages)
+		detail.Overview = pickPreferredOverview(detail.Overview, overviews, c.overviewLanguages)
+	}
 
 	if !containsAppendValue(appendToResponse, "translations") {
 		detail.Logos = filterPreferredLogos(detail.Logos)
@@ -995,6 +1106,37 @@ func filterPreferredLogos(logos []struct {
 		return empty
 	}
 	return logos
+}
+
+// isEnglishLanguage 判断语言代码是否为英文
+func isEnglishLanguage(lang string) bool {
+	lang = strings.ToLower(strings.TrimSpace(lang))
+	return lang == "en" || strings.HasPrefix(lang, "en-")
+}
+
+// hasZhCNTranslation 判断是否有简中翻译
+func hasZhCNTranslation(titles []tmdbAltTitleItem, overviews map[string]string) bool {
+	// 检查标题中是否有简中
+	for _, t := range titles {
+		lang := strings.ToLower(strings.TrimSpace(t.Lang))
+		if lang == "zh-cn" || lang == "zh-sg" || lang == "zh" {
+			if strings.TrimSpace(t.Title) != "" {
+				return true
+			}
+		}
+	}
+
+	// 检查简介中是否有简中
+	for lang, text := range overviews {
+		langLower := strings.ToLower(strings.TrimSpace(lang))
+		if langLower == "zh-cn" || langLower == "zh-sg" || langLower == "zh" {
+			if strings.TrimSpace(text) != "" {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -604,6 +604,19 @@ input[type=checkbox].chk{width:15px;height:15px;accent-color:var(--main);cursor:
         </select>
       </div>
     </div>
+    <div class="cfg-row">
+      <span class="cfg-label">🌐 刮削首选语言</span>
+      <div class="cfg-val">
+        <select id="monitorPathScrapeLanguage">
+          <option value="">使用全局配置</option>
+          <option value="zh-CN">zh-CN（简体中文）</option>
+          <option value="zh-TW">zh-TW（繁体中文）</option>
+          <option value="en-US">en-US（英文）</option>
+          <option value="ja-JP">ja-JP（日文）</option>
+          <option value="ko-KR">ko-KR（韩文）</option>
+        </select>
+      </div>
+    </div>
     <div class="section-label" style="margin-top:10px;">模板覆盖（留空使用全局配置）</div>
     <div class="cfg-row">
       <span class="cfg-label">TV 重命名模板</span>
@@ -615,6 +628,20 @@ input[type=checkbox].chk{width:15px;height:15px;accent-color:var(--main);cursor:
       <span class="cfg-label">Movie 重命名模板</span>
       <div class="cfg-val">
         <textarea id="monitorPathMovieTemplate" rows="3" placeholder="留空使用全局 Movie 模板"></textarea>
+      </div>
+    </div>
+    <div class="cfg-row">
+      <span class="cfg-label">📡 监控模式</span>
+      <div class="cfg-val">
+        <select id="monitorPathMonitorMode">
+          <option value="">使用全局配置</option>
+          <option value="native">native（原生模式）</option>
+          <option value="compatibility">compatibility（兼容模式）</option>
+        </select>
+        <div style="margin-top:6px;font-size:11px;color:#9ca3af;">
+          native 模式：实时响应，适合小型库（&lt;8000文件）<br/>
+          compatibility 模式：轮询方式，适合大型库或系统限制
+        </div>
       </div>
     </div>
     <div class="cfg-row">

@@ -724,6 +724,7 @@ const CONFIG_LABELS = {
   overwrite_mode: "💥 覆盖模式",
   scrape_metadata: "📥 刮削元数据",
   scrape_image_types: "🖼 刮削图片类型",
+  scrape_language: "🌐 刮削首选语言",
   subtitle_extensions: "💬 字幕扩展名",
   secondary_classification: "📂 二级分类",
   secondary_rules: "🎨 二级分类规则",
@@ -742,6 +743,8 @@ const CONFIG_LABELS = {
   ai_confidence_threshold: "📊 AI 置信度阈值",
   openai_output_format: "🎯 OpenAI 输出格式",
   ai_auto_save: "💾 自动保存 AI 分析",
+  title_languages: "🌐 标题首选语言",
+  overview_languages: "📝 简介首选语言",
   monitor_enabled: "👁 启用监控",
   monitor_mode: "⚙ 监控模式",
   monitor_paths: "📁 监控目录",
@@ -756,6 +759,7 @@ const CONFIG_SELECT_OPTIONS = {
   ai_confidence_threshold: ["High", "Medium", "Low"],
   openai_output_format: ["function_calling", "json_object"],
   monitor_mode: ["compatibility", "native"],
+  scrape_language: ["zh-CN", "zh-TW", "en-US", "ja-JP", "ko-KR"],
 };
 
 const CONFIG_BOOL_KEYS = new Set([
@@ -773,6 +777,8 @@ const CONFIG_FRIENDLY_KEYS = new Set([
   "scrape_image_types",
   "subtitle_extensions",
   "secondary_rules",
+  "title_languages",
+  "overview_languages",
   "monitor_paths",
   "monitor_exclude_dirs",
 ]);
@@ -828,6 +834,7 @@ function renderConfigForm(cfg) {
       label: "元数据",
       keys: [
         "scrape_metadata",
+        "scrape_language",
         "scrape_image_types",
         "subtitle_extensions",
         "secondary_classification",
@@ -857,6 +864,10 @@ function renderConfigForm(cfg) {
         "gemini_model",
         "gemini_temperature",
       ],
+    },
+    {
+      label: "语言偏好",
+      keys: ["title_languages", "overview_languages"],
     },
     {
       label: "监控配置",
@@ -922,6 +933,18 @@ function renderFriendlyConfig(key, val) {
   if (key === "subtitle_extensions")
     return renderCheckboxList(key, SUBTITLE_EXT_OPTIONS, toStringArray(val));
   if (key === "secondary_rules") return renderSecondaryRules(val);
+  if (key === "title_languages")
+    return renderMultilineTextEditor(
+      key,
+      toStringArray(val),
+      "一行一个语言代码，按优先级排序，例如 zh-CN\nen-US",
+    );
+  if (key === "overview_languages")
+    return renderMultilineTextEditor(
+      key,
+      toStringArray(val),
+      "一行一个语言代码，按优先级排序，例如 zh-CN\nen-US",
+    );
   if (key === "monitor_paths") return renderMonitorPaths(val);
   if (key === "monitor_exclude_dirs")
     return renderMultilineTextEditor(
@@ -929,7 +952,9 @@ function renderFriendlyConfig(key, val) {
       toStringArray(val),
       "一行一个排除目录关键词，支持正则，例如 C\\+\\+",
     );
-  return "";
+  return `<textarea id="cfg_${key}" rows="6">${escHtml(
+    JSON.stringify(val ?? [], null, 2),
+  )}</textarea>`;
 }
 
 function toStringArray(val) {
@@ -998,6 +1023,8 @@ function renderMonitorPaths(val) {
         movie_rename_format: item.movie_rename_format || "",
         mode: item.mode || "",
         overwrite_mode: item.overwrite_mode || "",
+        monitor_mode: item.monitor_mode || "",
+        scrape_language: item.scrape_language || "",
         scan_now: item.scan_now === true,
       });
     }
@@ -1008,12 +1035,17 @@ function renderMonitorPaths(val) {
 
   return `<div id="cfg_monitor_paths">
     <div id="monitorPathsList">${renderMonitorPathItems(paths)}</div>
-    <div style="display:flex;gap:8px;margin-top:8px;">
-      <input type="text" id="newMonitorPathInput" placeholder="输入目录路径，如 /media/downloads" style="flex:1;"/>
+    <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
+      <input type="text" id="newMonitorPathInput" placeholder="输入目录路径，如 /media/downloads" style="flex:1;min-width:280px;"/>
       <select id="newMonitorPathAnime" style="width:auto;">
         <option value="">自动</option>
         <option value="true">是动漫</option>
         <option value="false">非动漫</option>
+      </select>
+      <select id="newMonitorPathMode" style="width:auto;">
+        <option value="">继承全局监控模式</option>
+        <option value="compatibility">compatibility</option>
+        <option value="native">native</option>
       </select>
       <button class="btn-outline" style="padding:4px 12px;font-size:12px;white-space:nowrap;" onclick="addMonitorPath()">+ 添加</button>
     </div>
@@ -1046,9 +1078,15 @@ function renderMonitorPathItems(paths) {
       const movieTplBadge = p.movie_rename_format
         ? '<span style="background:#fee2e2;color:#b91c1c;padding:1px 6px;border-radius:9999px;font-size:10px;margin-left:6px;">Movie 模板</span>'
         : "";
+      const monitorModeBadge = p.monitor_mode
+        ? `<span style="background:#ede9fe;color:#6d28d9;padding:1px 6px;border-radius:9999px;font-size:10px;margin-left:6px;">${escHtml(p.monitor_mode)}</span>`
+        : "";
+      const scrapeLangBadge = p.scrape_language
+        ? `<span style="background:#fef3c7;color:#92400e;padding:1px 6px;border-radius:9999px;font-size:10px;margin-left:6px;">🌐 ${escHtml(p.scrape_language)}</span>`
+        : "";
       return `<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:#f9fafb;border-radius:8px;margin-bottom:4px;">
       <span style="font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escHtml(p.path)}">📁 ${escHtml(p.path)}</span>
-      ${animeBadge}${movieBadge}${tvBadge}${movieTplBadge}
+      ${animeBadge}${movieBadge}${tvBadge}${movieTplBadge}${monitorModeBadge}${scrapeLangBadge}
       <button class="btn-outline" style="padding:2px 8px;font-size:11px;flex-shrink:0;" onclick="openMonitorPathEditor(${i})">配置</button>
       <button class="btn-outline" style="padding:2px 8px;font-size:11px;color:#dc2626;border-color:#dc2626;flex-shrink:0;" onclick="removeMonitorPath(${i})">✕</button>
     </div>`;
@@ -1059,6 +1097,7 @@ function renderMonitorPathItems(paths) {
 function addMonitorPath() {
   const input = document.getElementById("newMonitorPathInput");
   const animeSelect = document.getElementById("newMonitorPathAnime");
+  const modeSelect = document.getElementById("newMonitorPathMode");
   const path = input.value.trim();
   if (!path) {
     notify("请输入目录路径", "warning");
@@ -1074,6 +1113,8 @@ function addMonitorPath() {
     movie_rename_format: "",
     mode: "",
     overwrite_mode: "",
+    monitor_mode: modeSelect.value || "",
+    scrape_language: "",
     scan_now: false,
   };
   S._monitorPaths.push(entry);
@@ -1082,6 +1123,7 @@ function addMonitorPath() {
     renderMonitorPathItems(S._monitorPaths);
   input.value = "";
   animeSelect.value = "";
+  modeSelect.value = "";
 }
 
 function removeMonitorPath(idx) {
@@ -1106,6 +1148,10 @@ function openMonitorPathEditor(idx) {
   document.getElementById("monitorPathMode").value = p.mode || "";
   document.getElementById("monitorPathOverwrite").value =
     p.overwrite_mode || "";
+  document.getElementById("monitorPathMonitorMode").value =
+    p.monitor_mode || "";
+  document.getElementById("monitorPathScrapeLanguage").value =
+    p.scrape_language || "";
   document.getElementById("monitorPathScanNow").checked = p.scan_now === true;
   openModal("monitorPathModal");
 }
@@ -1126,6 +1172,8 @@ function saveMonitorPathEditor() {
     .value.trim();
   const mode = document.getElementById("monitorPathMode").value;
   const overwrite = document.getElementById("monitorPathOverwrite").value;
+  const monitorMode = document.getElementById("monitorPathMonitorMode").value;
+  const scrapeLanguage = document.getElementById("monitorPathScrapeLanguage").value;
   const scanNow = document.getElementById("monitorPathScanNow").checked;
 
   p.is_anime = animeVal === "true" ? true : animeVal === "false" ? false : null;
@@ -1134,6 +1182,8 @@ function saveMonitorPathEditor() {
   p.movie_rename_format = movieFormat;
   p.mode = mode;
   p.overwrite_mode = overwrite;
+  p.monitor_mode = monitorMode;
+  p.scrape_language = scrapeLanguage;
   p.scan_now = scanNow;
 
   document.getElementById("monitorPathsList").innerHTML =
@@ -1375,6 +1425,7 @@ function collectFriendlyValue(key) {
         (p.movie_rename_format && p.movie_rename_format.trim() !== "") ||
         (p.mode && p.mode.trim() !== "") ||
         (p.overwrite_mode && p.overwrite_mode.trim() !== "") ||
+        (p.monitor_mode && p.monitor_mode.trim() !== "") ||
         p.scan_now === true;
       if (!hasExtras) return p.path;
       const entry = { path: p.path };
@@ -1387,9 +1438,19 @@ function collectFriendlyValue(key) {
       if (p.mode && p.mode.trim() !== "") entry.mode = p.mode.trim();
       if (p.overwrite_mode && p.overwrite_mode.trim() !== "")
         entry.overwrite_mode = p.overwrite_mode.trim();
+      if (p.monitor_mode && p.monitor_mode.trim() !== "")
+        entry.monitor_mode = p.monitor_mode.trim();
       if (p.scan_now === true) entry.scan_now = true;
       return entry;
     });
+  }
+  if (key === "title_languages" || key === "overview_languages") {
+    const textarea = document.getElementById(`${key}_textarea`);
+    if (!textarea) return [];
+    return textarea.value
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
   }
   if (key === "monitor_exclude_dirs") {
     const textarea = document.getElementById(`${key}_textarea`);

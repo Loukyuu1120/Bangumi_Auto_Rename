@@ -127,6 +127,38 @@ func (p *Processor) Process(srcPath string, opts TaskOptions, uuid string) *Task
 func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) error {
 	cfg := p.cfg.GetConfig()
 
+	// Check for language overrides in ConfigOverrides
+	tmdbClient := p.tmdb
+	titleLangs := cfg.TitleLanguages
+	overviewLangs := cfg.OverviewLanguages
+
+	if opts.ConfigOverrides != nil {
+		// Check for scrape_language override
+		if scrapeLang, ok := opts.ConfigOverrides["scrape_language"].(string); ok && scrapeLang != "" {
+			p.log.Info("[处理] 使用目录覆盖刮削语言: %s", scrapeLang)
+			// Create a temporary TMDB client with overridden language
+			titleLangs = []string{scrapeLang}
+			overviewLangs = []string{scrapeLang}
+			tmdbClient = NewTMDBClient(cfg.APIKey, titleLangs, overviewLangs)
+		}
+
+		// Check for title_languages override
+		if titleLangsRaw, ok := opts.ConfigOverrides["title_languages"]; ok {
+			if langs, ok := titleLangsRaw.([]string); ok && len(langs) > 0 {
+				titleLangs = langs
+				tmdbClient = NewTMDBClient(cfg.APIKey, titleLangs, overviewLangs)
+			}
+		}
+
+		// Check for overview_languages override
+		if overviewLangsRaw, ok := opts.ConfigOverrides["overview_languages"]; ok {
+			if langs, ok := overviewLangsRaw.([]string); ok && len(langs) > 0 {
+				overviewLangs = langs
+				tmdbClient = NewTMDBClient(cfg.APIKey, titleLangs, overviewLangs)
+			}
+		}
+	}
+
 	if opts.CusName != "" {
 		p.log.Info("[处理] 使用任务覆盖标题: %q", opts.CusName)
 	}
@@ -148,10 +180,10 @@ func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) e
 	// If TMDB ID is provided, infer movie vs TV by querying TMDB directly.
 	if opts.CusTMDBID != "" {
 		if id, err := strconv.Atoi(opts.CusTMDBID); err == nil && id > 0 {
-			if movie, err := p.tmdb.GetMovieDetail(id, "external_ids"); err == nil && movie != nil {
+			if movie, err := tmdbClient.GetMovieDetail(id, "external_ids"); err == nil && movie != nil {
 				b := true
 				opts.IsMovie = &b
-			} else if tv, err := p.tmdb.GetTVDetail(id, "external_ids"); err == nil && tv != nil {
+			} else if tv, err := tmdbClient.GetTVDetail(id, "external_ids"); err == nil && tv != nil {
 				b := false
 				opts.IsMovie = &b
 			} else if opts.IsMovie == nil && opts.IsAnime == nil {
@@ -220,7 +252,7 @@ func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) e
 	}
 
 	if isMovie {
-		movie, err := p.resolveMovie(searchName, year, tmdbID)
+		movie, err := p.resolveMovie(tmdbClient, searchName, year, tmdbID)
 		if err != nil {
 			return fmt.Errorf("TMDB电影查询失败: %w", err)
 		}
@@ -236,13 +268,13 @@ func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) e
 		rec.TMDBID = strconv.Itoa(tmdbID)
 		p.log.Info("[处理] 匹配电影: %s (%d) [tmdb:%d]", tmdbTitle, tmdbYear, tmdbID)
 	} else {
-		tv, seasonNum, err := p.resolveTV(srcPath, searchName, year, tmdbID, opts)
+		tv, seasonNum, err := p.resolveTV(tmdbClient, srcPath, searchName, year, tmdbID, opts)
 		if err != nil {
 			return fmt.Errorf("TMDB剧集查询失败: %w", err)
 		}
 		if tv == nil {
 			p.log.Info("[处理] TV 未命中，尝试电影兜底: %q", searchName)
-			movie, movieErr := p.resolveMovie(searchName, year, tmdbID)
+			movie, movieErr := p.resolveMovie(tmdbClient, searchName, year, tmdbID)
 			if movieErr != nil {
 				return fmt.Errorf("TMDB电影兜底查询失败: %w", movieErr)
 			}
@@ -327,7 +359,7 @@ func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) e
 				seasonDir := filepath.Dir(targets[0])
 
 				// 获取完整的季信息（包含集数列表）
-				seasonDetail, err := p.tmdb.GetSeasonDetail(tv.ID, seasonNum)
+				seasonDetail, err := tmdbClient.GetSeasonDetail(tv.ID, seasonNum)
 				if err != nil {
 					p.log.Warn("[刮削] 获取第 %d 季详情失败: %v", seasonNum, err)
 				} else {
@@ -484,19 +516,19 @@ func (p *Processor) targetRootDir(cfg config.Config, isAnime, isMovie bool) stri
 // TMDB resolution helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-func (p *Processor) resolveMovie(name string, year, forceID int) (*TMDBMovieDetail, error) {
+func (p *Processor) resolveMovie(client *TMDBClient, name string, year, forceID int) (*TMDBMovieDetail, error) {
 	if forceID > 0 {
-		return p.tmdb.GetMovieDetail(forceID, "credits,external_ids,release_dates,images")
+		return client.GetMovieDetail(forceID, "credits,external_ids,release_dates,images")
 	}
 
-	results, err := p.tmdb.SearchMovie(name, year)
+	results, err := client.SearchMovie(name, year)
 	if err != nil {
 		return nil, err
 	}
 	if len(results) == 0 {
 		// Retry without year
 		if year > 0 {
-			results, err = p.tmdb.SearchMovie(name, 0)
+			results, err = client.SearchMovie(name, 0)
 			if err != nil || len(results) == 0 {
 				return nil, err
 			}
@@ -518,7 +550,7 @@ func (p *Processor) resolveMovie(name string, year, forceID int) (*TMDBMovieDeta
 		return nil, nil
 	}
 
-	detail, err := p.tmdb.GetMovieDetail(best.ID, "credits,external_ids,release_dates,images")
+	detail, err := client.GetMovieDetail(best.ID, "credits,external_ids,release_dates,images")
 	if err != nil {
 		return nil, err
 	}
@@ -542,7 +574,7 @@ func absInt(v int) int {
 	return v
 }
 
-func (p *Processor) resolveTV(srcPath, name string, year, forceID int, opts TaskOptions) (*TMDBTVDetail, int, error) {
+func (p *Processor) resolveTV(client *TMDBClient, srcPath, name string, year, forceID int, opts TaskOptions) (*TMDBTVDetail, int, error) {
 	p.log.Info("[处理] resolveTV: name=%q year=%d forceID=%d cusName=%q cusTMDBID=%q", name, year, forceID, opts.CusName, opts.CusTMDBID)
 
 	seasonNum := 1
@@ -564,7 +596,7 @@ func (p *Processor) resolveTV(srcPath, name string, year, forceID int, opts Task
 
 	if forceID > 0 {
 		p.log.Info("[处理] 跳过 TV 搜索，直接使用强制 TMDB ID 获取详情: %d", forceID)
-		detail, err = p.tmdb.GetTVDetail(forceID, "credits,external_ids,content_ratings,images")
+		detail, err = client.GetTVDetail(forceID, "credits,external_ids,content_ratings,images")
 		if err != nil {
 			return nil, seasonNum, err
 		}
@@ -573,7 +605,7 @@ func (p *Processor) resolveTV(srcPath, name string, year, forceID int, opts Task
 		// ── API search ───────────────────────────────────────────────────────
 		// SearchTV internally tries zh-CN+year, zh-CN+0, en-US+year, en-US+0
 		// and returns on the first non-empty page, so a single call is enough.
-		results, searchErr := p.tmdb.SearchTV(name, year)
+		results, searchErr := client.SearchTV(name, year)
 		if searchErr != nil {
 			return nil, seasonNum, searchErr
 		}
@@ -599,7 +631,7 @@ func (p *Processor) resolveTV(srcPath, name string, year, forceID int, opts Task
 
 		if needsWebFallback {
 			p.log.Info("[处理] API搜索未找到合适年份结果 %q，尝试网页兜底搜索...", name)
-			if webResults, webErr := p.tmdb.SearchTMDBWeb(name, "tv"); webErr == nil && len(webResults) > 0 {
+			if webResults, webErr := client.SearchTMDBWeb(name, "tv"); webErr == nil && len(webResults) > 0 {
 				p.log.Info("[处理] 网页搜索返回 %d 条结果", len(webResults))
 				filtered := webResults
 				if year > 0 {
@@ -629,9 +661,9 @@ func (p *Processor) resolveTV(srcPath, name string, year, forceID int, opts Task
 				}
 				meta := p.ai.AnalyzeMetadata(ctx)
 				if meta != nil && meta.Name != "" {
-					results, _ = p.tmdb.SearchTV(meta.Name, meta.Year)
+					results, _ = client.SearchTV(meta.Name, meta.Year)
 					if len(results) == 0 && meta.Year > 0 {
-						results, _ = p.tmdb.SearchTV(meta.Name, 0)
+						results, _ = client.SearchTV(meta.Name, 0)
 					}
 				}
 			}
@@ -653,7 +685,7 @@ func (p *Processor) resolveTV(srcPath, name string, year, forceID int, opts Task
 		}
 
 		p.log.Info("[处理] TV 最佳匹配候选: id=%d name=%q first_air_date=%q", best.ID, best.Name, best.FirstAirDate)
-		detail, err = p.tmdb.GetTVDetail(best.ID, "credits,external_ids,content_ratings,images")
+		detail, err = client.GetTVDetail(best.ID, "credits,external_ids,content_ratings,images")
 		if err != nil {
 			return nil, seasonNum, err
 		}
