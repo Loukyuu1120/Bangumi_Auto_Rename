@@ -974,8 +974,8 @@ func (c *TMDBClient) enrichTVDetailPreferredText(detail *TMDBTVDetail, appendToR
 		titles = append(titles, tmdbAltTitleItem{Title: alt.Title, Lang: langTag})
 	}
 
-	// 强制使用简中：如果主标题是英文但有简中翻译，则强制改用简中
-	shouldForceZhCN := isEnglishLanguage(raw.OriginalLanguage) && hasZhCNTranslation(titles, overviews)
+	// 强制使用简中：如果主标题不是中文（拼音或英文）但有简中翻译，则强制改用简中
+	shouldForceZhCN := !isChinese(detail.Name) && hasZhCNTranslation(titles, overviews)
 	if shouldForceZhCN {
 		detail.Name = pickPreferredTitle(detail.Name, titles, []string{"zh-CN", "zh-SG", "zh"})
 		detail.Overview = pickPreferredOverview(detail.Overview, overviews, []string{"zh-CN", "zh-SG", "zh"})
@@ -1047,8 +1047,8 @@ func (c *TMDBClient) enrichMovieDetailPreferredText(detail *TMDBMovieDetail, app
 		titles = append(titles, tmdbAltTitleItem{Title: alt.Title, Lang: langTag})
 	}
 
-	// 强制使用简中：如果主标题是英文但有简中翻译，则强制改用简中
-	shouldForceZhCN := isEnglishLanguage(raw.OriginalLanguage) && hasZhCNTranslation(titles, overviews)
+	// 强制使用简中：如果主标题不是中文（拼音或英文）但有简中翻译，则强制改用简中
+	shouldForceZhCN := !isChinese(detail.Title) && hasZhCNTranslation(titles, overviews)
 	if shouldForceZhCN {
 		detail.Title = pickPreferredTitle(detail.Title, titles, []string{"zh-CN", "zh-SG", "zh"})
 		detail.Overview = pickPreferredOverview(detail.Overview, overviews, []string{"zh-CN", "zh-SG", "zh"})
@@ -1112,6 +1112,24 @@ func filterPreferredLogos(logos []struct {
 func isEnglishLanguage(lang string) bool {
 	lang = strings.ToLower(strings.TrimSpace(lang))
 	return lang == "en" || strings.HasPrefix(lang, "en-")
+}
+
+// isChinese 判断字符串是否包含中文字符
+func isChinese(s string) bool {
+	for _, r := range s {
+		// 中文字符的 Unicode 范围
+		if (r >= 0x4E00 && r <= 0x9FFF) || // CJK 统一汉字
+			(r >= 0x3400 && r <= 0x4DBF) || // CJK 扩展 A
+			(r >= 0x20000 && r <= 0x2A6DF) || // CJK 扩展 B
+			(r >= 0x2A700 && r <= 0x2B73F) || // CJK 扩展 C
+			(r >= 0x2B740 && r <= 0x2B81F) || // CJK 扩展 D
+			(r >= 0x2B820 && r <= 0x2CEAF) || // CJK 扩展 E
+			(r >= 0xF900 && r <= 0xFAFF) || // CJK 兼容汉字
+			(r >= 0x2F800 && r <= 0x2FA1F) { // CJK 兼容汉字补充
+			return true
+		}
+	}
+	return false
 }
 
 // hasZhCNTranslation 判断是否有简中翻译
