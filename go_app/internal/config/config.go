@@ -33,6 +33,8 @@ type Config struct {
 	AIBaseURL               string      `json:"ai_base_url"`
 	AIModel                 string      `json:"ai_model"`
 	AITemperature           float64     `json:"ai_temperature"`
+	AIRateLimitRPM          int         `json:"ai_rate_limit_rpm"`
+	AIRateLimitTPM          int         `json:"ai_rate_limit_tpm"`
 	GeminiAPIKey            string      `json:"gemini_api_key"`
 	GeminiBaseURL           string      `json:"gemini_base_url"`
 	GeminiModel             string      `json:"gemini_model"`
@@ -76,6 +78,8 @@ func DefaultConfig() Config {
 		AIBaseURL:               "https://api.openai.com/v1",
 		AIModel:                 "gpt-4o-mini",
 		AITemperature:           0.1,
+		AIRateLimitRPM:          0,
+		AIRateLimitTPM:          0,
 		GeminiAPIKey:            "",
 		GeminiBaseURL:           "https://generativelanguage.googleapis.com",
 		GeminiModel:             "gemini-2.5-flash",

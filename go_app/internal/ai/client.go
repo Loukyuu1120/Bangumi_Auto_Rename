@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 
 	"bangumi_auto_rename/internal/config"
 	"bangumi_auto_rename/internal/logger"
@@ -43,6 +46,19 @@ type MetadataResult struct {
 type Client struct {
 	cfg *config.Manager
 }
+
+type tokenEvent struct {
+	at     time.Time
+	tokens int
+}
+
+type requestRateLimiter struct {
+	mu          sync.Mutex
+	requests    []time.Time
+	tokenEvents []tokenEvent
+}
+
+var globalRateLimiter requestRateLimiter
 
 // New creates an AI Client backed by the global config manager.
 func New(cfg *config.Manager) *Client {
@@ -204,6 +220,8 @@ func (c *Client) AnalyzeMetadata(contextData map[string]interface{}) *MetadataRe
 // chatComplete sends a single user message and returns the assistant reply.
 // It routes to the correct backend based on ai_provider config.
 func (c *Client) chatComplete(system, user string, temperature float64) (string, error) {
+	c.waitForRateLimit(system, user)
+
 	cfg := c.cfg.GetConfig()
 	switch strings.ToLower(cfg.AIProvider) {
 	case "gemini":
@@ -260,28 +278,7 @@ func (c *Client) openaiComplete(system, user string, temperature float64) (strin
 	req.Header.Set("Authorization", "Bearer "+cfg.AIAPIKey)
 
 	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("openai request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	var oResp openAIResponse
-	if err := json.Unmarshal(data, &oResp); err != nil {
-		return "", fmt.Errorf("parsing openai response: %w", err)
-	}
-	if oResp.Error != nil {
-		return "", fmt.Errorf("openai error: %s", oResp.Error.Message)
-	}
-	if len(oResp.Choices) == 0 {
-		return "", fmt.Errorf("openai: empty choices")
-	}
-	return oResp.Choices[0].Message.Content, nil
+	return doJSONRequestWithRetry(client, req, 2, parseOpenAIResponse)
 }
 
 // --- Gemini implementation ---
@@ -347,20 +344,189 @@ func (c *Client) geminiComplete(system, user string, temperature float64) (strin
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("gemini request: %w", err)
-	}
-	defer resp.Body.Close()
+	return doJSONRequestWithRetry(client, req, 2, parseGeminiResponse)
+}
 
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
+// --- helpers ---
+
+func firstChars(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+func (c *Client) waitForRateLimit(system, user string) {
+	cfg := c.cfg.GetConfig()
+	rpm := cfg.AIRateLimitRPM
+	tpm := cfg.AIRateLimitTPM
+	if rpm <= 0 && tpm <= 0 {
+		return
+	}
+	globalRateLimiter.wait(rpm, tpm, estimatePromptTokens(system, user))
+}
+
+func (l *requestRateLimiter) wait(rpm, tpm, tokens int) {
+	for {
+		l.mu.Lock()
+		now := time.Now()
+		l.pruneLocked(now)
+
+		waitFor := time.Duration(0)
+		if rpm > 0 && len(l.requests) >= rpm {
+			if d := time.Until(l.requests[0].Add(time.Minute)); d > waitFor {
+				waitFor = d
+			}
+		}
+		if tpm > 0 && tokens > 0 {
+			if d := l.tokenWaitLocked(now, tpm, tokens); d > waitFor {
+				waitFor = d
+			}
+		}
+
+		if waitFor <= 0 {
+			l.requests = append(l.requests, now)
+			if tokens > 0 {
+				l.tokenEvents = append(l.tokenEvents, tokenEvent{at: now, tokens: tokens})
+			}
+			l.mu.Unlock()
+			return
+		}
+		l.mu.Unlock()
+
+		logger.Warn("[AI限速] 达到本地限速阈值，等待 %.1f 秒后重试", waitFor.Seconds())
+		time.Sleep(waitFor)
+	}
+}
+
+func (l *requestRateLimiter) pruneLocked(now time.Time) {
+	cutoff := now.Add(-time.Minute)
+	reqIdx := 0
+	for reqIdx < len(l.requests) && l.requests[reqIdx].Before(cutoff) {
+		reqIdx++
+	}
+	if reqIdx > 0 {
+		l.requests = append([]time.Time(nil), l.requests[reqIdx:]...)
+	}
+
+	tokenIdx := 0
+	for tokenIdx < len(l.tokenEvents) && l.tokenEvents[tokenIdx].at.Before(cutoff) {
+		tokenIdx++
+	}
+	if tokenIdx > 0 {
+		l.tokenEvents = append([]tokenEvent(nil), l.tokenEvents[tokenIdx:]...)
+	}
+}
+
+func (l *requestRateLimiter) tokenWaitLocked(now time.Time, limit, nextTokens int) time.Duration {
+	total := nextTokens
+	for _, event := range l.tokenEvents {
+		total += event.tokens
+	}
+	if total <= limit {
+		return 0
+	}
+
+	overflow := total - limit
+	released := 0
+	for _, event := range l.tokenEvents {
+		released += event.tokens
+		releaseAt := event.at.Add(time.Minute)
+		if released >= overflow {
+			if d := time.Until(releaseAt); d > 0 {
+				return d
+			}
+			return 0
+		}
+	}
+
+	return time.Second
+}
+
+func estimatePromptTokens(system, user string) int {
+	runes := utf8.RuneCountInString(system) + utf8.RuneCountInString(user)
+	estimated := runes/3 + 256
+	if estimated < 256 {
+		return 256
+	}
+	return estimated
+}
+
+func doJSONRequestWithRetry(client *http.Client, req *http.Request, retries int, parser func(int, []byte) (string, error)) (string, error) {
+	var lastErr error
+	for attempt := 0; attempt <= retries; attempt++ {
+		reqCopy := req.Clone(req.Context())
+		if req.GetBody != nil {
+			body, err := req.GetBody()
+			if err != nil {
+				return "", err
+			}
+			reqCopy.Body = body
+		}
+
+		resp, err := client.Do(reqCopy)
+		if err != nil {
+			lastErr = err
+		} else {
+			data, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if readErr != nil {
+				lastErr = readErr
+			} else {
+				content, parseErr := parser(resp.StatusCode, data)
+				if parseErr == nil {
+					return content, nil
+				}
+				lastErr = parseErr
+				if !shouldRetryStatus(resp.StatusCode) || attempt == retries {
+					return "", parseErr
+				}
+				time.Sleep(retryDelay(resp.Header.Get("Retry-After"), attempt))
+				continue
+			}
+		}
+
+		if attempt == retries {
+			break
+		}
+		time.Sleep(retryDelay("", attempt))
+	}
+	return "", lastErr
+}
+
+func parseOpenAIResponse(statusCode int, data []byte) (string, error) {
+	body := strings.TrimSpace(string(data))
+	if statusCode < 200 || statusCode >= 300 {
+		return "", fmt.Errorf("openai status %d: %s", statusCode, summarizeBody(body))
+	}
+
+	var oResp openAIResponse
+	if err := json.Unmarshal(data, &oResp); err == nil {
+		if oResp.Error != nil {
+			return "", fmt.Errorf("openai error: %s", oResp.Error.Message)
+		}
+		if len(oResp.Choices) == 0 {
+			return "", fmt.Errorf("openai: empty choices")
+		}
+		return oResp.Choices[0].Message.Content, nil
+	}
+
+	var stringBody string
+	if err := json.Unmarshal(data, &stringBody); err == nil && strings.TrimSpace(stringBody) != "" {
+		return "", fmt.Errorf("openai returned string body: %s", summarizeBody(stringBody))
+	}
+	return "", fmt.Errorf("parsing openai response failed: %s", summarizeBody(body))
+}
+
+func parseGeminiResponse(statusCode int, data []byte) (string, error) {
+	body := strings.TrimSpace(string(data))
+	if statusCode < 200 || statusCode >= 300 {
+		return "", fmt.Errorf("gemini status %d: %s", statusCode, summarizeBody(body))
 	}
 
 	var gResp geminiResponse
 	if err := json.Unmarshal(data, &gResp); err != nil {
-		return "", fmt.Errorf("parsing gemini response: %w", err)
+		return "", fmt.Errorf("parsing gemini response failed: %s", summarizeBody(body))
 	}
 	if gResp.Error != nil {
 		return "", fmt.Errorf("gemini error: %s", gResp.Error.Message)
@@ -371,11 +537,31 @@ func (c *Client) geminiComplete(system, user string, temperature float64) (strin
 	return gResp.Candidates[0].Content.Parts[0].Text, nil
 }
 
-// --- helpers ---
+func shouldRetryStatus(statusCode int) bool {
+	return statusCode == http.StatusTooManyRequests || statusCode >= 500
+}
 
-func firstChars(s string, n int) string {
-	if len(s) <= n {
-		return s
+func retryDelay(retryAfter string, attempt int) time.Duration {
+	if retryAfter != "" {
+		if seconds, err := strconv.Atoi(strings.TrimSpace(retryAfter)); err == nil && seconds > 0 {
+			return time.Duration(seconds) * time.Second
+		}
+		if ts, err := http.ParseTime(retryAfter); err == nil {
+			if d := time.Until(ts); d > 0 {
+				return d
+			}
+		}
 	}
-	return s[:n]
+	return time.Duration(attempt+1) * 2 * time.Second
+}
+
+func summarizeBody(body string) string {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return "empty body"
+	}
+	if len(body) > 240 {
+		return body[:240] + "..."
+	}
+	return body
 }

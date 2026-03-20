@@ -735,6 +735,8 @@ const CONFIG_LABELS = {
   ai_base_url: "🌐 OpenAI Base URL",
   ai_model: "🧠 OpenAI 模型",
   ai_temperature: "🌡 OpenAI Temperature",
+  ai_rate_limit_rpm: "⏱ AI 限速 RPM",
+  ai_rate_limit_tpm: "🪙 AI 限速 TPM",
   gemini_api_key: "💎 Gemini API Key",
   gemini_base_url: "🌐 Gemini Base URL",
   gemini_model: "💎 Gemini 模型",
@@ -851,6 +853,8 @@ function renderConfigForm(cfg) {
         "ai_base_url",
         "ai_model",
         "ai_temperature",
+        "ai_rate_limit_rpm",
+        "ai_rate_limit_tpm",
         "ai_confidence_threshold",
         "openai_output_format",
         "ai_auto_save",
@@ -915,6 +919,10 @@ function renderConfigForm(cfg) {
         input = `<input type="password" id="cfg_${key}" value="${escHtml(String(val ?? ""))}"/>`;
       } else if (key.includes("temperature")) {
         input = `<input type="number" id="cfg_${key}" value="${val ?? 0}" step="0.1" min="0" max="2" style="max-width:100px;"/>`;
+      } else if (key.includes("rate_limit")) {
+        const placeholder =
+          key === "ai_rate_limit_rpm" ? "0=不限制，如 800" : "0=不限制，如 40000";
+        input = `<input type="number" id="cfg_${key}" value="${val ?? 0}" min="0" step="1" placeholder="${placeholder}" style="max-width:160px;"/>`;
       } else {
         input = `<input type="text" id="cfg_${key}" value="${escHtml(String(val ?? ""))}"/>`;
       }
@@ -1488,6 +1496,8 @@ async function saveConfig() {
       }
     } else if (key.includes("temperature")) {
       cfg[key] = parseFloat(el.value) || 0;
+    } else if (key.includes("rate_limit")) {
+      cfg[key] = parseInt(el.value || "0", 10) || 0;
     } else {
       cfg[key] = el.value;
     }
