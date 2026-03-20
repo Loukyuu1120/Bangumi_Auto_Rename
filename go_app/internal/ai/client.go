@@ -53,12 +53,30 @@ type tokenEvent struct {
 }
 
 type requestRateLimiter struct {
-	mu          sync.Mutex
-	requests    []time.Time
-	tokenEvents []tokenEvent
+	mu             sync.Mutex
+	requests       []time.Time
+	tokenEvents    []tokenEvent
+	cooldownUntil  time.Time
+	cooldownReason string
 }
 
 var globalRateLimiter requestRateLimiter
+
+type aiRateLimitError struct {
+	status     int
+	message    string
+	retryAfter time.Duration
+}
+
+func (e *aiRateLimitError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.retryAfter > 0 {
+		return fmt.Sprintf("ai upstream rate limited (%d), retry after %.1fs: %s", e.status, e.retryAfter.Seconds(), e.message)
+	}
+	return fmt.Sprintf("ai upstream rate limited (%d): %s", e.status, e.message)
+}
 
 // New creates an AI Client backed by the global config manager.
 func New(cfg *config.Manager) *Client {
@@ -360,9 +378,6 @@ func (c *Client) waitForRateLimit(system, user string) {
 	cfg := c.cfg.GetConfig()
 	rpm := cfg.AIRateLimitRPM
 	tpm := cfg.AIRateLimitTPM
-	if rpm <= 0 && tpm <= 0 {
-		return
-	}
 	globalRateLimiter.wait(rpm, tpm, estimatePromptTokens(system, user))
 }
 
@@ -373,6 +388,9 @@ func (l *requestRateLimiter) wait(rpm, tpm, tokens int) {
 		l.pruneLocked(now)
 
 		waitFor := time.Duration(0)
+		if d := l.cooldownWaitLocked(now); d > waitFor {
+			waitFor = d
+		}
 		if rpm > 0 && len(l.requests) >= rpm {
 			if d := time.Until(l.requests[0].Add(time.Minute)); d > waitFor {
 				waitFor = d
@@ -394,7 +412,7 @@ func (l *requestRateLimiter) wait(rpm, tpm, tokens int) {
 		}
 		l.mu.Unlock()
 
-		logger.Warn("[AI限速] 达到本地限速阈值，等待 %.1f 秒后重试", waitFor.Seconds())
+		logger.Warn("[AI限速] 请求进入等待队列，%.1f 秒后继续", waitFor.Seconds())
 		time.Sleep(waitFor)
 	}
 }
@@ -416,6 +434,18 @@ func (l *requestRateLimiter) pruneLocked(now time.Time) {
 	if tokenIdx > 0 {
 		l.tokenEvents = append([]tokenEvent(nil), l.tokenEvents[tokenIdx:]...)
 	}
+}
+
+func (l *requestRateLimiter) cooldownWaitLocked(now time.Time) time.Duration {
+	if l.cooldownUntil.IsZero() {
+		return 0
+	}
+	if !now.Before(l.cooldownUntil) {
+		l.cooldownUntil = time.Time{}
+		l.cooldownReason = ""
+		return 0
+	}
+	return time.Until(l.cooldownUntil)
 }
 
 func (l *requestRateLimiter) tokenWaitLocked(now time.Time, limit, nextTokens int) time.Duration {
@@ -478,6 +508,13 @@ func doJSONRequestWithRetry(client *http.Client, req *http.Request, retries int,
 					return content, nil
 				}
 				lastErr = parseErr
+				if rateLimitErr, ok := parseErr.(*aiRateLimitError); ok {
+					globalRateLimiter.applyUpstreamCooldown(rateLimitErr.retryAfter, rateLimitErr.message)
+					if attempt == retries {
+						return "", parseErr
+					}
+					continue
+				}
 				if !shouldRetryStatus(resp.StatusCode) || attempt == retries {
 					return "", parseErr
 				}
@@ -497,6 +534,13 @@ func doJSONRequestWithRetry(client *http.Client, req *http.Request, retries int,
 func parseOpenAIResponse(statusCode int, data []byte) (string, error) {
 	body := strings.TrimSpace(string(data))
 	if statusCode < 200 || statusCode >= 300 {
+		if isRateLimitResponse(statusCode, body) {
+			return "", &aiRateLimitError{
+				status:     statusCode,
+				message:    summarizeBody(body),
+				retryAfter: inferRateLimitDelay(statusCode, body),
+			}
+		}
 		return "", fmt.Errorf("openai status %d: %s", statusCode, summarizeBody(body))
 	}
 
@@ -521,6 +565,13 @@ func parseOpenAIResponse(statusCode int, data []byte) (string, error) {
 func parseGeminiResponse(statusCode int, data []byte) (string, error) {
 	body := strings.TrimSpace(string(data))
 	if statusCode < 200 || statusCode >= 300 {
+		if isRateLimitResponse(statusCode, body) {
+			return "", &aiRateLimitError{
+				status:     statusCode,
+				message:    summarizeBody(body),
+				retryAfter: inferRateLimitDelay(statusCode, body),
+			}
+		}
 		return "", fmt.Errorf("gemini status %d: %s", statusCode, summarizeBody(body))
 	}
 
@@ -564,4 +615,41 @@ func summarizeBody(body string) string {
 		return body[:240] + "..."
 	}
 	return body
+}
+
+func (l *requestRateLimiter) applyUpstreamCooldown(delay time.Duration, reason string) {
+	if delay <= 0 {
+		delay = time.Minute
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	until := time.Now().Add(delay)
+	if until.After(l.cooldownUntil) {
+		l.cooldownUntil = until
+		l.cooldownReason = reason
+		logger.Warn("[AI限速] 上游触发限速，后续请求排队等待 %.1f 秒: %s", delay.Seconds(), reason)
+	}
+}
+
+func isRateLimitResponse(statusCode int, body string) bool {
+	lower := strings.ToLower(body)
+	if statusCode == http.StatusTooManyRequests {
+		return true
+	}
+	if statusCode != http.StatusForbidden {
+		return false
+	}
+	return strings.Contains(lower, "rpm limit exceeded") ||
+		strings.Contains(lower, "rate limit") ||
+		strings.Contains(lower, "requests per min") ||
+		strings.Contains(lower, "too many requests")
+}
+
+func inferRateLimitDelay(statusCode int, body string) time.Duration {
+	lower := strings.ToLower(body)
+	if statusCode == http.StatusForbidden && strings.Contains(lower, "rpm limit exceeded") {
+		return time.Minute
+	}
+	return 15 * time.Second
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -446,6 +447,20 @@ func (p *Processor) chooseSearchQuery(srcPath string, opts TaskOptions, rec *Tas
 	// Try to derive name from path
 	stem := strings.TrimSuffix(filepath.Base(srcPath), filepath.Ext(srcPath))
 
+	if ep := ExtractEpisode(stem); ep.Found {
+		parent := filepath.Base(filepath.Dir(srcPath))
+		if isExplicitSeasonFolder(parent) {
+			parent = filepath.Base(filepath.Dir(filepath.Dir(srcPath)))
+		}
+		if fallbackName, fallbackYear := ParseSearchName(parent); strings.TrimSpace(fallbackName) != "" {
+			name = strings.Join(strings.Fields(strings.NewReplacer("-", " ", "_", " ").Replace(strings.TrimSpace(fallbackName))), " ")
+			if fallbackYear > 0 {
+				year = fallbackYear
+			}
+			return name, year
+		}
+	}
+
 	// If the stem looks like a pure episode marker, try the parent directory
 	if IsWeakFilename(stem) {
 		parent := filepath.Base(filepath.Dir(srcPath))
@@ -484,6 +499,24 @@ func (p *Processor) chooseSearchQuery(srcPath string, opts TaskOptions, rec *Tas
 	name = strings.Join(strings.Fields(name), " ")
 
 	return name, year
+}
+
+func isExplicitSeasonFolder(name string) bool {
+	stem := strings.TrimSpace(name)
+	switch {
+	case regexp.MustCompile(`^\d{1,2}$`).MatchString(stem):
+		return true
+	case regexp.MustCompile(`(?i)^S\d+$`).MatchString(stem):
+		return true
+	case regexp.MustCompile(`(?i)^(Season|S)\s*\d+([ ._-]|$)`).MatchString(stem):
+		return true
+	case regexp.MustCompile(`(?i)^(SP|OVA|specials?)$`).MatchString(stem):
+		return true
+	case regexp.MustCompile(`(?i)^第\s*(\d+|[零一二三四五六七八九十百千万]+)\s*季$`).MatchString(stem):
+		return true
+	default:
+		return false
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -304,6 +304,7 @@ func ParseSearchName(input string) (string, int) {
 		}
 		return ""
 	})
+	clean = regexp.MustCompile(`^[A-Za-z][\s._-]*([\p{Han}].*)$`).ReplaceAllString(clean, "$1")
 
 	// Truncate at season/episode markers
 	seasonMarkers := []*regexp.Regexp{
