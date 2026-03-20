@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -504,7 +503,7 @@ func (s *Service) QueueList() []QueueItem {
 // ClearQueue discards all pending (unprocessed) queue items.
 func (s *Service) ClearQueue() {
 	s.mu.Lock()
-	s.queue = nil
+	s.queue = s.queue[:0]
 	s.mu.Unlock()
 	s.countMu.Lock()
 	s.logicalPendingCount = 0
@@ -530,27 +529,6 @@ func (s *Service) decrementLogicalCount() {
 		s.logicalPendingCount--
 	}
 	s.countMu.Unlock()
-}
-
-// ReclaimResources shrinks long-lived buffers and asks Go to return free
-// memory to the OS. It returns the current heap allocation in bytes.
-func (s *Service) ReclaimResources() uint64 {
-	s.mu.Lock()
-	if len(s.queue) == 0 {
-		s.queue = nil
-	} else {
-		trimmed := make([]QueueItem, len(s.queue))
-		copy(trimmed, s.queue)
-		s.queue = trimmed
-	}
-	s.mu.Unlock()
-
-	runtime.GC()
-	debug.FreeOSMemory()
-
-	var mem runtime.MemStats
-	runtime.ReadMemStats(&mem)
-	return mem.HeapAlloc
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1285,7 +1263,4 @@ func (s *Service) processItem(item QueueItem) {
 	}
 
 	s.decrementLogicalCount()
-	if s.QueueLength() == 0 {
-		s.ReclaimResources()
-	}
 }
