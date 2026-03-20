@@ -1529,6 +1529,17 @@ async function refreshStats() {
   el("statSuccess").textContent = (data.status && data.status.success) || 0;
   el("statFailed").textContent = (data.status && data.status.failed) || 0;
   el("statQueue").textContent = data.queue_length || 0;
+  const mem = data.memory || {};
+  const memoryStats = el("memoryStats");
+  if (memoryStats) {
+    memoryStats.innerHTML = [
+      `Heap 已用: ${fmtMB(mem.heap_alloc_mb)} MB`,
+      `Heap 保留: ${fmtMB(mem.heap_sys_mb)} MB`,
+      `进程申请: ${fmtMB(mem.sys_mb)} MB`,
+      `热缓存任务: ${data.cache_size || 0}`,
+      `GC 次数: ${mem.num_gc || 0}`,
+    ].join("<br>");
+  }
 
   const { ok: mok, data: md } = await GET("/api/monitor/status");
   if (mok) {
@@ -1619,6 +1630,19 @@ async function loadQueueFromDisk() {
   refreshStats();
 }
 
+async function reclaimResources() {
+  const { ok, data } = await POST("/api/system/reclaim", {});
+  if (ok) {
+    notify(
+      `资源已回收，当前 Heap ${fmtMB(data.heap_alloc_mb)} MB，热缓存 ${data.cache_size || 0} 条`,
+      "positive"
+    );
+    await refreshStats();
+    return;
+  }
+  notify("资源回收失败", "negative");
+}
+
 // ─────────────────── LOGS ───────────────────
 async function refreshLogs() {
   const { ok, data } = await GET("/api/logs?n=200");
@@ -1654,6 +1678,11 @@ function escHtml(s) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+function fmtMB(v) {
+  const n = Number(v || 0);
+  return Number.isFinite(n) ? n.toFixed(1) : "0.0";
 }
 
 // ─────────────────── INIT ───────────────────

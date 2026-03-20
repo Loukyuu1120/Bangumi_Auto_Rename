@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -98,6 +99,7 @@ func (h *Handler) registerRoutes(mux *http.ServeMux) {
 
 	// ── System stats ─────────────────────────────────────────────────────────
 	mux.HandleFunc("/api/stats", h.withCORS(h.handleStats))
+	mux.HandleFunc("/api/system/reclaim", h.withCORS(h.handleSystemReclaim))
 
 	// ── AI test ──────────────────────────────────────────────────────────────
 	mux.HandleFunc("/api/ai/test", h.withCORS(h.handleAITest))
@@ -925,13 +927,40 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+
 	statusCounts := h.store.CountByStatus()
 	jsonOK(w, map[string]interface{}{
 		"total_tasks":  h.store.Count(),
 		"status":       statusCounts,
 		"queue_length": h.svc.QueueLength(),
+		"cache_size":   h.store.CacheSize(),
 		"paused":       h.svc.IsPaused(),
-		"server_time":  time.Now().Format("2006-01-02 15:04:05"),
+		"memory": map[string]interface{}{
+			"heap_alloc_mb": bytesToMB(mem.HeapAlloc),
+			"heap_sys_mb":   bytesToMB(mem.HeapSys),
+			"sys_mb":        bytesToMB(mem.Sys),
+			"num_gc":        mem.NumGC,
+		},
+		"server_time": time.Now().Format("2006-01-02 15:04:05"),
+	})
+}
+
+func (h *Handler) handleSystemReclaim(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	cacheSize := h.store.ReclaimMemory(256)
+	heapAlloc := h.svc.ReclaimResources()
+
+	h.log.Info("[系统] 已执行资源回收: cache=%d heap_alloc=%.2fMB", cacheSize, bytesToMB(heapAlloc))
+	jsonOK(w, map[string]interface{}{
+		"ok":            true,
+		"cache_size":    cacheSize,
+		"heap_alloc_mb": bytesToMB(heapAlloc),
 	})
 }
 
@@ -1135,4 +1164,8 @@ func decodeLatin1(s string) string {
 		return decoded
 	}
 	return s
+}
+
+func bytesToMB(v uint64) float64 {
+	return float64(v) / (1024 * 1024)
 }

@@ -974,14 +974,19 @@ func (c *TMDBClient) enrichTVDetailPreferredText(detail *TMDBTVDetail, appendToR
 		titles = append(titles, tmdbAltTitleItem{Title: alt.Title, Lang: langTag})
 	}
 
-	// 强制使用简中：如果主标题不是中文（拼音或英文）但有简中翻译，则强制改用简中
-	shouldForceZhCN := !isChinese(detail.Name) && hasZhCNTranslation(titles, overviews)
-	if shouldForceZhCN {
-		detail.Name = pickPreferredTitle(detail.Name, titles, []string{"zh-CN", "zh-SG", "zh"})
-		detail.Overview = pickPreferredOverview(detail.Overview, overviews, []string{"zh-CN", "zh-SG", "zh"})
+	if chineseTitle := pickChinesePreferredTitle(detail.Name, raw.OriginalName, raw.OriginalLanguage, detail.OriginCountry, titles); chineseTitle != "" {
+		detail.Name = chineseTitle
+		detail.Overview = pickPreferredOverview(detail.Overview, overviews, chineseLanguageOrder())
 	} else {
-		detail.Name = pickPreferredTitle(detail.Name, titles, c.titleLanguages)
-		detail.Overview = pickPreferredOverview(detail.Overview, overviews, c.overviewLanguages)
+		// 强制使用简中：如果主标题不是中文（拼音或英文）但有简中翻译，则强制改用简中
+		shouldForceZhCN := !isChinese(detail.Name) && hasZhCNTranslation(titles, overviews)
+		if shouldForceZhCN {
+			detail.Name = pickPreferredTitle(detail.Name, titles, []string{"zh-CN", "zh-SG", "zh"})
+			detail.Overview = pickPreferredOverview(detail.Overview, overviews, []string{"zh-CN", "zh-SG", "zh"})
+		} else {
+			detail.Name = pickPreferredTitle(detail.Name, titles, c.titleLanguages)
+			detail.Overview = pickPreferredOverview(detail.Overview, overviews, c.overviewLanguages)
+		}
 	}
 
 	if !containsAppendValue(appendToResponse, "translations") {
@@ -1047,14 +1052,19 @@ func (c *TMDBClient) enrichMovieDetailPreferredText(detail *TMDBMovieDetail, app
 		titles = append(titles, tmdbAltTitleItem{Title: alt.Title, Lang: langTag})
 	}
 
-	// 强制使用简中：如果主标题不是中文（拼音或英文）但有简中翻译，则强制改用简中
-	shouldForceZhCN := !isChinese(detail.Title) && hasZhCNTranslation(titles, overviews)
-	if shouldForceZhCN {
-		detail.Title = pickPreferredTitle(detail.Title, titles, []string{"zh-CN", "zh-SG", "zh"})
-		detail.Overview = pickPreferredOverview(detail.Overview, overviews, []string{"zh-CN", "zh-SG", "zh"})
+	if chineseTitle := pickChinesePreferredTitle(detail.Title, raw.OriginalTitle, raw.OriginalLanguage, nil, titles); chineseTitle != "" {
+		detail.Title = chineseTitle
+		detail.Overview = pickPreferredOverview(detail.Overview, overviews, chineseLanguageOrder())
 	} else {
-		detail.Title = pickPreferredTitle(detail.Title, titles, c.titleLanguages)
-		detail.Overview = pickPreferredOverview(detail.Overview, overviews, c.overviewLanguages)
+		// 强制使用简中：如果主标题不是中文（拼音或英文）但有简中翻译，则强制改用简中
+		shouldForceZhCN := !isChinese(detail.Title) && hasZhCNTranslation(titles, overviews)
+		if shouldForceZhCN {
+			detail.Title = pickPreferredTitle(detail.Title, titles, []string{"zh-CN", "zh-SG", "zh"})
+			detail.Overview = pickPreferredOverview(detail.Overview, overviews, []string{"zh-CN", "zh-SG", "zh"})
+		} else {
+			detail.Title = pickPreferredTitle(detail.Title, titles, c.titleLanguages)
+			detail.Overview = pickPreferredOverview(detail.Overview, overviews, c.overviewLanguages)
+		}
 	}
 
 	if !containsAppendValue(appendToResponse, "translations") {
@@ -1106,6 +1116,66 @@ func filterPreferredLogos(logos []struct {
 		return empty
 	}
 	return logos
+}
+
+func chineseLanguageOrder() []string {
+	return []string{"zh-CN", "zh-SG", "zh", "zh-TW", "zh-HK", "zh-MO"}
+}
+
+func isChineseLanguage(lang string) bool {
+	lang = strings.ToLower(strings.TrimSpace(lang))
+	return lang == "zh" || strings.HasPrefix(lang, "zh-")
+}
+
+func isChineseRegion(region string) bool {
+	switch strings.ToUpper(strings.TrimSpace(region)) {
+	case "CN", "SG", "TW", "HK", "MO":
+		return true
+	default:
+		return false
+	}
+}
+
+func isChineseMedia(originalLanguage string, originCountries []string) bool {
+	if isChineseLanguage(originalLanguage) {
+		return true
+	}
+	for _, country := range originCountries {
+		if isChineseRegion(country) {
+			return true
+		}
+	}
+	return false
+}
+
+func pickChinesePreferredTitle(current, original, originalLanguage string, originCountries []string, candidates []tmdbAltTitleItem) string {
+	if !isChineseMedia(originalLanguage, originCountries) {
+		return ""
+	}
+	if isChinese(current) {
+		return strings.TrimSpace(current)
+	}
+
+	best := ""
+	bestRank := 99 + len(chineseLanguageOrder())
+	for _, item := range candidates {
+		title := strings.TrimSpace(item.Title)
+		if title == "" || !isChinese(title) {
+			continue
+		}
+		rank := langRankWithOrder(item.Lang, chineseLanguageOrder())
+		if rank < bestRank {
+			best = title
+			bestRank = rank
+		}
+	}
+	if best != "" {
+		return best
+	}
+	if isChinese(original) {
+		return strings.TrimSpace(original)
+	}
+	return ""
 }
 
 // isEnglishLanguage 判断语言代码是否为英文

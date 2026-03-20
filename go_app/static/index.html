@@ -274,6 +274,14 @@ input[type=checkbox].chk{width:15px;height:15px;accent-color:var(--main);cursor:
     </div>
   </div>
 
+  <div class="info-section">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+      <h4 style="margin:0;">🧹 资源回收</h4>
+      <button class="btn-outline" onclick="reclaimResources()">回收内存</button>
+    </div>
+    <div id="memoryStats" style="margin-top:10px;font-size:13px;color:#6b7280;line-height:1.7;">加载中…</div>
+  </div>
+
   <!-- TMDB test -->
   <div class="info-section">
     <h4>🎬 TMDB 连通性</h4>
