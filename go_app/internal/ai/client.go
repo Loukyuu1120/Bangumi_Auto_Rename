@@ -484,7 +484,8 @@ func estimatePromptTokens(system, user string) int {
 
 func doJSONRequestWithRetry(client *http.Client, req *http.Request, retries int, parser func(int, []byte) (string, error)) (string, error) {
 	var lastErr error
-	for attempt := 0; attempt <= retries; attempt++ {
+	attempt := 0
+	for {
 		reqCopy := req.Clone(req.Context())
 		if req.GetBody != nil {
 			body, err := req.GetBody()
@@ -510,15 +511,14 @@ func doJSONRequestWithRetry(client *http.Client, req *http.Request, retries int,
 				lastErr = parseErr
 				if rateLimitErr, ok := parseErr.(*aiRateLimitError); ok {
 					globalRateLimiter.applyUpstreamCooldown(rateLimitErr.retryAfter, rateLimitErr.message)
-					if attempt == retries {
-						return "", parseErr
-					}
+					globalRateLimiter.wait(0, 0, 0)
 					continue
 				}
 				if !shouldRetryStatus(resp.StatusCode) || attempt == retries {
 					return "", parseErr
 				}
 				time.Sleep(retryDelay(resp.Header.Get("Retry-After"), attempt))
+				attempt++
 				continue
 			}
 		}
@@ -527,6 +527,7 @@ func doJSONRequestWithRetry(client *http.Client, req *http.Request, retries int,
 			break
 		}
 		time.Sleep(retryDelay("", attempt))
+		attempt++
 	}
 	return "", lastErr
 }

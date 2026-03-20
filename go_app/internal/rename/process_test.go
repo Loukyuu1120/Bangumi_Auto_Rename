@@ -24,3 +24,59 @@ func TestChooseSearchQueryPrefersParentForEpisodeFiles(t *testing.T) {
 		t.Fatalf("expected year 2025, got %d", year)
 	}
 }
+
+func TestParseSearchNameKeepsMovieSequelNumberAndUsesReleaseYear(t *testing.T) {
+	name, year := ParseSearchName("[LGNB封装][2017][美国][银翼杀手2049][Blade.Runner.2049.2017.Open.Matte.2160p.DV.HDR10.HEVC.TrueHD.7.1.Atmos-LGNB].strm")
+	if name != "Blade Runner 2049" {
+		t.Fatalf("expected Blade Runner 2049, got %q", name)
+	}
+	if year != 2017 {
+		t.Fatalf("expected year 2017, got %d", year)
+	}
+}
+
+func TestChooseSearchQueryKeepsNumericMovieTitleInsteadOfFallingBackToCollectionFolder(t *testing.T) {
+	p := &Processor{}
+	srcPath := "/library/Open Matte 与 IMAX 电影收藏 - 4.76T/300 2006 Open Matte Hybrid BluRay 1080p DTS-HD MA TrueHD 7.1 Atmos x264-MgB.strm"
+
+	name, year := p.chooseSearchQuery(srcPath, TaskOptions{}, nil)
+	if name != "300" {
+		t.Fatalf("expected title 300, got %q", name)
+	}
+	if year != 2006 {
+		t.Fatalf("expected year 2006, got %d", year)
+	}
+}
+
+func TestDetectMediaTypeTreatsYearBasedSingleFileAsMovie(t *testing.T) {
+	p := &Processor{}
+	srcPath := "/library/collection/Blade.Runner.2049.2017.Open.Matte.2160p.DV.HDR10.HEVC.TrueHD.7.1.Atmos.strm"
+
+	_, isMovie := p.detectMediaType(srcPath, TaskOptions{})
+	if !isMovie {
+		t.Fatalf("expected single-file movie detection to be true")
+	}
+}
+
+func TestBuildSearchCandidatesSplitsChineseAndEnglishTitleSegments(t *testing.T) {
+	srcPath := "/library/冲出宁静号.Serenity.2005.Open.Matte.1080p.WEB-DL/Serenity.2005.Open.Matte.1080p.WEB-DL.strm"
+	got := buildSearchCandidates(srcPath, "Serenity")
+
+	if len(got) < 2 {
+		t.Fatalf("expected multiple search candidates, got %v", got)
+	}
+	if got[0] != "冲出宁静号" {
+		t.Fatalf("expected Chinese candidate first, got %q", got[0])
+	}
+
+	foundEnglish := false
+	for _, item := range got {
+		if item == "Serenity" {
+			foundEnglish = true
+			break
+		}
+	}
+	if !foundEnglish {
+		t.Fatalf("expected English candidate Serenity, got %v", got)
+	}
+}

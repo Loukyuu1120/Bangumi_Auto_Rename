@@ -63,7 +63,7 @@ var keywordsToClean = []string{
 	// Additional codecs / formats
 	"DDP", "EAC3", "OPUS", "LPCM", "PCM", "MP3",
 	"WEBRip", "HDTV", "BDRip", "DVDRip", "WEBDL",
-	"内封简繁中字", "内封简繁", "中字",
+	"内封简繁中字", "内封简繁", "中字", "超清", "收藏版",
 }
 
 // bracketPattern matches common bracket types and their contents.
@@ -234,8 +234,13 @@ func CleanNoise(title string) string {
 
 	// Remove known noise keywords (case-insensitive)
 	for _, kw := range keywordsToClean {
-		re := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(kw) + `\b`)
-		title = re.ReplaceAllString(title, " ")
+		if regexp.MustCompile(`[\p{Han}]`).MatchString(kw) {
+			re := regexp.MustCompile(`(?i)` + regexp.QuoteMeta(kw))
+			title = re.ReplaceAllString(title, " ")
+		} else {
+			re := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(kw) + `\b`)
+			title = re.ReplaceAllString(title, " ")
+		}
 	}
 
 	// Collapse whitespace and trim
@@ -279,23 +284,23 @@ func ParseSearchName(input string) (string, int) {
 		}
 	}
 
-	clean := name
-	year := 0
-	yearRe := regexp.MustCompile(`(?i)(?:[.\s\-_\(\[（【]|^)([12][90]\d{2})(?:[.\s\-_\)\]）】]|$)`)
-	if idxs := yearRe.FindAllStringSubmatchIndex(clean, -1); len(idxs) > 0 {
-		// Prefer the last year occurrence (Python behavior in multi-year names)
-		idx := idxs[len(idxs)-1]
-		yearStr := clean[idx[2]:idx[3]]
-		if y, err := strconv.Atoi(yearStr); err == nil {
-			year = y
-		}
-		if idx[2] > 0 {
-			clean = clean[:idx[2]]
-		}
+	original := name
+	clean := RemoveBracketTags(name, false)
+	if candidate := bestBracketContent(name); candidate != "" && len([]rune(candidate)) > len([]rune(clean)) {
+		clean = candidate
+	}
+	if clean == "" {
+		clean = name
 	}
 
-	// Remove bracket content/tags
-	clean = RemoveBracketTags(clean, false)
+	clean, year := extractSearchYear(clean)
+	_, originalYear, originalYearCount := extractSearchYearMeta(original)
+	if originalYearCount > 1 && originalYear > 0 {
+		year = originalYear
+	} else if year == 0 {
+		year = originalYear
+	}
+	clean = CleanNoise(clean)
 	// Go RE2 doesn't support lookahead; use a safe fallback to drop "A <CJK>" prefixes.
 	clean = regexp.MustCompile(`^[A-Za-z]\s+[\p{Han}]`).ReplaceAllStringFunc(clean, func(s string) string {
 		parts := strings.Fields(s)
@@ -348,6 +353,72 @@ func ParseSearchName(input string) (string, int) {
 	clean = strings.Trim(clean, " .-[]()（）")
 
 	return clean, year
+}
+
+func extractSearchYear(input string) (string, int) {
+	clean, year, _ := extractSearchYearMeta(input)
+	return clean, year
+}
+
+func extractSearchYearMeta(input string) (string, int, int) {
+	clean := input
+	year := 0
+	adjacentYearRe := regexp.MustCompile(`(?i)([12][90]\d{2})([.\s\-_]+)([12][90]\d{2})(?:[.\s\-_]|$)`)
+	if idxs := adjacentYearRe.FindAllStringSubmatchIndex(clean, -1); len(idxs) > 0 {
+		idx := idxs[len(idxs)-1]
+		yearStr := clean[idx[6]:idx[7]]
+		if y, err := strconv.Atoi(yearStr); err == nil {
+			year = y
+			clean = clean[:idx[6]]
+			return clean, year, len(idxs) + 1
+		}
+	}
+	yearRe := regexp.MustCompile(`(?i)(?:[.\s\-_\(\[（【]|^)([12][90]\d{2})(?:[.\s\-_\)\]）】]|$)`)
+	if idxs := yearRe.FindAllStringSubmatchIndex(clean, -1); len(idxs) > 0 {
+		// Prefer the last year-like token so sequel numbers such as 2049 can stay in the title.
+		idx := idxs[len(idxs)-1]
+		yearStr := clean[idx[2]:idx[3]]
+		if y, err := strconv.Atoi(yearStr); err == nil {
+			year = y
+		}
+		if idx[2] > 0 {
+			clean = clean[:idx[2]]
+		}
+		return clean, year, len(idxs)
+	}
+	return clean, year, 0
+}
+
+func bestBracketContent(input string) string {
+	matches := bracketPattern.FindAllString(input, -1)
+	best := ""
+	bestScore := -1
+	for _, match := range matches {
+		rawCandidate := strings.TrimSpace(strings.Trim(match, "[]【】《》<>()（）"))
+		candidate := strings.TrimSpace(CleanNoise(rawCandidate))
+		if len([]rune(candidate)) < 2 {
+			continue
+		}
+
+		score := len([]rune(candidate))
+		if strings.Contains(rawCandidate, ".") || strings.Contains(rawCandidate, "_") || strings.Contains(rawCandidate, "-") {
+			score += 30
+		}
+		if regexp.MustCompile(`[A-Za-z]`).MatchString(candidate) {
+			score += 20
+		}
+		if regexp.MustCompile(`[\p{Han}]`).MatchString(candidate) {
+			score += 20
+		}
+		if regexp.MustCompile(`[12][90]\d{2}`).MatchString(candidate) {
+			score += 5
+		}
+		if score > bestScore {
+			best = candidate
+			bestScore = score
+		}
+	}
+	return best
 }
 
 // ExtractSeason tries to parse a season number from a string.

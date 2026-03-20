@@ -223,6 +223,7 @@ func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) e
 
 	// ── 2. Choose search query ────────────────────────────────────────────────
 	searchName, year := p.chooseSearchQuery(srcPath, opts, rec)
+	searchCandidates := buildSearchCandidates(srcPath, searchName)
 	if strings.TrimSpace(opts.CusName) != "" {
 		rec.Name = searchName
 	}
@@ -253,7 +254,7 @@ func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) e
 	}
 
 	if isMovie {
-		movie, err := p.resolveMovie(tmdbClient, searchName, year, tmdbID)
+		movie, err := p.resolveMovie(tmdbClient, searchCandidates, year, tmdbID)
 		if err != nil {
 			return fmt.Errorf("TMDB电影查询失败: %w", err)
 		}
@@ -269,13 +270,13 @@ func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) e
 		rec.TMDBID = strconv.Itoa(tmdbID)
 		p.log.Info("[处理] 匹配电影: %s (%d) [tmdb:%d]", tmdbTitle, tmdbYear, tmdbID)
 	} else {
-		tv, seasonNum, err := p.resolveTV(tmdbClient, srcPath, searchName, year, tmdbID, opts)
+		tv, seasonNum, err := p.resolveTV(tmdbClient, srcPath, searchCandidates, year, tmdbID, opts)
 		if err != nil {
 			return fmt.Errorf("TMDB剧集查询失败: %w", err)
 		}
 		if tv == nil {
 			p.log.Info("[处理] TV 未命中，尝试电影兜底: %q", searchName)
-			movie, movieErr := p.resolveMovie(tmdbClient, searchName, year, tmdbID)
+			movie, movieErr := p.resolveMovie(tmdbClient, searchCandidates, year, tmdbID)
 			if movieErr != nil {
 				return fmt.Errorf("TMDB电影兜底查询失败: %w", movieErr)
 			}
@@ -429,6 +430,8 @@ func (p *Processor) detectMediaType(srcPath string, opts TaskOptions) (isAnime b
 	}
 	if hasEpisodeMarkers {
 		isMovie = false
+	} else if opts.IsMovie == nil && looksLikeStandaloneMovie(stem, parent) {
+		isMovie = true
 	}
 	return isAnime, isMovie
 }
@@ -475,11 +478,11 @@ func (p *Processor) chooseSearchQuery(srcPath string, opts TaskOptions, rec *Tas
 	name = strings.TrimSpace(cleaned)
 
 	// If name is still weak or empty, fall back to parent / grandparent
-	if name == "" || IsWeakFilename(name) || len([]rune(name)) < 2 {
+	if name == "" || ((IsWeakFilename(name) || len([]rune(name)) < 2) && !isLikelyMovieSearchName(name, year)) {
 		parent := filepath.Dir(srcPath)
 		if parent != "." && parent != string(filepath.Separator) {
 			pname := filepath.Base(parent)
-			if IsSeasonName(pname) {
+			if isExplicitSeasonFolder(pname) {
 				grand := filepath.Dir(parent)
 				if grand != "." && grand != string(filepath.Separator) {
 					pname = filepath.Base(grand)
@@ -519,6 +522,34 @@ func isExplicitSeasonFolder(name string) bool {
 	}
 }
 
+func isLikelyMovieSearchName(name string, year int) bool {
+	name = strings.TrimSpace(name)
+	if year <= 0 || name == "" {
+		return false
+	}
+	if regexp.MustCompile(`^\d{1,4}$`).MatchString(name) {
+		return true
+	}
+	return false
+}
+
+func looksLikeStandaloneMovie(stem, parent string) bool {
+	if isExplicitSeasonFolder(parent) {
+		return false
+	}
+	if ep := ExtractEpisode(stem); ep.Found {
+		return false
+	}
+	if _, ok := ExtractSeason(stem); ok {
+		return false
+	}
+	title, year := ParseSearchName(stem)
+	if year <= 0 || strings.TrimSpace(title) == "" {
+		return false
+	}
+	return true
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Target directory selection
 // ─────────────────────────────────────────────────────────────────────────────
@@ -549,25 +580,34 @@ func (p *Processor) targetRootDir(cfg config.Config, isAnime, isMovie bool) stri
 // TMDB resolution helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-func (p *Processor) resolveMovie(client *TMDBClient, name string, year, forceID int) (*TMDBMovieDetail, error) {
+func (p *Processor) resolveMovie(client *TMDBClient, names []string, year, forceID int) (*TMDBMovieDetail, error) {
 	if forceID > 0 {
 		return client.GetMovieDetail(forceID, "credits,external_ids,release_dates,images")
 	}
 
-	results, err := client.SearchMovie(name, year)
-	if err != nil {
-		return nil, err
-	}
-	if len(results) == 0 {
-		// Retry without year
-		if year > 0 {
-			results, err = client.SearchMovie(name, 0)
-			if err != nil || len(results) == 0 {
+	var (
+		results []TMDBSearchResult
+		err     error
+		name    string
+	)
+	for _, candidate := range names {
+		name = candidate
+		results, err = client.SearchMovie(candidate, year)
+		if err != nil {
+			return nil, err
+		}
+		if len(results) == 0 && year > 0 {
+			results, err = client.SearchMovie(candidate, 0)
+			if err != nil {
 				return nil, err
 			}
-		} else {
-			return nil, nil
 		}
+		if len(results) > 0 {
+			break
+		}
+	}
+	if len(results) == 0 {
+		return nil, nil
 	}
 
 	// Pick best using heuristics (and AI if available)
@@ -607,7 +647,8 @@ func absInt(v int) int {
 	return v
 }
 
-func (p *Processor) resolveTV(client *TMDBClient, srcPath, name string, year, forceID int, opts TaskOptions) (*TMDBTVDetail, int, error) {
+func (p *Processor) resolveTV(client *TMDBClient, srcPath string, names []string, year, forceID int, opts TaskOptions) (*TMDBTVDetail, int, error) {
+	name := firstNonEmptyString(names)
 	p.log.Info("[处理] resolveTV: name=%q year=%d forceID=%d cusName=%q cusTMDBID=%q", name, year, forceID, opts.CusName, opts.CusTMDBID)
 
 	seasonNum := 1
@@ -636,9 +677,8 @@ func (p *Processor) resolveTV(client *TMDBClient, srcPath, name string, year, fo
 	} else {
 		p.log.Info("[处理] 未指定强制 TMDB ID，开始搜索 TV: %q", name)
 		// ── API search ───────────────────────────────────────────────────────
-		// SearchTV internally tries zh-CN+year, zh-CN+0, en-US+year, en-US+0
-		// and returns on the first non-empty page, so a single call is enough.
-		results, searchErr := client.SearchTV(name, year)
+		results, searchErr, usedName := p.searchTVCandidates(client, names, year)
+		name = usedName
 		if searchErr != nil {
 			return nil, seasonNum, searchErr
 		}
@@ -664,7 +704,8 @@ func (p *Processor) resolveTV(client *TMDBClient, srcPath, name string, year, fo
 
 		if needsWebFallback {
 			p.log.Info("[处理] API搜索未找到合适年份结果 %q，尝试网页兜底搜索...", name)
-			if webResults, webErr := client.SearchTMDBWeb(name, "tv"); webErr == nil && len(webResults) > 0 {
+			if webResults, webErr, webName := p.searchTVWebCandidates(client, names, year); webErr == nil && len(webResults) > 0 {
+				name = webName
 				p.log.Info("[处理] 网页搜索返回 %d 条结果", len(webResults))
 				filtered := webResults
 				if year > 0 {
@@ -740,6 +781,144 @@ func (p *Processor) resolveTV(client *TMDBClient, srcPath, name string, year, fo
 	}
 
 	return detail, seasonNum, nil
+}
+
+func (p *Processor) searchTVCandidates(client *TMDBClient, names []string, year int) ([]TMDBSearchResult, error, string) {
+	for _, candidate := range names {
+		results, err := client.SearchTV(candidate, year)
+		if err != nil {
+			return nil, err, candidate
+		}
+		if len(results) > 0 {
+			return results, nil, candidate
+		}
+	}
+	return nil, nil, firstNonEmptyString(names)
+}
+
+func (p *Processor) searchTVWebCandidates(client *TMDBClient, names []string, year int) ([]TMDBSearchResult, error, string) {
+	for _, candidate := range names {
+		webResults, webErr := client.SearchTMDBWeb(candidate, "tv")
+		if webErr != nil {
+			return nil, webErr, candidate
+		}
+		if len(webResults) > 0 {
+			filtered := webResults
+			if year > 0 {
+				filtered = filterResultsByYear(webResults, year, false)
+				if len(filtered) == 0 {
+					filtered = webResults
+				}
+			}
+			return filtered, nil, candidate
+		}
+	}
+	return nil, nil, firstNonEmptyString(names)
+}
+
+func buildSearchCandidates(srcPath, primary string) []string {
+	zhCandidates := []string{}
+	otherCandidates := []string{}
+	add := func(v string) {
+		v = strings.Join(strings.Fields(strings.TrimSpace(v)), " ")
+		if v == "" {
+			return
+		}
+		for _, existing := range zhCandidates {
+			if strings.EqualFold(existing, v) {
+				return
+			}
+		}
+		for _, existing := range otherCandidates {
+			if strings.EqualFold(existing, v) {
+				return
+			}
+		}
+		if regexp.MustCompile(`[\p{Han}]`).MatchString(v) {
+			zhCandidates = append(zhCandidates, v)
+		} else {
+			otherCandidates = append(otherCandidates, v)
+		}
+	}
+
+	add(primary)
+	parent := strings.TrimSuffix(filepath.Base(filepath.Dir(srcPath)), filepath.Ext(filepath.Base(filepath.Dir(srcPath))))
+	for _, part := range splitMixedLanguageTitle(parent) {
+		if cleaned, _ := ParseSearchName(part); cleaned != "" {
+			add(cleaned)
+		} else {
+			add(part)
+		}
+	}
+	stem := strings.TrimSuffix(filepath.Base(srcPath), filepath.Ext(srcPath))
+	for _, part := range splitMixedLanguageTitle(stem) {
+		if cleaned, _ := ParseSearchName(part); cleaned != "" {
+			add(cleaned)
+		} else {
+			add(part)
+		}
+	}
+	return append(zhCandidates, otherCandidates...)
+}
+
+func splitMixedLanguageTitle(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	yearOrTech := regexp.MustCompile(`(?i)^(?:[12][90]\d{2}|2160p|1080p|720p|480p|4k|web-dl|webrip|bluray|bdrip|remux|x26[45]|h26[45]|hevc|avc)$`)
+	separators := regexp.MustCompile(`[._]+`)
+	tokens := separators.Split(raw, -1)
+	var groups []string
+	var current []string
+	currentKind := ""
+	flush := func() {
+		if len(current) == 0 {
+			return
+		}
+		groups = append(groups, strings.Join(current, " "))
+		current = nil
+		currentKind = ""
+	}
+	for _, token := range tokens {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			continue
+		}
+		if yearOrTech.MatchString(strings.ToLower(token)) {
+			break
+		}
+		kind := tokenLanguageKind(token)
+		if currentKind != "" && kind != "" && kind != currentKind {
+			flush()
+		}
+		current = append(current, token)
+		if kind != "" {
+			currentKind = kind
+		}
+	}
+	flush()
+	return groups
+}
+
+func tokenLanguageKind(token string) string {
+	switch {
+	case regexp.MustCompile(`[\p{Han}]`).MatchString(token):
+		return "zh"
+	case regexp.MustCompile(`[A-Za-z]`).MatchString(token):
+		return "latin"
+	default:
+		return ""
+	}
+}
+
+func firstNonEmptyString(items []string) string {
+	for _, item := range items {
+		if strings.TrimSpace(item) != "" {
+			return item
+		}
+	}
+	return ""
 }
 
 // hasYearAppropriateResult reports whether any result in the slice has an
