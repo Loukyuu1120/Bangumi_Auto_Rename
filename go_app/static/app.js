@@ -1503,6 +1503,13 @@ async function saveConfig() {
     }
   });
 
+  const prevCfg = S.configData || {};
+  const needRestart = [
+    "monitor_enabled",
+    "monitor_mode",
+    "monitor_paths",
+  ].some((k) => JSON.stringify(cfg[k]) !== JSON.stringify(prevCfg[k]));
+
   const { ok } = await POST("/api/config", cfg);
   if (ok) {
     closeModal("configModal");
@@ -1513,11 +1520,6 @@ async function saveConfig() {
         p.scan_now = false;
       });
     }
-    const needRestart = [
-      "monitor_enabled",
-      "monitor_mode",
-      "monitor_paths",
-    ].some((k) => JSON.stringify(cfg[k]) !== JSON.stringify(S.configData[k]));
     if (needRestart) {
       await POST("/api/monitor/restart", {});
     } else {

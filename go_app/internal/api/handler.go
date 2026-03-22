@@ -642,6 +642,10 @@ func (h *Handler) handleMonitorRestart(w http.ResponseWriter, r *http.Request) {
 
 	cfg := h.cfg.GetConfig()
 	if !cfg.MonitorEnabled {
+		if err := h.svc.StartWatchers(nil, h.cfg.GetMonitorExcludeDirs(), cfg.MonitorMode); err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		jsonOK(w, map[string]string{"status": "disabled"})
 		return
 	}
