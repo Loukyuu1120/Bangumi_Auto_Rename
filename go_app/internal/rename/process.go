@@ -14,6 +14,12 @@ import (
 	"bangumi_auto_rename/internal/logger"
 )
 
+const (
+	RecognitionModeSmart          = "smart"
+	RecognitionModeStandard       = "standard"
+	RecognitionModeDirectoryFirst = "directory_first"
+)
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Task & result types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -428,9 +434,10 @@ func (p *Processor) detectMediaType(srcPath string, opts TaskOptions) (isAnime b
 	} else if _, ok := ExtractSeason(parent); ok || IsSeasonName(parent) {
 		hasEpisodeMarkers = true
 	}
+	mode := recognitionModeFromOverrides(opts.ConfigOverrides)
 	if hasEpisodeMarkers {
 		isMovie = false
-	} else if opts.IsMovie == nil && looksLikeStandaloneMovie(stem, parent) {
+	} else if opts.IsMovie == nil && looksLikeStandaloneMovie(stem, parent) && mode != RecognitionModeDirectoryFirst {
 		isMovie = true
 	}
 	return isAnime, isMovie
@@ -447,11 +454,19 @@ func (p *Processor) chooseSearchQuery(srcPath string, opts TaskOptions, rec *Tas
 		return name, year
 	}
 
+	mode := recognitionModeFromOverrides(opts.ConfigOverrides)
+
 	// Try to derive name from path
 	stem := strings.TrimSuffix(filepath.Base(srcPath), filepath.Ext(srcPath))
+	parent := filepath.Base(filepath.Dir(srcPath))
+
+	if mode == RecognitionModeDirectoryFirst {
+		if folderName, folderYear, ok := preferredFolderSearchName(srcPath); ok {
+			return folderName, folderYear
+		}
+	}
 
 	if ep := ExtractEpisode(stem); ep.Found {
-		parent := filepath.Base(filepath.Dir(srcPath))
 		if isExplicitSeasonFolder(parent) {
 			parent = filepath.Base(filepath.Dir(filepath.Dir(srcPath)))
 		}
@@ -466,7 +481,6 @@ func (p *Processor) chooseSearchQuery(srcPath string, opts TaskOptions, rec *Tas
 
 	// If the stem looks like a pure episode marker, try the parent directory
 	if IsWeakFilename(stem) {
-		parent := filepath.Base(filepath.Dir(srcPath))
 		if IsSeasonName(parent) {
 			parent = filepath.Base(filepath.Dir(filepath.Dir(srcPath)))
 		}
@@ -502,6 +516,61 @@ func (p *Processor) chooseSearchQuery(srcPath string, opts TaskOptions, rec *Tas
 	name = strings.Join(strings.Fields(name), " ")
 
 	return name, year
+}
+
+func recognitionModeFromOverrides(overrides map[string]interface{}) string {
+	if overrides == nil {
+		return RecognitionModeSmart
+	}
+	raw, _ := overrides["recognition_mode"].(string)
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", RecognitionModeSmart:
+		return RecognitionModeSmart
+	case RecognitionModeStandard:
+		return RecognitionModeStandard
+	case RecognitionModeDirectoryFirst, "folder_first":
+		return RecognitionModeDirectoryFirst
+	default:
+		return RecognitionModeSmart
+	}
+}
+
+func preferredFolderSearchName(srcPath string) (string, int, bool) {
+	parentDir := filepath.Dir(srcPath)
+	if parentDir == "." || parentDir == string(filepath.Separator) {
+		return "", 0, false
+	}
+
+	candidates := make([]string, 0, 2)
+	parentName := filepath.Base(parentDir)
+	if isExplicitSeasonFolder(parentName) {
+		grand := filepath.Dir(parentDir)
+		if grand != "." && grand != string(filepath.Separator) {
+			candidates = append(candidates, filepath.Base(grand))
+		}
+	}
+	candidates = append(candidates, parentName)
+
+	for _, candidate := range candidates {
+		name, year := ParseSearchName(candidate)
+		name = strings.TrimSpace(strings.NewReplacer("-", " ", "_", " ").Replace(name))
+		name = strings.Join(strings.Fields(name), " ")
+		if isMeaningfulSearchName(name, year) {
+			return name, year, true
+		}
+	}
+	return "", 0, false
+}
+
+func isMeaningfulSearchName(name string, year int) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	if len([]rune(name)) >= 2 && !IsWeakFilename(name) {
+		return true
+	}
+	return year > 0 && isLikelyMovieSearchName(name, year)
 }
 
 func isExplicitSeasonFolder(name string) bool {

@@ -797,6 +797,11 @@ const SCRAPE_IMAGE_OPTIONS = [
   "landscape",
 ];
 const SUBTITLE_EXT_OPTIONS = [".ass", ".srt", ".sub", ".ssa", ".vtt"];
+const MONITOR_RECOGNITION_OPTIONS = [
+  { value: "smart", label: "智能平衡", desc: "默认，文件名和目录名一起判断" },
+  { value: "standard", label: "标准命名", desc: "优先相信文件名，适合命名规范目录" },
+  { value: "directory_first", label: "目录优先", desc: "优先相信上级目录，适合文件名很乱的目录" },
+];
 
 async function openConfig() {
   const { ok, data } = await GET("/api/config");
@@ -1032,6 +1037,7 @@ function renderMonitorPaths(val) {
         mode: item.mode || "",
         overwrite_mode: item.overwrite_mode || "",
         monitor_mode: item.monitor_mode || "",
+        recognition_mode: item.recognition_mode || "smart",
         scrape_language: item.scrape_language || "",
         scan_now: item.scan_now === true,
       });
@@ -1054,6 +1060,11 @@ function renderMonitorPaths(val) {
         <option value="">继承全局监控模式</option>
         <option value="compatibility">compatibility</option>
         <option value="native">native</option>
+      </select>
+      <select id="newMonitorPathRecognition" style="width:auto;">
+        ${MONITOR_RECOGNITION_OPTIONS.map(
+          (opt) => `<option value="${opt.value}" ${opt.value === "smart" ? "selected" : ""}>${opt.label}</option>`,
+        ).join("")}
       </select>
       <button class="btn-outline" style="padding:4px 12px;font-size:12px;white-space:nowrap;" onclick="addMonitorPath()">+ 添加</button>
     </div>
@@ -1089,12 +1100,21 @@ function renderMonitorPathItems(paths) {
       const monitorModeBadge = p.monitor_mode
         ? `<span style="background:#ede9fe;color:#6d28d9;padding:1px 6px;border-radius:9999px;font-size:10px;margin-left:6px;">${escHtml(p.monitor_mode)}</span>`
         : "";
+      const recognitionLabels = {
+        smart: "智能平衡",
+        standard: "标准命名",
+        directory_first: "目录优先",
+      };
+      const recognitionBadge =
+        p.recognition_mode && p.recognition_mode !== "smart"
+          ? `<span style="background:#dcfce7;color:#166534;padding:1px 6px;border-radius:9999px;font-size:10px;margin-left:6px;">${escHtml(recognitionLabels[p.recognition_mode] || p.recognition_mode)}</span>`
+          : "";
       const scrapeLangBadge = p.scrape_language
         ? `<span style="background:#fef3c7;color:#92400e;padding:1px 6px;border-radius:9999px;font-size:10px;margin-left:6px;">🌐 ${escHtml(p.scrape_language)}</span>`
         : "";
       return `<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:#f9fafb;border-radius:8px;margin-bottom:4px;">
       <span style="font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escHtml(p.path)}">📁 ${escHtml(p.path)}</span>
-      ${animeBadge}${movieBadge}${tvBadge}${movieTplBadge}${monitorModeBadge}${scrapeLangBadge}
+      ${animeBadge}${movieBadge}${tvBadge}${movieTplBadge}${monitorModeBadge}${recognitionBadge}${scrapeLangBadge}
       <button class="btn-outline" style="padding:2px 8px;font-size:11px;flex-shrink:0;" onclick="openMonitorPathEditor(${i})">配置</button>
       <button class="btn-outline" style="padding:2px 8px;font-size:11px;color:#dc2626;border-color:#dc2626;flex-shrink:0;" onclick="removeMonitorPath(${i})">✕</button>
     </div>`;
@@ -1106,6 +1126,7 @@ function addMonitorPath() {
   const input = document.getElementById("newMonitorPathInput");
   const animeSelect = document.getElementById("newMonitorPathAnime");
   const modeSelect = document.getElementById("newMonitorPathMode");
+  const recognitionSelect = document.getElementById("newMonitorPathRecognition");
   const path = input.value.trim();
   if (!path) {
     notify("请输入目录路径", "warning");
@@ -1122,6 +1143,7 @@ function addMonitorPath() {
     mode: "",
     overwrite_mode: "",
     monitor_mode: modeSelect.value || "",
+    recognition_mode: recognitionSelect.value || "smart",
     scrape_language: "",
     scan_now: false,
   };
@@ -1132,6 +1154,7 @@ function addMonitorPath() {
   input.value = "";
   animeSelect.value = "";
   modeSelect.value = "";
+  recognitionSelect.value = "smart";
 }
 
 function removeMonitorPath(idx) {
@@ -1158,6 +1181,8 @@ function openMonitorPathEditor(idx) {
     p.overwrite_mode || "";
   document.getElementById("monitorPathMonitorMode").value =
     p.monitor_mode || "";
+  document.getElementById("monitorPathRecognitionMode").value =
+    p.recognition_mode || "smart";
   document.getElementById("monitorPathScrapeLanguage").value =
     p.scrape_language || "";
   document.getElementById("monitorPathScanNow").checked = p.scan_now === true;
@@ -1181,6 +1206,7 @@ function saveMonitorPathEditor() {
   const mode = document.getElementById("monitorPathMode").value;
   const overwrite = document.getElementById("monitorPathOverwrite").value;
   const monitorMode = document.getElementById("monitorPathMonitorMode").value;
+  const recognitionMode = document.getElementById("monitorPathRecognitionMode").value;
   const scrapeLanguage = document.getElementById("monitorPathScrapeLanguage").value;
   const scanNow = document.getElementById("monitorPathScanNow").checked;
 
@@ -1191,6 +1217,7 @@ function saveMonitorPathEditor() {
   p.mode = mode;
   p.overwrite_mode = overwrite;
   p.monitor_mode = monitorMode;
+  p.recognition_mode = recognitionMode || "smart";
   p.scrape_language = scrapeLanguage;
   p.scan_now = scanNow;
 
@@ -1434,6 +1461,8 @@ function collectFriendlyValue(key) {
         (p.mode && p.mode.trim() !== "") ||
         (p.overwrite_mode && p.overwrite_mode.trim() !== "") ||
         (p.monitor_mode && p.monitor_mode.trim() !== "") ||
+        (p.recognition_mode && p.recognition_mode.trim() !== "" && p.recognition_mode !== "smart") ||
+        (p.scrape_language && p.scrape_language.trim() !== "") ||
         p.scan_now === true;
       if (!hasExtras) return p.path;
       const entry = { path: p.path };
@@ -1448,6 +1477,10 @@ function collectFriendlyValue(key) {
         entry.overwrite_mode = p.overwrite_mode.trim();
       if (p.monitor_mode && p.monitor_mode.trim() !== "")
         entry.monitor_mode = p.monitor_mode.trim();
+      if (p.recognition_mode && p.recognition_mode.trim() !== "")
+        entry.recognition_mode = p.recognition_mode.trim();
+      if (p.scrape_language && p.scrape_language.trim() !== "")
+        entry.scrape_language = p.scrape_language.trim();
       if (p.scan_now === true) entry.scan_now = true;
       return entry;
     });

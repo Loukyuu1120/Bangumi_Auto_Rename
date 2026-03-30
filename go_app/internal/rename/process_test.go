@@ -58,6 +58,37 @@ func TestChooseSearchQueryKeepsNumericMovieTitleInsteadOfFallingBackToCollection
 	}
 }
 
+func TestChooseSearchQueryDirectoryFirstUsesSeriesFolderForMessyEpisodeNames(t *testing.T) {
+	p := &Processor{}
+	srcPath := "/library/G古诺希亚(2025)4K超清2160P收藏版/01.strm"
+
+	name, year := p.chooseSearchQuery(srcPath, TaskOptions{
+		ConfigOverrides: map[string]interface{}{
+			"recognition_mode": "directory_first",
+		},
+	}, nil)
+	if name != "古诺希亚" {
+		t.Fatalf("expected parent title 古诺希亚, got %q", name)
+	}
+	if year != 2025 {
+		t.Fatalf("expected year 2025, got %d", year)
+	}
+}
+
+func TestDetectMediaTypeDirectoryFirstAvoidsGuessingMovieFromFolderYear(t *testing.T) {
+	p := &Processor{}
+	srcPath := "/library/古诺希亚 (2025)/01.mkv"
+
+	_, isMovie := p.detectMediaType(srcPath, TaskOptions{
+		ConfigOverrides: map[string]interface{}{
+			"recognition_mode": "directory_first",
+		},
+	})
+	if isMovie {
+		t.Fatalf("expected directory_first mode not to guess movie from weak file naming")
+	}
+}
+
 func TestDetectMediaTypeTreatsYearBasedSingleFileAsMovie(t *testing.T) {
 	p := &Processor{}
 	srcPath := "/library/collection/Blade.Runner.2049.2017.Open.Matte.2160p.DV.HDR10.HEVC.TrueHD.7.1.Atmos.strm"
@@ -88,5 +119,25 @@ func TestBuildSearchCandidatesSplitsChineseAndEnglishTitleSegments(t *testing.T)
 	}
 	if !foundEnglish {
 		t.Fatalf("expected English candidate Serenity, got %v", got)
+	}
+}
+
+func TestParseSearchNameRemovesUpscaleSizeAndSubtitleNoise(t *testing.T) {
+	name, year := ParseSearchName("犬夜叉：紅蓮之蓬莱島（2004）4K超分［内封简中字幕］11.44GB")
+	if name != "犬夜叉 紅蓮之蓬莱島" {
+		t.Fatalf("expected cleaned title 犬夜叉 紅蓮之蓬莱島, got %q", name)
+	}
+	if year != 2004 {
+		t.Fatalf("expected year 2004, got %d", year)
+	}
+}
+
+func TestParseSearchNameRemovesEnglishSizeAndBilingualSubtitleNoise(t *testing.T) {
+	name, year := ParseSearchName("The Phoenician Scheme (2025) 4K Web SDR 精修简体中字 简英双语字幕 11.44GB")
+	if name != "The Phoenician Scheme" {
+		t.Fatalf("expected cleaned title The Phoenician Scheme, got %q", name)
+	}
+	if year != 2025 {
+		t.Fatalf("expected year 2025, got %d", year)
 	}
 }

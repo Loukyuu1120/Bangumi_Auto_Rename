@@ -56,18 +56,19 @@ var keywordsToClean = []string{
 	"HEVC", "8bit", "10bit", "720P", "2160P", "4K", "BD", "RIP",
 	"DBD-raws", "Remux", "AVC", "H264", "H265", "DTS", "DTS-HD",
 	"TrueHD", "Atmos", "HDR", "DV", "Dolby", "AAC", "AC3", "HQ",
-	"Web-DL", "BluRay",
+	"Web-DL", "BluRay", "WEB", "SDR",
 	// Streaming platform tags
 	"ATVP", "AMZN", "NF", "DSNP", "HMAX", "PCOK", "PMTP",
 	"HULU", "CRAV", "STAN", "ITVX", "RED",
 	// Additional codecs / formats
 	"DDP", "EAC3", "OPUS", "LPCM", "PCM", "MP3",
 	"WEBRip", "HDTV", "BDRip", "DVDRip", "WEBDL",
-	"内封简繁中字", "内封简繁", "中字", "超清", "收藏版",
+	"内封简繁中字", "内封简繁", "中字", "字幕", "双语字幕", "超清", "收藏版", "超分", "修复",
+	"AISR", "AI-SR", "AI SR",
 }
 
 // bracketPattern matches common bracket types and their contents.
-var bracketPattern = regexp.MustCompile(`\[.*?\]|【.*?】|《.*?》|<.*?>|\(.*?\)|（.*?）`)
+var bracketPattern = regexp.MustCompile(`\[.*?\]|［.*?］|【.*?】|《.*?》|<.*?>|\(.*?\)|（.*?）`)
 
 // codePatterns match technical encoding info that is noise in titles.
 var codePatterns = []*regexp.Regexp{
@@ -75,9 +76,21 @@ var codePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(x|h)[\W_]?26[45]|hevc|avc|mpeg2|vp9|av1`),
 	regexp.MustCompile(`(?i)(dts-?hd|dts|truehd|atmos|ac3|aac|flac|opus|mp3|pcm|ddp|eac3)([\W_]*\d+\.\d)?(audio|ch|channel)?`),
 	regexp.MustCompile(`(?i)\b\d{1,2}\.\d(audio|ch|channel|sound)\b`),
-	regexp.MustCompile(`(?i)hdr|dv|dolby|10bit|8bit`),
-	regexp.MustCompile(`(?i)remux|bluray|web-dl|webrip|hdtv|bdrip|dvdrip`),
+	regexp.MustCompile(`(?i)hdr|sdr|dv|dolby|10bit|8bit`),
+	regexp.MustCompile(`(?i)remux|bluray|web-dl|webrip|web|hdtv|bdrip|dvdrip`),
 	regexp.MustCompile(`(?i)hq|(\d{2,3})\s?fps`),
+	regexp.MustCompile(`(?i)\b(?:ai[\W_]*sr|aisr|upscale|remaster(?:ed)?|restored?)\b`),
+	regexp.MustCompile(`(?i)\b\d+(?:\.\d+)?\s*(?:gb|gib|mb|mib|tb|tib)\b`),
+	regexp.MustCompile(`(?:简体|繁体|简中|繁中|中字|双语|中英|简英|英简)+(?:字幕|双语字幕)?`),
+	regexp.MustCompile(`(?:内封|外挂|内嵌|特效|精修)+(?:简体|繁体|简中|繁中|中字|双语|中英|简英|英简)*(?:字幕|双语字幕)?`),
+}
+
+var genericNoisePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\b\d+(?:\.\d+)?\s*(?:gb|gib|mb|mib|tb|tib)\b`),
+	regexp.MustCompile(`(?i)\b(?:ai[\W_]*sr|aisr|upscale|remaster(?:ed)?|restored?)\b`),
+	regexp.MustCompile(`(?:超分|超清|修复|修复版|收藏版|压制版|片源)`),
+	regexp.MustCompile(`(?:简体|繁体|简中|繁中|中字|双语|中英|简英|英简)+(?:字幕|双语字幕)?`),
+	regexp.MustCompile(`(?:内封|外挂|内嵌|特效|精修)+(?:简体|繁体|简中|繁中|中字|双语|中英|简英|英简)*(?:字幕|双语字幕)?`),
 }
 
 // seasonPatterns attempt to extract a season number from a title.
@@ -171,7 +184,7 @@ func cleanTitleCaseInsensitive(title string) string {
 	keywordRe := regexp.MustCompile(j)
 	cleaned := title
 	for _, pattern := range []string{
-		`\[.*?\]`, `【.*?】`, `《.*?》`, `<.*?>`, `\(.*?\)`, `（.*?）`,
+		`\[.*?\]`, `［.*?］`, `【.*?】`, `《.*?》`, `<.*?>`, `\(.*?\)`, `（.*?）`,
 	} {
 		matches := regexp.MustCompile(pattern).FindAllString(cleaned, -1)
 		for _, match := range matches {
@@ -193,7 +206,7 @@ func RemoveBracketTags(title string, skip bool) string {
 	s := title
 	if skip {
 		for _, pattern := range []string{
-			`\[.*?\]`, `【.*?】`, `《.*?》`, `<.*?>`, `\(.*?\)`, `（.*?）`,
+			`\[.*?\]`, `［.*?］`, `【.*?】`, `《.*?》`, `<.*?>`, `\(.*?\)`, `（.*?）`,
 		} {
 			count := 0
 			re := regexp.MustCompile(pattern)
@@ -226,6 +239,10 @@ func CleanNoise(title string) string {
 
 	// Remove code patterns
 	for _, p := range codePatterns {
+		title = p.ReplaceAllString(title, " ")
+	}
+
+	for _, p := range genericNoisePatterns {
 		title = p.ReplaceAllString(title, " ")
 	}
 
@@ -352,6 +369,9 @@ func ParseSearchName(input string) (string, int) {
 	clean = regexp.MustCompile(`(?i)\bPart\s*\d+(?:\s*\+\s*Part\s*\d+)+.*$`).ReplaceAllString(clean, " ")
 	clean = regexp.MustCompile(`(?i)\bPart\s*\d+\b`).ReplaceAllString(clean, " ")
 	clean = regexp.MustCompile(`(?i)\bPart\b\s*$`).ReplaceAllString(clean, " ")
+	for _, p := range genericNoisePatterns {
+		clean = p.ReplaceAllString(clean, " ")
+	}
 	clean = regexp.MustCompile(`\s+`).ReplaceAllString(clean, " ")
 	clean = strings.Trim(clean, " .-[]()（）")
 

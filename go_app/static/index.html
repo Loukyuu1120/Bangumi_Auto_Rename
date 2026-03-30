@@ -645,6 +645,20 @@ input[type=checkbox].chk{width:15px;height:15px;accent-color:var(--main);cursor:
       </div>
     </div>
     <div class="cfg-row">
+      <span class="cfg-label">🧠 识别逻辑</span>
+      <div class="cfg-val">
+        <select id="monitorPathRecognitionMode">
+          <option value="smart">智能平衡（默认）</option>
+          <option value="standard">标准命名（优先文件名）</option>
+          <option value="directory_first">目录优先（适合文件名很乱）</option>
+        </select>
+        <div style="margin-top:6px;font-size:11px;color:#9ca3af;">
+          标准命名：文件名本身包含片名、年份、SxxExx 等信息时更稳<br/>
+          目录优先：文件名只有 01、第01集、sample 这类弱信息时更适合
+        </div>
+      </div>
+    </div>
+    <div class="cfg-row">
       <span class="cfg-label">💿 重命名模式</span>
       <div class="cfg-val">
         <select id="monitorPathMode">
