@@ -726,6 +726,7 @@ func absInt(v int) int {
 func (p *Processor) resolveTV(client *TMDBClient, srcPath string, names []string, year, forceID int, opts TaskOptions) (*TMDBTVDetail, int, error) {
 	name := firstNonEmptyString(names)
 	p.log.Info("[处理] resolveTV: name=%q year=%d forceID=%d cusName=%q cusTMDBID=%q", name, year, forceID, opts.CusName, opts.CusTMDBID)
+	preferMovieFallback := shouldAggressivelyFallbackToMovie(srcPath, opts)
 
 	seasonNum := 1
 	if opts.CusSeasonID != nil && *opts.CusSeasonID > 0 {
@@ -798,6 +799,13 @@ func (p *Processor) resolveTV(client *TMDBClient, srcPath string, names []string
 			// If web scraping also returned nothing, results stays as-is
 			// (either the API's stale list or empty); the AI fallback below
 			// will handle the empty case.
+		}
+
+		// 对明显更像单文件电影的条目，优先把控制权交给外层 Movie 兜底，
+		// 不在 TV 分支里先走 AI，避免无意义的 TV-AI 探测。
+		if len(results) == 0 && preferMovieFallback {
+			p.log.Info("[处理] TV 网页兜底仍未命中，且源文件更像单文件电影，跳过 TV AI 兜底并优先回退 Movie")
+			return nil, seasonNum, nil
 		}
 
 		// ── AI fallback ──────────────────────────────────────────────────────
@@ -937,14 +945,22 @@ func shouldAggressivelyFallbackToMovie(srcPath string, opts TaskOptions) bool {
 	}
 	stem := strings.TrimSuffix(filepath.Base(srcPath), filepath.Ext(srcPath))
 	parent := filepath.Base(filepath.Dir(srcPath))
-	if ep := ExtractEpisode(stem); ep.Found {
+	if regexp.MustCompile(`(?i)\bS\d{1,2}E\d{1,3}\b`).MatchString(stem) {
 		return false
 	}
-	if _, ok := ExtractSeason(stem); ok {
+	if regexp.MustCompile(`(?i)\bE(P)?\d{1,3}\b`).MatchString(stem) {
 		return false
 	}
-	if _, ok := ExtractSeason(parent); ok || IsSeasonName(parent) || isExplicitSeasonFolder(parent) {
+	if regexp.MustCompile(`第\s*(\d+|[零一二三四五六七八九十百千万]+)\s*[集话]`).MatchString(stem) {
 		return false
+	}
+	cleanTitle, year := ParseSearchName(stem)
+	if year > 0 && strings.TrimSpace(cleanTitle) != "" {
+		return true
+	}
+	parentTitle, parentYear := ParseSearchName(parent)
+	if parentYear > 0 && strings.TrimSpace(parentTitle) != "" {
+		return true
 	}
 	return looksLikeStandaloneMovie(stem, parent)
 }
