@@ -413,6 +413,16 @@ func (s *Store) loadAll() error {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		// Only load ordinary files. This avoids blocking on special files
+		// such as FIFOs, sockets, or device nodes that may exist on some NAS
+		// filesystems or after manual recovery operations.
+		if !info.Mode().IsRegular() {
+			continue
+		}
 		uuid := strings.TrimSuffix(entry.Name(), ".json")
 		path := filepath.Join(s.taskDir, entry.Name())
 
@@ -446,9 +456,7 @@ func (s *Store) loadAll() error {
 		// Python records had no "processed_at" field.
 		// Fall back to the JSON file's modification time.
 		if rec.ProcessedAt == "" {
-			if info, err2 := entry.Info(); err2 == nil {
-				rec.ProcessedAt = info.ModTime().Format(time.RFC3339[:19])
-			}
+			rec.ProcessedAt = info.ModTime().Format(time.RFC3339[:19])
 		}
 		// ─────────────────────────────────────────────────────────────────
 

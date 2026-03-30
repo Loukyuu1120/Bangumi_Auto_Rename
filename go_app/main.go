@@ -93,6 +93,7 @@ func main() {
 	log.Info("日志级别: %s", cfgSnap.LogLevel)
 
 	// ── Task store ────────────────────────────────────────────────────────────
+	log.Info("正在加载任务存储…")
 	store, err := rename.NewStore(*dataDir)
 	if err != nil {
 		log.Error("任务存储初始化失败: %v", err)
@@ -101,9 +102,11 @@ func main() {
 	log.Info("任务存储已加载，共 %d 条记录", store.Count())
 
 	// ── Rename processor ──────────────────────────────────────────────────────
+	log.Info("正在初始化重命名处理器…")
 	processor := rename.NewProcessor(cfg)
 
 	// ── Monitor service (starts background worker & stability-checker goroutines) ──
+	log.Info("正在初始化监控服务…")
 	svc := monitor.InitService(processor, store, *dataDir)
 
 	// Start file-system watchers if the feature is enabled in config
@@ -140,6 +143,7 @@ func main() {
 	}
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
+	log.Info("正在注册 Web 路由…")
 	mux := http.NewServeMux()
 	api.New(mux, cfg, store, svc, processor, *dataDir, logPath, *staticDir)
 
