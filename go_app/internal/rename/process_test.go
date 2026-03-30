@@ -141,3 +141,17 @@ func TestParseSearchNameRemovesEnglishSizeAndBilingualSubtitleNoise(t *testing.T
 		t.Fatalf("expected year 2025, got %d", year)
 	}
 }
+
+func TestShouldAggressivelyFallbackToMovieForSingleFileMovie(t *testing.T) {
+	srcPath := "/library/The.Phoencian.Scheme.2025.2160p.WEB.SDR.HEVC.DDP5.1.Atmos-TEST.strm"
+	if !shouldAggressivelyFallbackToMovie(srcPath, TaskOptions{}) {
+		t.Fatalf("expected single-file movie to prefer movie fallback")
+	}
+}
+
+func TestShouldNotAggressivelyFallbackToMovieForEpisodeFile(t *testing.T) {
+	srcPath := "/library/Show.Name.2025/Show.Name.S01E01.1080p.WEB-DL.strm"
+	if shouldAggressivelyFallbackToMovie(srcPath, TaskOptions{}) {
+		t.Fatalf("expected episode file not to prefer movie fallback")
+	}
+}

@@ -281,7 +281,11 @@ func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) e
 			return fmt.Errorf("TMDB剧集查询失败: %w", err)
 		}
 		if tv == nil {
-			p.log.Info("[处理] TV 未命中，尝试电影兜底: %q", searchName)
+			if shouldAggressivelyFallbackToMovie(srcPath, opts) {
+				p.log.Info("[处理] TV 未命中，且源文件更像单文件电影，优先走 Movie 兜底: %q", searchName)
+			} else {
+				p.log.Info("[处理] TV 未命中，尝试电影兜底: %q", searchName)
+			}
 			movie, movieErr := p.resolveMovie(tmdbClient, searchCandidates, year, tmdbID)
 			if movieErr != nil {
 				return fmt.Errorf("TMDB电影兜底查询失败: %w", movieErr)
@@ -659,20 +663,23 @@ func (p *Processor) resolveMovie(client *TMDBClient, names []string, year, force
 		err     error
 		name    string
 	)
-	for _, candidate := range names {
-		name = candidate
-		results, err = client.SearchMovie(candidate, year)
-		if err != nil {
-			return nil, err
-		}
-		if len(results) == 0 && year > 0 {
-			results, err = client.SearchMovie(candidate, 0)
-			if err != nil {
-				return nil, err
-			}
-		}
-		if len(results) > 0 {
-			break
+	results, err, name = p.searchMovieCandidates(client, names, year)
+	if err != nil {
+		return nil, err
+	}
+	if year > 0 && len(results) > 0 {
+		results = filterResultsByYear(results, year, true)
+	}
+	needsWebFallback := len(results) == 0 ||
+		(year > 0 && len(results) > 0 && !hasYearAppropriateResult(results, year, true, 1))
+	if needsWebFallback {
+		p.log.Info("[处理] Movie API搜索未找到合适年份结果 %q，尝试网页兜底搜索...", name)
+		if webResults, webErr, webName := p.searchMovieWebCandidates(client, names, year); webErr == nil && len(webResults) > 0 {
+			name = webName
+			results = webResults
+			p.log.Info("[处理] Movie 网页搜索返回 %d 条结果", len(results))
+		} else if webErr != nil {
+			p.log.Warn("[处理] Movie 网页兜底搜索失败: %v", webErr)
 		}
 	}
 	if len(results) == 0 {
@@ -852,6 +859,45 @@ func (p *Processor) resolveTV(client *TMDBClient, srcPath string, names []string
 	return detail, seasonNum, nil
 }
 
+func (p *Processor) searchMovieCandidates(client *TMDBClient, names []string, year int) ([]TMDBSearchResult, error, string) {
+	for _, candidate := range names {
+		results, err := client.SearchMovie(candidate, year)
+		if err != nil {
+			return nil, err, candidate
+		}
+		if len(results) == 0 && year > 0 {
+			results, err = client.SearchMovie(candidate, 0)
+			if err != nil {
+				return nil, err, candidate
+			}
+		}
+		if len(results) > 0 {
+			return results, nil, candidate
+		}
+	}
+	return nil, nil, firstNonEmptyString(names)
+}
+
+func (p *Processor) searchMovieWebCandidates(client *TMDBClient, names []string, year int) ([]TMDBSearchResult, error, string) {
+	for _, candidate := range names {
+		webResults, webErr := client.SearchTMDBWeb(candidate, "movie")
+		if webErr != nil {
+			return nil, webErr, candidate
+		}
+		if len(webResults) > 0 {
+			filtered := webResults
+			if year > 0 {
+				filtered = filterResultsByYear(webResults, year, true)
+				if len(filtered) == 0 {
+					filtered = webResults
+				}
+			}
+			return filtered, nil, candidate
+		}
+	}
+	return nil, nil, firstNonEmptyString(names)
+}
+
 func (p *Processor) searchTVCandidates(client *TMDBClient, names []string, year int) ([]TMDBSearchResult, error, string) {
 	for _, candidate := range names {
 		results, err := client.SearchTV(candidate, year)
@@ -883,6 +929,24 @@ func (p *Processor) searchTVWebCandidates(client *TMDBClient, names []string, ye
 		}
 	}
 	return nil, nil, firstNonEmptyString(names)
+}
+
+func shouldAggressivelyFallbackToMovie(srcPath string, opts TaskOptions) bool {
+	if opts.IsMovie != nil {
+		return *opts.IsMovie
+	}
+	stem := strings.TrimSuffix(filepath.Base(srcPath), filepath.Ext(srcPath))
+	parent := filepath.Base(filepath.Dir(srcPath))
+	if ep := ExtractEpisode(stem); ep.Found {
+		return false
+	}
+	if _, ok := ExtractSeason(stem); ok {
+		return false
+	}
+	if _, ok := ExtractSeason(parent); ok || IsSeasonName(parent) || isExplicitSeasonFolder(parent) {
+		return false
+	}
+	return looksLikeStandaloneMovie(stem, parent)
 }
 
 func buildSearchCandidates(srcPath, primary string) []string {
