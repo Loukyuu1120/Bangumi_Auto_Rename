@@ -12,6 +12,16 @@ func TestParseSearchNameStripsSingleLetterChinesePrefix(t *testing.T) {
 	}
 }
 
+func TestParseSearchNameStripsPartCollectionSuffix(t *testing.T) {
+	name, year := ParseSearchName("东岛丹三郎想成为假面骑士 Part.1+Part.2(2025-2026)4K超清2160p收藏版 24集全 内封中字")
+	if name != "东岛丹三郎想成为假面骑士" {
+		t.Fatalf("expected cleaned title 东岛丹三郎想成为假面骑士, got %q", name)
+	}
+	if year != 2025 {
+		t.Fatalf("expected year 2025, got %d", year)
+	}
+}
+
 func TestChooseSearchQueryPrefersParentForEpisodeFiles(t *testing.T) {
 	p := &Processor{}
 	srcPath := "/library/G古诺希亚(2025)4K超清2160P收藏版/GNOSIA - 08.strm"

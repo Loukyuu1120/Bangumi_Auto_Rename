@@ -289,13 +289,10 @@ func (h *Handler) handleBatchRetry(w http.ResponseWriter, r *http.Request) {
 			IsAnime:     rec.IsAnime,
 			IsMovie:     rec.IsMovie,
 			UseAI:       rec.UseAI,
-			CusName:     rec.Name,
+			CusName:     "",
 			CusTMDBID:   "",
 			CusOffset:   rec.Offset,
 			CusSeasonID: rec.SeasonID,
-		}
-		if strings.TrimSpace(rec.Name) == "" {
-			opts.CusName = ""
 		}
 
 		// Apply batch settings overrides

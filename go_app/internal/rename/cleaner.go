@@ -349,6 +349,9 @@ func ParseSearchName(input string) (string, int) {
 	clean = strings.ReplaceAll(clean, "（", " ")
 	clean = strings.ReplaceAll(clean, "）", " ")
 	clean = strings.NewReplacer(".", " ", "_", " ").Replace(clean)
+	clean = regexp.MustCompile(`(?i)\bPart\s*\d+(?:\s*\+\s*Part\s*\d+)+.*$`).ReplaceAllString(clean, " ")
+	clean = regexp.MustCompile(`(?i)\bPart\s*\d+\b`).ReplaceAllString(clean, " ")
+	clean = regexp.MustCompile(`(?i)\bPart\b\s*$`).ReplaceAllString(clean, " ")
 	clean = regexp.MustCompile(`\s+`).ReplaceAllString(clean, " ")
 	clean = strings.Trim(clean, " .-[]()（）")
 
