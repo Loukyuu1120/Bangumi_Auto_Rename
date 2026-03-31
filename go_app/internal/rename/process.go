@@ -768,6 +768,7 @@ func (p *Processor) resolveTV(client *TMDBClient, srcPath string, names []string
 			seasonNum = s
 		}
 	}
+	relaxYearFilter := shouldRelaxTVYearFilter(srcPath, name, seasonNum, opts)
 
 	var detail *TMDBTVDetail
 	var err error
@@ -792,9 +793,11 @@ func (p *Processor) resolveTV(client *TMDBClient, srcPath string, names []string
 		}
 		p.log.Info("[处理] TV API 搜索返回 %d 条结果", len(results))
 
-		if year > 0 && len(results) > 0 {
+		if year > 0 && len(results) > 0 && !relaxYearFilter {
 			results = filterResultsByYear(results, year, false)
 			p.log.Info("[处理] 年份过滤后剩余 %d 条 TV 结果", len(results))
+		} else if year > 0 && len(results) > 0 && relaxYearFilter {
+			p.log.Info("[处理] 检测到续作/非首季内容，跳过 TV 年份过滤")
 		}
 
 		// ── Web-scraping fallback (mirrors Python's _search_tmdb_web) ────────
@@ -807,7 +810,7 @@ func (p *Processor) resolveTV(client *TMDBClient, srcPath string, names []string
 		//      candidates are anywhere near the target year, so we must not
 		//      accept them without first trying the web search.
 		needsWebFallback := len(results) == 0 ||
-			(year > 0 && len(results) > 0 && !hasYearAppropriateResult(results, year, false, 3))
+			(year > 0 && !relaxYearFilter && len(results) > 0 && !hasYearAppropriateResult(results, year, false, 3))
 		p.log.Info("[处理] TV 网页兜底判定: needsWebFallback=%v", needsWebFallback)
 
 		if needsWebFallback {
@@ -816,7 +819,7 @@ func (p *Processor) resolveTV(client *TMDBClient, srcPath string, names []string
 				name = webName
 				p.log.Info("[处理] 网页搜索返回 %d 条结果", len(webResults))
 				filtered := webResults
-				if year > 0 {
+				if year > 0 && !relaxYearFilter {
 					filtered = filterResultsByYear(webResults, year, false)
 					if len(filtered) == 0 {
 						filtered = webResults // keep unfiltered web results rather than nothing
@@ -886,7 +889,7 @@ func (p *Processor) resolveTV(client *TMDBClient, srcPath string, names []string
 	//   • Multi-season shows (S1 aired years ago) are not rejected.
 	//   • Shows whose TMDB first_air_date differs slightly from the filename
 	//     year (e.g. cross-year premiere) are not dropped.
-	if detail != nil && year > 0 && len(detail.FirstAirDate) >= 4 {
+	if detail != nil && year > 0 && forceID <= 0 && !relaxYearFilter && len(detail.FirstAirDate) >= 4 {
 		if y, err := strconv.Atoi(detail.FirstAirDate[:4]); err == nil {
 			if y > 0 && absInt(y-year) > 3 {
 				p.log.Warn("[处理] 年份差异过大 (TMDB=%d, 文件=%d)，跳过: %s", y, year, detail.Name)
@@ -994,6 +997,34 @@ func shouldAggressivelyFallbackToMovie(srcPath string, opts TaskOptions) bool {
 		return true
 	}
 	return looksLikeStandaloneMovie(stem, parent)
+}
+
+func shouldRelaxTVYearFilter(srcPath, name string, seasonNum int, opts TaskOptions) bool {
+	if opts.CusSeasonID != nil && *opts.CusSeasonID > 1 {
+		return true
+	}
+	if seasonNum > 1 {
+		return true
+	}
+	targets := []string{
+		name,
+		filepath.Base(srcPath),
+		filepath.Base(filepath.Dir(srcPath)),
+	}
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)\bS(?:eason)?\s*([2-9]|\d{2,})\b`),
+		regexp.MustCompile(`(?i)\bPart\s*([2-9]|\d{2,})\b`),
+		regexp.MustCompile(`第\s*([二三四五六七八九十百千万两\d]+)\s*[季部篇期]`),
+		regexp.MustCompile(`(?i)(?:续作|第二部|第三部|第四部|第五部|第六部|第二季|第三季|第四季|第五季|第六季)`),
+	}
+	for _, target := range targets {
+		for _, re := range patterns {
+			if re.MatchString(target) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func buildSearchCandidates(srcPath, primary string) []string {

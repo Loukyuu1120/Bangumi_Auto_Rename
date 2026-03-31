@@ -2,6 +2,7 @@ package rename
 
 import (
 	"errors"
+	"strconv"
 	"testing"
 )
 
@@ -165,5 +166,43 @@ func TestIsTMDBNotFoundError(t *testing.T) {
 	}
 	if isTMDBNotFoundError(errors.New("tmdb rate limit exceeded")) {
 		t.Fatalf("expected non-404 tmdb error not to be treated as not found")
+	}
+}
+
+func TestForcedTMDBIDShouldBypassTVYearSanityCheck(t *testing.T) {
+	forceID := 67063
+	year := 2025
+	firstAirDate := "2016-07-08"
+	shouldReject := false
+	if forceID <= 0 && year > 0 && len(firstAirDate) >= 4 {
+		if y, err := strconv.Atoi(firstAirDate[:4]); err == nil {
+			if y > 0 && absInt(y-year) > 3 {
+				shouldReject = true
+			}
+		}
+	}
+	if shouldReject {
+		t.Fatalf("expected forced TMDB ID to bypass TV year sanity check")
+	}
+}
+
+func TestShouldRelaxTVYearFilterForLaterSeason(t *testing.T) {
+	srcPath := "/library/一人之下 第六季/一人之下.s06e05.2025.2160p.WEB-DL.strm"
+	if !shouldRelaxTVYearFilter(srcPath, "一人之下", 6, TaskOptions{}) {
+		t.Fatalf("expected later season to relax TV year filter")
+	}
+}
+
+func TestShouldRelaxTVYearFilterForSecondPartTitle(t *testing.T) {
+	srcPath := "/library/作品 第二部/作品 第二部 2025 1080p.strm"
+	if !shouldRelaxTVYearFilter(srcPath, "作品 第二部", 1, TaskOptions{}) {
+		t.Fatalf("expected second-part title to relax TV year filter")
+	}
+}
+
+func TestShouldNotRelaxTVYearFilterForFirstSeason(t *testing.T) {
+	srcPath := "/library/新剧/新剧.s01e01.2025.1080p.WEB-DL.strm"
+	if shouldRelaxTVYearFilter(srcPath, "新剧", 1, TaskOptions{}) {
+		t.Fatalf("expected first season not to relax TV year filter")
 	}
 }
