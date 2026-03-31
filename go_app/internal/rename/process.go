@@ -236,7 +236,7 @@ func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) e
 	p.log.Info("[处理] 搜索词: %q  年份: %d  动画: %v  电影: %v", searchName, year, isAnime, isMovie)
 
 	// ── 3. Determine target root directory ────────────────────────────────────
-	targetRoot := p.targetRootDir(cfg, isAnime, isMovie)
+	targetRoot := p.targetRootDir(cfg, isAnime, isMovie, opts.ConfigOverrides)
 	if targetRoot == "" {
 		return fmt.Errorf("目标目录未配置 (is_anime=%v, is_movie=%v)", isAnime, isMovie)
 	}
@@ -305,7 +305,7 @@ func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) e
 			}
 			tmdbResult = movie
 			rec.TMDBID = strconv.Itoa(tmdbID)
-			targetRoot = p.targetRootDir(cfg, isAnime, isMovie)
+			targetRoot = p.targetRootDir(cfg, isAnime, isMovie, opts.ConfigOverrides)
 			if targetRoot == "" {
 				return fmt.Errorf("目标目录未配置 (is_anime=%v, is_movie=%v)", isAnime, isMovie)
 			}
@@ -627,7 +627,18 @@ func looksLikeStandaloneMovie(stem, parent string) bool {
 // Target directory selection
 // ─────────────────────────────────────────────────────────────────────────────
 
-func (p *Processor) targetRootDir(cfg config.Config, isAnime, isMovie bool) string {
+func (p *Processor) targetRootDir(cfg config.Config, isAnime, isMovie bool, overrides map[string]interface{}) string {
+	if overrides != nil {
+		if isMovie {
+			if v, ok := overrides["target_movie_dir"].(string); ok && strings.TrimSpace(v) != "" {
+				return strings.TrimSpace(v)
+			}
+		} else {
+			if v, ok := overrides["target_tv_dir"].(string); ok && strings.TrimSpace(v) != "" {
+				return strings.TrimSpace(v)
+			}
+		}
+	}
 	switch {
 	case isAnime && isMovie:
 		if cfg.AnimeMoviePath != "" {

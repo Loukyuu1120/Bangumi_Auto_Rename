@@ -1034,6 +1034,8 @@ function renderMonitorPaths(val) {
               : null,
         tv_rename_format: item.tv_rename_format || "",
         movie_rename_format: item.movie_rename_format || "",
+        target_tv_dir: item.target_tv_dir || "",
+        target_movie_dir: item.target_movie_dir || "",
         mode: item.mode || "",
         overwrite_mode: item.overwrite_mode || "",
         monitor_mode: item.monitor_mode || "",
@@ -1097,6 +1099,12 @@ function renderMonitorPathItems(paths) {
       const movieTplBadge = p.movie_rename_format
         ? '<span style="background:#fee2e2;color:#b91c1c;padding:1px 6px;border-radius:9999px;font-size:10px;margin-left:6px;">Movie 模板</span>'
         : "";
+      const tvDirBadge = p.target_tv_dir
+        ? '<span style="background:#dbeafe;color:#1d4ed8;padding:1px 6px;border-radius:9999px;font-size:10px;margin-left:6px;">TV 目录</span>'
+        : "";
+      const movieDirBadge = p.target_movie_dir
+        ? '<span style="background:#fee2e2;color:#be123c;padding:1px 6px;border-radius:9999px;font-size:10px;margin-left:6px;">Movie 目录</span>'
+        : "";
       const monitorModeBadge = p.monitor_mode
         ? `<span style="background:#ede9fe;color:#6d28d9;padding:1px 6px;border-radius:9999px;font-size:10px;margin-left:6px;">${escHtml(p.monitor_mode)}</span>`
         : "";
@@ -1114,7 +1122,7 @@ function renderMonitorPathItems(paths) {
         : "";
       return `<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:#f9fafb;border-radius:8px;margin-bottom:4px;">
       <span style="font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escHtml(p.path)}">📁 ${escHtml(p.path)}</span>
-      ${animeBadge}${movieBadge}${tvBadge}${movieTplBadge}${monitorModeBadge}${recognitionBadge}${scrapeLangBadge}
+      ${animeBadge}${movieBadge}${tvBadge}${movieTplBadge}${tvDirBadge}${movieDirBadge}${monitorModeBadge}${recognitionBadge}${scrapeLangBadge}
       <button class="btn-outline" style="padding:2px 8px;font-size:11px;flex-shrink:0;" onclick="openMonitorPathEditor(${i})">配置</button>
       <button class="btn-outline" style="padding:2px 8px;font-size:11px;color:#dc2626;border-color:#dc2626;flex-shrink:0;" onclick="removeMonitorPath(${i})">✕</button>
     </div>`;
@@ -1140,6 +1148,8 @@ function addMonitorPath() {
     is_movie: null,
     tv_rename_format: "",
     movie_rename_format: "",
+    target_tv_dir: "",
+    target_movie_dir: "",
     mode: "",
     overwrite_mode: "",
     monitor_mode: modeSelect.value || "",
@@ -1176,6 +1186,10 @@ function openMonitorPathEditor(idx) {
     p.tv_rename_format || "";
   document.getElementById("monitorPathMovieTemplate").value =
     p.movie_rename_format || "";
+  document.getElementById("monitorPathTargetTvDir").value =
+    p.target_tv_dir || "";
+  document.getElementById("monitorPathTargetMovieDir").value =
+    p.target_movie_dir || "";
   document.getElementById("monitorPathMode").value = p.mode || "";
   document.getElementById("monitorPathOverwrite").value =
     p.overwrite_mode || "";
@@ -1203,6 +1217,12 @@ function saveMonitorPathEditor() {
   const movieFormat = document
     .getElementById("monitorPathMovieTemplate")
     .value.trim();
+  const targetTvDir = document
+    .getElementById("monitorPathTargetTvDir")
+    .value.trim();
+  const targetMovieDir = document
+    .getElementById("monitorPathTargetMovieDir")
+    .value.trim();
   const mode = document.getElementById("monitorPathMode").value;
   const overwrite = document.getElementById("monitorPathOverwrite").value;
   const monitorMode = document.getElementById("monitorPathMonitorMode").value;
@@ -1214,6 +1234,8 @@ function saveMonitorPathEditor() {
   p.is_movie = movieVal === "true" ? true : movieVal === "false" ? false : null;
   p.tv_rename_format = tvFormat;
   p.movie_rename_format = movieFormat;
+  p.target_tv_dir = targetTvDir;
+  p.target_movie_dir = targetMovieDir;
   p.mode = mode;
   p.overwrite_mode = overwrite;
   p.monitor_mode = monitorMode;
@@ -1458,6 +1480,8 @@ function collectFriendlyValue(key) {
         p.is_movie !== null ||
         (p.tv_rename_format && p.tv_rename_format.trim() !== "") ||
         (p.movie_rename_format && p.movie_rename_format.trim() !== "") ||
+        (p.target_tv_dir && p.target_tv_dir.trim() !== "") ||
+        (p.target_movie_dir && p.target_movie_dir.trim() !== "") ||
         (p.mode && p.mode.trim() !== "") ||
         (p.overwrite_mode && p.overwrite_mode.trim() !== "") ||
         (p.monitor_mode && p.monitor_mode.trim() !== "") ||
@@ -1472,6 +1496,10 @@ function collectFriendlyValue(key) {
         entry.tv_rename_format = p.tv_rename_format.trim();
       if (p.movie_rename_format && p.movie_rename_format.trim() !== "")
         entry.movie_rename_format = p.movie_rename_format.trim();
+      if (p.target_tv_dir && p.target_tv_dir.trim() !== "")
+        entry.target_tv_dir = p.target_tv_dir.trim();
+      if (p.target_movie_dir && p.target_movie_dir.trim() !== "")
+        entry.target_movie_dir = p.target_movie_dir.trim();
       if (p.mode && p.mode.trim() !== "") entry.mode = p.mode.trim();
       if (p.overwrite_mode && p.overwrite_mode.trim() !== "")
         entry.overwrite_mode = p.overwrite_mode.trim();
