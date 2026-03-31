@@ -187,13 +187,37 @@ func (p *Processor) process(srcPath string, opts TaskOptions, rec *TaskRecord) e
 	// If TMDB ID is provided, infer movie vs TV by querying TMDB directly.
 	if opts.CusTMDBID != "" {
 		if id, err := strconv.Atoi(opts.CusTMDBID); err == nil && id > 0 {
-			if movie, err := tmdbClient.GetMovieDetail(id, "external_ids"); err == nil && movie != nil {
+			movie, movieErr := tmdbClient.GetMovieDetail(id, "external_ids")
+			if movieErr != nil && isTMDBNotFoundError(movieErr) {
+				movie = nil
+				movieErr = nil
+			}
+			tv, tvErr := tmdbClient.GetTVDetail(id, "external_ids")
+			if tvErr != nil && isTMDBNotFoundError(tvErr) {
+				tv = nil
+				tvErr = nil
+			}
+
+			if movie != nil && tv == nil {
 				b := true
 				opts.IsMovie = &b
-			} else if tv, err := tmdbClient.GetTVDetail(id, "external_ids"); err == nil && tv != nil {
+			} else if tv != nil && movie == nil {
 				b := false
 				opts.IsMovie = &b
-			} else if opts.IsMovie == nil && opts.IsAnime == nil {
+			} else if movie != nil && tv != nil {
+				queryName, queryYear := p.chooseSearchQuery(srcPath, opts, nil)
+				p.log.Info("[处理] 强制 TMDB ID 双命中: query=%q movie=%q tv=%q", queryName, preferredMovieTitle(movie), preferredTVTitle(tv))
+				mediaType, decidedBy := p.chooseForcedTMDBMediaType(queryName, queryYear, movie, tv)
+				if mediaType == "movie" {
+					b := true
+					opts.IsMovie = &b
+					p.log.Info("[处理] 强制 TMDB ID 同时命中电影/剧集，判定为 Movie: %d (by=%s)", id, decidedBy)
+				} else {
+					b := false
+					opts.IsMovie = &b
+					p.log.Info("[处理] 强制 TMDB ID 同时命中电影/剧集，判定为 TV: %d (by=%s)", id, decidedBy)
+				}
+			} else if opts.IsMovie == nil && opts.IsAnime == nil && movieErr == nil && tvErr == nil {
 				// Fallback heuristic when TMDB lookup fails
 				stem := strings.TrimSuffix(filepath.Base(srcPath), filepath.Ext(srcPath))
 				ep := ExtractEpisode(stem)
@@ -426,6 +450,9 @@ func (p *Processor) detectMediaType(srcPath string, opts TaskOptions) (isAnime b
 	}
 	if opts.IsAnime != nil {
 		isAnime = *opts.IsAnime
+	}
+	if opts.IsMovie != nil {
+		return isAnime, isMovie
 	}
 	// If unspecified, infer TV when episode markers exist.
 	stem := strings.TrimSuffix(filepath.Base(srcPath), filepath.Ext(srcPath))
@@ -748,6 +775,87 @@ func isTMDBNotFoundError(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "returned 404") ||
 		strings.Contains(msg, "resource you requested could not be found")
+}
+
+func (p *Processor) chooseForcedTMDBMediaType(query string, year int, movie *TMDBMovieDetail, tv *TMDBTVDetail) (string, string) {
+	if movie == nil && tv == nil {
+		return "", "none"
+	}
+	if movie != nil && tv == nil {
+		return "movie", "single"
+	}
+	if tv != nil && movie == nil {
+		return "tv", "single"
+	}
+
+	movieTitle := preferredMovieTitle(movie)
+	tvTitle := preferredTVTitle(tv)
+	movieScore := titleSimilarityScore(query, movieTitle)
+	tvScore := titleSimilarityScore(query, tvTitle)
+
+	// When the titles are ambiguous / don't line up cleanly, prefer AI.
+	if p.ai != nil && p.ai.IsAvailable() && !titlesClearlyMatch(query, movieTitle) && !titlesClearlyMatch(query, tvTitle) {
+		p.log.Info("[处理] 强制 TMDB ID 双命中且名称均不贴合文件名，交由 AI 判定类型: query=%q movie=%q tv=%q", query, movieTitle, tvTitle)
+		choice := p.ai.SelectTMDBMediaType(query, year, map[string]interface{}{
+			"title":          movie.Title,
+			"original_title": movie.OriginalTitle,
+			"release_date":   movie.ReleaseDate,
+			"overview":       movie.Overview,
+		}, map[string]interface{}{
+			"name":           tv.Name,
+			"original_name":  tv.OriginalName,
+			"first_air_date": tv.FirstAirDate,
+			"overview":       tv.Overview,
+		})
+		if choice == "movie" || choice == "tv" {
+			return choice, "ai"
+		}
+	}
+
+	if movieScore >= tvScore {
+		return "movie", "rule"
+	}
+	return "tv", "rule"
+}
+
+func titlesClearlyMatch(query, title string) bool {
+	return titleSimilarityScore(query, title) >= 0.85
+}
+
+func titleSimilarityScore(query, title string) float64 {
+	query = normalizeTitleForMatch(query)
+	title = normalizeTitleForMatch(title)
+	if query == "" || title == "" {
+		return 0
+	}
+	if query == title {
+		return 1
+	}
+	if strings.Contains(title, query) || strings.Contains(query, title) {
+		return 0.9
+	}
+	qWords := strings.Fields(query)
+	tWords := strings.Fields(title)
+	if len(qWords) == 0 || len(tWords) == 0 {
+		return 0
+	}
+	overlap := wordOverlap(qWords, tWords)
+	denominator := len(qWords)
+	if len(tWords) > denominator {
+		denominator = len(tWords)
+	}
+	return float64(overlap) / float64(denominator)
+}
+
+func normalizeTitleForMatch(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	v = strings.ToLower(v)
+	v = strings.NewReplacer("：", " ", ":", " ", "（", " ", "）", " ", ".", " ", "_", " ", "-", " ").Replace(v)
+	v = regexp.MustCompile(`\s+`).ReplaceAllString(v, " ")
+	return strings.TrimSpace(v)
 }
 
 func (p *Processor) resolveTV(client *TMDBClient, srcPath string, names []string, year, forceID int, opts TaskOptions) (*TMDBTVDetail, int, error) {

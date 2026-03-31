@@ -103,6 +103,17 @@ func TestDetectMediaTypeTreatsYearBasedSingleFileAsMovie(t *testing.T) {
 	}
 }
 
+func TestDetectMediaTypeRespectsExplicitMovieOverride(t *testing.T) {
+	p := &Processor{}
+	srcPath := "/library/指环王3：王者无敌.2003.2160p.PROPER.REMUX.HEVC.DTS-HD.MA.TrueHD.7.1.Atmos.[tmdbid=122].strm"
+	explicitMovie := true
+
+	_, isMovie := p.detectMediaType(srcPath, TaskOptions{IsMovie: &explicitMovie})
+	if !isMovie {
+		t.Fatalf("expected explicit movie override to win over heuristic TV detection")
+	}
+}
+
 func TestBuildSearchCandidatesSplitsChineseAndEnglishTitleSegments(t *testing.T) {
 	srcPath := "/library/冲出宁静号.Serenity.2005.Open.Matte.1080p.WEB-DL/Serenity.2005.Open.Matte.1080p.WEB-DL.strm"
 	got := buildSearchCandidates(srcPath, "Serenity")
@@ -204,5 +215,16 @@ func TestShouldNotRelaxTVYearFilterForFirstSeason(t *testing.T) {
 	srcPath := "/library/新剧/新剧.s01e01.2025.1080p.WEB-DL.strm"
 	if shouldRelaxTVYearFilter(srcPath, "新剧", 1, TaskOptions{}) {
 		t.Fatalf("expected first season not to relax TV year filter")
+	}
+}
+
+func TestChooseForcedTMDBMediaTypePrefersMovieWhenMovieTitleMatchesBetter(t *testing.T) {
+	p := &Processor{}
+	movie := &TMDBMovieDetail{Title: "指环王：王者无敌", OriginalTitle: "The Lord of the Rings: The Return of the King"}
+	tv := &TMDBTVDetail{Name: "亚当亚当特历险记", OriginalName: "The Adventures of Sir Prancelot"}
+
+	got, _ := p.chooseForcedTMDBMediaType("指环王3 王者无敌", 2003, movie, tv)
+	if got != "movie" {
+		t.Fatalf("expected movie, got %q", got)
 	}
 }

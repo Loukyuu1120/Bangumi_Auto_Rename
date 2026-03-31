@@ -151,6 +151,49 @@ func (c *Client) SelectBestTMDBMatch(query string, year int, candidates []map[st
 	return idx - 1
 }
 
+// SelectTMDBMediaType asks the AI to choose whether a forced TMDB ID should be
+// treated as a movie or a TV show when both endpoints return valid records.
+// Returns "movie", "tv", or "" when undecided/unavailable.
+func (c *Client) SelectTMDBMediaType(query string, year int, movieCandidate, tvCandidate map[string]interface{}) string {
+	if !c.IsAvailable() {
+		return ""
+	}
+
+	yearHint := ""
+	if year > 0 {
+		yearHint = fmt.Sprintf(" (%d)", year)
+	}
+
+	prompt := fmt.Sprintf(
+		"你要判断同一个 TMDB ID 应该按电影还是电视剧处理。\n原始搜索词: %s%s\n\n候选A 电影:\n标题:%v\n原标题:%v\n年份:%v\n简介:%v\n\n候选B 电视剧:\n名称:%v\n原名:%v\n首播年份:%v\n简介:%v\n\n只返回 movie 或 tv，不要返回其他文字。",
+		query,
+		yearHint,
+		movieCandidate["title"],
+		movieCandidate["original_title"],
+		firstChars(fmt.Sprintf("%v", movieCandidate["release_date"]), 4),
+		firstChars(fmt.Sprintf("%v", movieCandidate["overview"]), 150),
+		tvCandidate["name"],
+		tvCandidate["original_name"],
+		firstChars(fmt.Sprintf("%v", tvCandidate["first_air_date"]), 4),
+		firstChars(fmt.Sprintf("%v", tvCandidate["overview"]), 150),
+	)
+
+	resp, err := c.chatComplete("你是一个媒体类型判断助手，只输出 movie 或 tv。", prompt, 0.1)
+	if err != nil {
+		logger.Warn("[AI辅助] 类型判定失败: %v", err)
+		return ""
+	}
+
+	switch strings.TrimSpace(strings.ToLower(resp)) {
+	case "movie":
+		return "movie"
+	case "tv":
+		return "tv"
+	default:
+		return ""
+	}
+}
+
 // AnalyzeMetadata infers name/year/type from path and file context.
 func (c *Client) AnalyzeMetadata(contextData map[string]interface{}) *MetadataResult {
 	if !c.IsAvailable() {
