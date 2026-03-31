@@ -828,7 +828,10 @@ func (h *Handler) handleFileBrowser(w http.ResponseWriter, r *http.Request) {
 		// Default to docker mount or root
 		cfg := h.cfg.GetConfig()
 		if cfg.DockerMnt != "" {
-			dir = cfg.DockerMnt
+			mounts := config.FirstDockerMount(cfg.DockerMnt)
+			if mounts != "" {
+				dir = mounts
+			}
 		} else {
 			dir = "/"
 		}

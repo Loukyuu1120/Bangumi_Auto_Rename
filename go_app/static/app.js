@@ -781,6 +781,7 @@ const CONFIG_FRIENDLY_KEYS = new Set([
   "secondary_rules",
   "title_languages",
   "overview_languages",
+  "docker_mnt",
   "monitor_paths",
   "monitor_exclude_dirs",
 ]);
@@ -958,6 +959,13 @@ function renderFriendlyConfig(key, val) {
       toStringArray(val),
       "一行一个语言代码，按优先级排序，例如 zh-CN\nen-US",
     );
+  if (key === "docker_mnt")
+    return renderMultilineTextEditor(
+      key,
+      toDockerMountArray(val),
+      "一行一个挂载路径，例如 /media\n/media2",
+      "一行一个 Docker 挂载路径，文件浏览器默认使用第一条有效路径。",
+    );
   if (key === "monitor_paths") return renderMonitorPaths(val);
   if (key === "monitor_exclude_dirs")
     return renderMultilineTextEditor(
@@ -987,6 +995,17 @@ function toStringArray(val) {
     }
   }
   return [];
+}
+
+function toDockerMountArray(val) {
+  if (!val) return [];
+  if (typeof val === "string") {
+    return val
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+  }
+  return toStringArray(val);
 }
 
 function renderCheckboxList(key, options, selected) {
@@ -1260,11 +1279,11 @@ function renderStringListEditor(key, items, placeholder) {
   </div>`;
 }
 
-function renderMultilineTextEditor(key, items, placeholder) {
+function renderMultilineTextEditor(key, items, placeholder, hint) {
   const value = (items || []).join("\n");
   return `<div id="cfg_${key}">
     <textarea id="${key}_textarea" rows="8" style="resize:vertical;font-family:monospace;font-size:12px;line-height:1.6;" placeholder="${escHtml(placeholder)}">${escHtml(value)}</textarea>
-    <div style="margin-top:6px;font-size:11px;color:#9ca3af;">一行一条规则，留空行会自动忽略。</div>
+    <div style="margin-top:6px;font-size:11px;color:#9ca3af;">${escHtml(hint || "一行一条规则，留空行会自动忽略。")}</div>
   </div>`;
 }
 
@@ -1520,6 +1539,15 @@ function collectFriendlyValue(key) {
       .split("\n")
       .map((line) => line.trim())
       .filter(Boolean);
+  }
+  if (key === "docker_mnt") {
+    const textarea = document.getElementById(`${key}_textarea`);
+    if (!textarea) return "";
+    return textarea.value
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .join("\n");
   }
   if (key === "monitor_exclude_dirs") {
     const textarea = document.getElementById(`${key}_textarea`);

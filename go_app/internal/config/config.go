@@ -322,6 +322,27 @@ func parseStringList(raw interface{}) []string {
 	return result
 }
 
+func parseDockerMounts(raw string) []string {
+	lines := strings.Split(raw, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+func FirstDockerMount(raw string) string {
+	mounts := parseDockerMounts(raw)
+	if len(mounts) == 0 {
+		return ""
+	}
+	return mounts[0]
+}
+
 func normalizeURL(raw string) string {
 	if raw == "" {
 		return raw
