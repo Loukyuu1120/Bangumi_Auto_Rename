@@ -1,6 +1,9 @@
 package rename
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestParseSearchNameStripsSingleLetterChinesePrefix(t *testing.T) {
 	name, year := ParseSearchName("G古诺希亚(2025)4K超清2160P收藏版")
@@ -153,5 +156,14 @@ func TestShouldNotAggressivelyFallbackToMovieForEpisodeFile(t *testing.T) {
 	srcPath := "/library/Show.Name.2025/Show.Name.S01E01.1080p.WEB-DL.strm"
 	if shouldAggressivelyFallbackToMovie(srcPath, TaskOptions{}) {
 		t.Fatalf("expected episode file not to prefer movie fallback")
+	}
+}
+
+func TestIsTMDBNotFoundError(t *testing.T) {
+	if !isTMDBNotFoundError(errors.New("tmdb /tv/1084242 returned 404: The resource you requested could not be found.")) {
+		t.Fatalf("expected 404 tmdb error to be treated as not found")
+	}
+	if isTMDBNotFoundError(errors.New("tmdb rate limit exceeded")) {
+		t.Fatalf("expected non-404 tmdb error not to be treated as not found")
 	}
 }

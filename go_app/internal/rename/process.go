@@ -655,7 +655,14 @@ func (p *Processor) targetRootDir(cfg config.Config, isAnime, isMovie bool) stri
 
 func (p *Processor) resolveMovie(client *TMDBClient, names []string, year, forceID int) (*TMDBMovieDetail, error) {
 	if forceID > 0 {
-		return client.GetMovieDetail(forceID, "credits,external_ids,release_dates,images")
+		detail, err := client.GetMovieDetail(forceID, "credits,external_ids,release_dates,images")
+		if err != nil {
+			if isTMDBNotFoundError(err) {
+				return nil, nil
+			}
+			return nil, err
+		}
+		return detail, nil
 	}
 
 	var (
@@ -723,6 +730,15 @@ func absInt(v int) int {
 	return v
 }
 
+func isTMDBNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "returned 404") ||
+		strings.Contains(msg, "resource you requested could not be found")
+}
+
 func (p *Processor) resolveTV(client *TMDBClient, srcPath string, names []string, year, forceID int, opts TaskOptions) (*TMDBTVDetail, int, error) {
 	name := firstNonEmptyString(names)
 	p.log.Info("[处理] resolveTV: name=%q year=%d forceID=%d cusName=%q cusTMDBID=%q", name, year, forceID, opts.CusName, opts.CusTMDBID)
@@ -749,6 +765,10 @@ func (p *Processor) resolveTV(client *TMDBClient, srcPath string, names []string
 		p.log.Info("[处理] 跳过 TV 搜索，直接使用强制 TMDB ID 获取详情: %d", forceID)
 		detail, err = client.GetTVDetail(forceID, "credits,external_ids,content_ratings,images")
 		if err != nil {
+			if isTMDBNotFoundError(err) {
+				p.log.Info("[处理] 强制 TMDB ID=%d 未命中 TV，交由外层继续尝试 Movie", forceID)
+				return nil, seasonNum, nil
+			}
 			return nil, seasonNum, err
 		}
 	} else {
