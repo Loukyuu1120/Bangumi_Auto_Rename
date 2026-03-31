@@ -405,62 +405,84 @@ func (s *Store) HasSavedQueue() bool {
 // It also performs an in-memory migration for records produced by the
 // Python version of the application, which used a different schema.
 func (s *Store) loadAll() error {
-	entries, err := os.ReadDir(s.taskDir)
+	dir, err := os.Open(s.taskDir)
 	if err != nil {
 		return err
 	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		info, err := entry.Info()
+	defer dir.Close()
+
+	for {
+		entries, err := dir.ReadDir(256)
 		if err != nil {
-			continue
-		}
-		// Only load ordinary files. This avoids blocking on special files
-		// such as FIFOs, sockets, or device nodes that may exist on some NAS
-		// filesystems or after manual recovery operations.
-		if !info.Mode().IsRegular() {
-			continue
-		}
-		uuid := strings.TrimSuffix(entry.Name(), ".json")
-		path := filepath.Join(s.taskDir, entry.Name())
-
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		var rec TaskRecord
-		if err := json.Unmarshal(data, &rec); err != nil {
-			continue
-		}
-		if rec.UUID == "" {
-			rec.UUID = uuid
-		}
-
-		// ── Migrate Python-format records ────────────────────────────────
-		// Python stored a single "target_path" string; normalise to slice.
-		if rec.TargetPath != "" && len(rec.TargetPaths) == 0 {
-			rec.TargetPaths = []string{rec.TargetPath}
-		}
-
-		// Python records had no "status" field.  Infer it from available data.
-		if rec.Status == "" {
-			if len(rec.TargetPaths) > 0 || rec.TargetPath != "" {
-				rec.Status = StatusSuccess
-			} else {
-				rec.Status = StatusFailed
+			if len(entries) == 0 {
+				break
 			}
 		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+				continue
+			}
 
-		// Python records had no "processed_at" field.
-		// Fall back to the JSON file's modification time.
-		if rec.ProcessedAt == "" {
-			rec.ProcessedAt = info.ModTime().Format(time.RFC3339[:19])
+			path := filepath.Join(s.taskDir, entry.Name())
+			fileMode := entry.Type()
+			var modTime time.Time
+
+			// Prefer DirEntry.Type to avoid an extra stat for every file on NAS /
+			// Docker-mounted filesystems. Only fall back to Lstat when the type is unknown.
+			if fileMode != 0 {
+				if !fileMode.IsRegular() {
+					continue
+				}
+			} else {
+				info, statErr := os.Lstat(path)
+				if statErr != nil || !info.Mode().IsRegular() {
+					continue
+				}
+				modTime = info.ModTime()
+			}
+
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				continue
+			}
+			var rec TaskRecord
+			if err := json.Unmarshal(data, &rec); err != nil {
+				continue
+			}
+
+			uuid := strings.TrimSuffix(entry.Name(), ".json")
+			if rec.UUID == "" {
+				rec.UUID = uuid
+			}
+
+			// ── Migrate Python-format records ────────────────────────────────
+			if rec.TargetPath != "" && len(rec.TargetPaths) == 0 {
+				rec.TargetPaths = []string{rec.TargetPath}
+			}
+			if rec.Status == "" {
+				if len(rec.TargetPaths) > 0 || rec.TargetPath != "" {
+					rec.Status = StatusSuccess
+				} else {
+					rec.Status = StatusFailed
+				}
+			}
+			if rec.ProcessedAt == "" {
+				if modTime.IsZero() {
+					if info, statErr := os.Stat(path); statErr == nil {
+						modTime = info.ModTime()
+					}
+				}
+				if !modTime.IsZero() {
+					rec.ProcessedAt = modTime.Format(time.RFC3339[:19])
+				}
+			}
+			// ─────────────────────────────────────────────────────────────────
+
+			s.cache[uuid] = &rec
 		}
-		// ─────────────────────────────────────────────────────────────────
-
-		s.cache[uuid] = &rec
+		if err != nil {
+			break
+		}
 	}
 	return nil
 }
